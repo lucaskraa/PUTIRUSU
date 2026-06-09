@@ -1,1 +1,234 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PUTIRUS - Russo com IA</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div id="welcome-screen" class="welcome-screen">
+        <div class="flag-bar">
+            <span></span>
+            <span></span>
+            <span></span>
+        </div>
+        <div class="welcome-card">
+            <div class="logo-mark">П</div>
+            <p class="eyebrow">Aprenda russo do zero</p>
+            <h1>PUTIRUS</h1>
+            <p class="welcome-text">Treine vocabulário, áudio, frases, conversação com IA, quizzes e pronúncia em uma experiência completa.</p>
+            <div class="welcome-actions">
+                <button id="start-app-btn">Começar agora</button>
+                <button id="demo-audio-btn" class="ghost-btn">Ouvir exemplo</button>
+            </div>
+            <p class="mini-note">Привет! Добро пожаловать!</p>
+        </div>
+    </div>
 
+    <div id="app" class="app-shell hidden-app">
+        <aside class="sidebar">
+            <div class="brand">
+                <div class="brand-icon">П</div>
+                <div>
+                    <strong>PUTIRUS</strong>
+                    <small>Russo com IA</small>
+                </div>
+            </div>
+            <nav class="menu" aria-label="Navegação principal">
+                <button class="nav-btn active" data-section="home">Início</button>
+                <button class="nav-btn" data-section="alphabet">Alfabeto</button>
+                <button class="nav-btn" data-section="vocabulary">Vocabulário</button>
+                <button class="nav-btn" data-section="pronunciation">Pronúncia</button>
+                <button class="nav-btn" data-section="ai">IA Conversa</button>
+                <button class="nav-btn" data-section="lessons">Lições</button>
+                <button class="nav-btn" data-section="grammar">Gramática</button>
+                <button class="nav-btn" data-section="phrases">Frases</button>
+                <button class="nav-btn" data-section="culture">Cultura</button>
+                <button class="nav-btn" data-section="profile">Perfil</button>
+            </nav>
+        </aside>
+
+        <main class="main-content">
+            <header class="topbar">
+                <div>
+                    <p class="eyebrow">Bem-vindo de volta</p>
+                    <h2 id="page-title">Início</h2>
+                </div>
+                <div class="status-grid">
+                    <div class="status-pill"><span id="streak">0</span><small>dias</small></div>
+                    <div class="status-pill"><span id="xp">0</span><small>XP</small></div>
+                    <div class="status-pill"><span id="level">1</span><small>nível</small></div>
+                    <div class="status-pill hearts" id="hearts">❤️❤️❤️❤️❤️</div>
+                </div>
+            </header>
+
+            <section id="home" class="page-section active-section">
+                <div class="hero-card">
+                    <div>
+                        <p class="eyebrow">Plano diário</p>
+                        <h1>Fale russo aos poucos, todo dia.</h1>
+                        <p>Ouça, repita, escreva e converse com a IA. O app salva seu progresso no navegador e também pode enviar dados para o backend.</p>
+                        <div class="hero-actions">
+                            <button data-go="ai">Conversar com IA</button>
+                            <button data-go="lessons" class="ghost-btn">Treinar lição</button>
+                        </div>
+                    </div>
+                    <div class="progress-panel">
+                        <h3>Seu progresso</h3>
+                        <p>Meta diária: <strong><span id="daily-xp">0</span>/80 XP</strong></p>
+                        <div class="progress-bar"><div id="progress-fill"></div></div>
+                        <p id="daily-message">Complete uma atividade para começar a sequência.</p>
+                    </div>
+                </div>
+
+                <div class="dashboard-grid">
+                    <article class="dash-card">
+                        <h3>Áudio inteligente</h3>
+                        <p>Escute russo com voz do navegador, controle velocidade e repita frases.</p>
+                    </article>
+                    <article class="dash-card">
+                        <h3>IA professora</h3>
+                        <p>Faça perguntas, peça tradução, simule diálogos e receba correções simples.</p>
+                    </article>
+                    <article class="dash-card">
+                        <h3>Jogos e XP</h3>
+                        <p>Quiz, memória, ditado e combinação de palavras para fixar o conteúdo.</p>
+                    </article>
+                </div>
+
+                <div class="lesson-roadmap" id="roadmap"></div>
+            </section>
+
+            <section id="alphabet" class="page-section">
+                <div class="section-heading">
+                    <p class="eyebrow">Base do russo</p>
+                    <h2>Alfabeto cirílico</h2>
+                    <p>Toque em uma letra para ouvir e ver exemplos.</p>
+                </div>
+                <div class="alphabet-grid" id="alphabet-grid"></div>
+            </section>
+
+            <section id="vocabulary" class="page-section">
+                <div class="section-heading">
+                    <p class="eyebrow">Flashcards</p>
+                    <h2>Vocabulário por categoria</h2>
+                    <p>Escolha uma categoria, vire as cartas e ouça a pronúncia.</p>
+                </div>
+                <div class="filter-row" id="category-filters"></div>
+                <div class="card-container" id="vocabulary-cards"></div>
+            </section>
+
+            <section id="pronunciation" class="page-section">
+                <div class="section-heading">
+                    <p class="eyebrow">Escuta e fala</p>
+                    <h2>Central de pronúncia</h2>
+                    <p>Treine repetindo palavras, frases e ditado.</p>
+                </div>
+                <div class="pron-grid">
+                    <div class="practice-card">
+                        <h3>Ouvir frase</h3>
+                        <p id="pron-russian" class="russian-big">Привет</p>
+                        <p id="pron-translation">Olá</p>
+                        <div class="range-row">
+                            <label for="voice-rate">Velocidade</label>
+                            <input id="voice-rate" type="range" min="0.5" max="1.2" step="0.1" value="0.8">
+                        </div>
+                        <button id="speak-current-btn">Ouvir</button>
+                        <button id="next-pron-btn" class="ghost-btn">Próxima</button>
+                    </div>
+                    <div class="practice-card">
+                        <h3>Ditado</h3>
+                        <p>Ouça e digite em russo.</p>
+                        <button id="dictation-speak-btn">Tocar áudio</button>
+                        <input id="dictation-input" type="text" placeholder="Digite aqui em russo">
+                        <button id="dictation-check-btn">Verificar</button>
+                        <p id="dictation-result"></p>
+                    </div>
+                </div>
+            </section>
+
+            <section id="ai" class="page-section">
+                <div class="section-heading">
+                    <p class="eyebrow">Professor virtual</p>
+                    <h2>Conversa com IA</h2>
+                    <p>A IA responde em português e russo, corrige frases e cria diálogos rápidos.</p>
+                </div>
+                <div class="chat-layout">
+                    <div class="chat-box" id="chat-box"></div>
+                    <div class="chat-tools">
+                        <button data-prompt="Quero treinar cumprimento em russo">Cumprimentos</button>
+                        <button data-prompt="Simule uma conversa no restaurante em russo">Restaurante</button>
+                        <button data-prompt="Corrija esta frase: Я есть студент">Corrigir frase</button>
+                        <button data-prompt="Me ensine 5 palavras russas importantes">5 palavras</button>
+                    </div>
+                    <form id="chat-form" class="chat-form">
+                        <input id="chat-input" type="text" placeholder="Pergunte algo para a IA professora">
+                        <button type="submit">Enviar</button>
+                    </form>
+                </div>
+            </section>
+
+            <section id="lessons" class="page-section">
+                <div class="section-heading">
+                    <p class="eyebrow">Treino gamificado</p>
+                    <h2>Lições interativas</h2>
+                    <p>Ganhe XP, mantenha corações e avance nas fases.</p>
+                </div>
+                <div class="lesson-tabs">
+                    <button class="lesson-tab active" data-game="quiz">Quiz</button>
+                    <button class="lesson-tab" data-game="memory">Memória</button>
+                    <button class="lesson-tab" data-game="matching">Combinar</button>
+                    <button class="lesson-tab" data-game="writing">Escrita</button>
+                </div>
+                <div id="game-area" class="game-area"></div>
+            </section>
+
+            <section id="grammar" class="page-section">
+                <div class="section-heading">
+                    <p class="eyebrow">Gramática simples</p>
+                    <h2>Regras essenciais</h2>
+                    <p>Explicações diretas para iniciante.</p>
+                </div>
+                <div class="grammar-grid" id="grammar-grid"></div>
+            </section>
+
+            <section id="phrases" class="page-section">
+                <div class="section-heading">
+                    <p class="eyebrow">Sobrevivência</p>
+                    <h2>Frases comuns</h2>
+                    <p>Frases úteis com áudio para viagem e conversa básica.</p>
+                </div>
+                <div class="phrase-list" id="phrase-list"></div>
+            </section>
+
+            <section id="culture" class="page-section">
+                <div class="section-heading">
+                    <p class="eyebrow">Cultura</p>
+                    <h2>Conheça a Rússia</h2>
+                    <p>História, comida, música e curiosidades para aprender com contexto.</p>
+                </div>
+                <div class="culture-grid" id="culture-grid"></div>
+            </section>
+
+            <section id="profile" class="page-section">
+                <div class="section-heading">
+                    <p class="eyebrow">Conta local</p>
+                    <h2>Perfil do aluno</h2>
+                    <p>Salve seu nome, objetivo e reinicie progresso quando quiser.</p>
+                </div>
+                <form id="profile-form" class="profile-card">
+                    <label>Nome<input id="profile-name" type="text" placeholder="Seu nome"></label>
+                    <label>Objetivo<select id="profile-goal"><option>Aprender do zero</option><option>Viajar</option><option>Conversação</option><option>Gramática</option><option>Música e cultura</option></select></label>
+                    <label>Minutos por dia<input id="profile-minutes" type="number" min="5" max="180" value="20"></label>
+                    <button type="submit">Salvar perfil</button>
+                    <button type="button" id="reset-progress-btn" class="danger-btn">Resetar progresso</button>
+                </form>
+            </section>
+        </main>
+    </div>
+
+    <div id="toast" class="toast"></div>
+    <script src="script.js"></script>
+</body>
+</html>
