@@ -1,1 +1,748 @@
+:root {
+    --white: #ffffff;
+    --blue: #1c57a8;
+    --red: #d52b1e;
+    --dark: #111827;
+    --muted: #6b7280;
+    --soft: #f3f6fb;
+    --line: #dbe3f0;
+    --shadow: 0 18px 50px rgba(17, 24, 39, 0.12);
+    --radius: 24px;
+}
 
+* {
+    box-sizing: border-box;
+}
+
+body {
+    margin: 0;
+    font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Arial, sans-serif;
+    background: linear-gradient(135deg, #ffffff 0%, #eef4ff 42%, #fff1f1 100%);
+    color: var(--dark);
+    min-height: 100vh;
+    overflow-x: hidden;
+}
+
+button, input, select {
+    font: inherit;
+}
+
+button {
+    border: 0;
+    border-radius: 999px;
+    background: linear-gradient(135deg, var(--blue), #153f7a);
+    color: white;
+    font-weight: 800;
+    padding: 13px 20px;
+    cursor: pointer;
+    box-shadow: 0 8px 0 rgba(14, 50, 98, 0.35);
+    transition: transform 0.18s ease, box-shadow 0.18s ease, filter 0.18s ease;
+}
+
+button:hover {
+    transform: translateY(-2px);
+    filter: brightness(1.05);
+}
+
+button:active {
+    transform: translateY(4px);
+    box-shadow: none;
+}
+
+input, select {
+    width: 100%;
+    border: 2px solid var(--line);
+    border-radius: 18px;
+    padding: 14px 16px;
+    background: white;
+    outline: none;
+    color: var(--dark);
+}
+
+input:focus, select:focus {
+    border-color: var(--blue);
+    box-shadow: 0 0 0 4px rgba(28, 87, 168, 0.12);
+}
+
+.hidden-app, .page-section {
+    display: none;
+}
+
+.welcome-screen {
+    min-height: 100vh;
+    display: grid;
+    place-items: center;
+    padding: 24px;
+    position: relative;
+}
+
+.flag-bar {
+    position: absolute;
+    inset: 0;
+    display: grid;
+    grid-template-rows: 1fr 1fr 1fr;
+    opacity: 0.16;
+    pointer-events: none;
+}
+
+.flag-bar span:nth-child(1) {
+    background: var(--white);
+}
+
+.flag-bar span:nth-child(2) {
+    background: var(--blue);
+}
+
+.flag-bar span:nth-child(3) {
+    background: var(--red);
+}
+
+.welcome-card {
+    width: min(680px, 100%);
+    text-align: center;
+    background: rgba(255, 255, 255, 0.86);
+    border: 1px solid rgba(255, 255, 255, 0.7);
+    backdrop-filter: blur(18px);
+    border-radius: 34px;
+    padding: 42px;
+    box-shadow: var(--shadow);
+    animation: rise 0.7s ease both;
+}
+
+.logo-mark, .brand-icon {
+    display: grid;
+    place-items: center;
+    color: white;
+    background: linear-gradient(180deg, var(--white) 0 33%, var(--blue) 33% 66%, var(--red) 66% 100%);
+    text-shadow: 0 2px 8px rgba(0, 0, 0, 0.35);
+    font-weight: 1000;
+}
+
+.logo-mark {
+    width: 90px;
+    height: 90px;
+    margin: 0 auto 18px;
+    border-radius: 28px;
+    font-size: 48px;
+    box-shadow: 0 12px 30px rgba(28, 87, 168, 0.3);
+}
+
+.welcome-card h1 {
+    font-size: clamp(44px, 9vw, 82px);
+    margin: 0;
+    letter-spacing: -4px;
+}
+
+.welcome-text {
+    max-width: 530px;
+    margin: 18px auto 28px;
+    color: var(--muted);
+    font-size: 18px;
+}
+
+.welcome-actions, .hero-actions, .filter-row, .lesson-tabs, .chat-tools {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: center;
+    gap: 12px;
+}
+
+.ghost-btn {
+    color: var(--blue);
+    background: white;
+    border: 2px solid var(--blue);
+    box-shadow: 0 8px 0 rgba(28, 87, 168, 0.13);
+}
+
+.danger-btn {
+    background: linear-gradient(135deg, var(--red), #9f1d15);
+    box-shadow: 0 8px 0 rgba(130, 21, 16, 0.35);
+}
+
+.eyebrow {
+    margin: 0 0 8px;
+    color: var(--red);
+    font-size: 13px;
+    font-weight: 1000;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+}
+
+.mini-note {
+    margin: 24px 0 0;
+    color: var(--blue);
+    font-weight: 900;
+}
+
+.app-shell {
+    min-height: 100vh;
+    display: grid;
+    grid-template-columns: 280px 1fr;
+}
+
+.sidebar {
+    position: sticky;
+    top: 0;
+    height: 100vh;
+    background: rgba(255, 255, 255, 0.88);
+    border-right: 1px solid var(--line);
+    backdrop-filter: blur(18px);
+    padding: 22px;
+    overflow-y: auto;
+}
+
+.brand {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-bottom: 24px;
+}
+
+.brand-icon {
+    width: 52px;
+    height: 52px;
+    border-radius: 18px;
+    font-size: 30px;
+}
+
+.brand strong, .brand small {
+    display: block;
+}
+
+.brand small {
+    color: var(--muted);
+    margin-top: 2px;
+}
+
+.menu {
+    display: grid;
+    gap: 10px;
+}
+
+.nav-btn {
+    width: 100%;
+    text-align: left;
+    box-shadow: none;
+    background: transparent;
+    color: var(--dark);
+    border: 2px solid transparent;
+    padding: 14px 16px;
+}
+
+.nav-btn:hover, .nav-btn.active {
+    background: linear-gradient(135deg, rgba(28, 87, 168, 0.1), rgba(213, 43, 30, 0.08));
+    border-color: rgba(28, 87, 168, 0.22);
+    color: var(--blue);
+}
+
+.main-content {
+    padding: 28px;
+    max-width: 1280px;
+    width: 100%;
+}
+
+.topbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 18px;
+    margin-bottom: 24px;
+}
+
+.topbar h2 {
+    margin: 0;
+    font-size: 34px;
+}
+
+.status-grid {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+    justify-content: flex-end;
+}
+
+.status-pill {
+    min-width: 78px;
+    min-height: 58px;
+    border-radius: 18px;
+    background: white;
+    border: 1px solid var(--line);
+    box-shadow: 0 8px 24px rgba(17, 24, 39, 0.08);
+    padding: 8px 12px;
+    display: grid;
+    place-items: center;
+    font-weight: 1000;
+}
+
+.status-pill span {
+    font-size: 22px;
+}
+
+.status-pill small {
+    color: var(--muted);
+}
+
+.hearts {
+    min-width: 150px;
+    font-size: 18px;
+}
+
+.active-section {
+    display: block;
+    animation: fade 0.35s ease both;
+}
+
+.hero-card, .section-heading, .practice-card, .game-area, .profile-card, .chat-layout {
+    background: rgba(255, 255, 255, 0.92);
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    box-shadow: var(--shadow);
+}
+
+.hero-card {
+    display: grid;
+    grid-template-columns: 1.4fr 0.8fr;
+    gap: 22px;
+    padding: 34px;
+    overflow: hidden;
+    position: relative;
+}
+
+.hero-card h1 {
+    font-size: clamp(36px, 5vw, 62px);
+    line-height: 0.96;
+    margin: 0 0 16px;
+    letter-spacing: -2px;
+}
+
+.hero-card p {
+    color: var(--muted);
+    font-size: 17px;
+}
+
+.progress-panel {
+    background: linear-gradient(160deg, rgba(28, 87, 168, 0.1), rgba(213, 43, 30, 0.08));
+    border-radius: 22px;
+    padding: 24px;
+    align-self: stretch;
+}
+
+.progress-panel h3 {
+    margin-top: 0;
+}
+
+.progress-bar {
+    height: 22px;
+    border-radius: 999px;
+    overflow: hidden;
+    background: rgba(17, 24, 39, 0.1);
+    margin: 16px 0;
+}
+
+#progress-fill {
+    height: 100%;
+    width: 0%;
+    border-radius: inherit;
+    background: linear-gradient(90deg, var(--blue), var(--red));
+    transition: width 0.35s ease;
+}
+
+.dashboard-grid, .pron-grid, .grammar-grid, .culture-grid {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 18px;
+    margin-top: 18px;
+}
+
+.dash-card, .grammar-card, .culture-card, .phrase-item, .alphabet-card, .flashcard, .matching-card, .memory-card {
+    background: white;
+    border: 1px solid var(--line);
+    border-radius: 22px;
+    padding: 20px;
+    box-shadow: 0 10px 30px rgba(17, 24, 39, 0.08);
+}
+
+.dash-card h3, .grammar-card h3, .culture-card h3 {
+    margin: 0 0 8px;
+}
+
+.dash-card p, .grammar-card p, .culture-card p {
+    color: var(--muted);
+    margin-bottom: 0;
+}
+
+.lesson-roadmap {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 14px;
+    margin-top: 18px;
+}
+
+.road-step {
+    border-radius: 20px;
+    background: white;
+    border: 1px solid var(--line);
+    padding: 18px;
+    position: relative;
+}
+
+.road-step strong {
+    display: block;
+    margin-bottom: 6px;
+}
+
+.section-heading {
+    padding: 26px;
+    margin-bottom: 18px;
+}
+
+.section-heading h2 {
+    margin: 0 0 10px;
+    font-size: 34px;
+}
+
+.section-heading p:last-child {
+    margin-bottom: 0;
+    color: var(--muted);
+}
+
+.alphabet-grid, .card-container, .phrase-list {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(190px, 1fr));
+    gap: 16px;
+}
+
+.alphabet-card {
+    text-align: center;
+}
+
+.alphabet-card strong {
+    display: block;
+    font-size: 46px;
+    color: var(--blue);
+}
+
+.alphabet-card span {
+    color: var(--muted);
+}
+
+.flashcard {
+    min-height: 180px;
+    display: grid;
+    gap: 12px;
+    align-content: space-between;
+    cursor: pointer;
+    position: relative;
+    overflow: hidden;
+}
+
+.flashcard::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    background: linear-gradient(135deg, rgba(28, 87, 168, 0.08), rgba(213, 43, 30, 0.08));
+    opacity: 0;
+    transition: opacity 0.2s ease;
+}
+
+.flashcard:hover::before {
+    opacity: 1;
+}
+
+.flashcard-word {
+    position: relative;
+    z-index: 1;
+    font-size: 30px;
+    font-weight: 1000;
+    color: var(--blue);
+}
+
+.flashcard-translation {
+    position: relative;
+    z-index: 1;
+    color: var(--muted);
+    font-size: 18px;
+}
+
+.flashcard-meta {
+    position: relative;
+    z-index: 1;
+    display: flex;
+    justify-content: space-between;
+    gap: 8px;
+    align-items: center;
+}
+
+.flashcard-meta small {
+    color: var(--red);
+    font-weight: 900;
+}
+
+.filter-btn, .lesson-tab, .chat-tools button {
+    background: white;
+    color: var(--blue);
+    border: 2px solid var(--line);
+    box-shadow: none;
+}
+
+.filter-btn.active, .lesson-tab.active, .chat-tools button:hover {
+    background: var(--blue);
+    color: white;
+    border-color: var(--blue);
+}
+
+.pron-grid {
+    grid-template-columns: 1fr 1fr;
+}
+
+.practice-card, .game-area, .profile-card, .chat-layout {
+    padding: 24px;
+}
+
+.russian-big {
+    font-size: clamp(38px, 7vw, 76px);
+    font-weight: 1000;
+    color: var(--blue);
+    margin: 10px 0 4px;
+}
+
+.range-row {
+    margin: 18px 0;
+}
+
+.range-row label {
+    display: block;
+    color: var(--muted);
+    margin-bottom: 8px;
+}
+
+.range-row input {
+    padding: 0;
+}
+
+.chat-layout {
+    display: grid;
+    gap: 16px;
+}
+
+.chat-box {
+    height: 420px;
+    overflow-y: auto;
+    background: var(--soft);
+    border-radius: 22px;
+    padding: 18px;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+}
+
+.message {
+    max-width: 78%;
+    border-radius: 20px;
+    padding: 14px 16px;
+    line-height: 1.5;
+}
+
+.message.user {
+    align-self: flex-end;
+    background: var(--blue);
+    color: white;
+    border-bottom-right-radius: 6px;
+}
+
+.message.ai {
+    align-self: flex-start;
+    background: white;
+    border: 1px solid var(--line);
+    border-bottom-left-radius: 6px;
+}
+
+.chat-form {
+    display: grid;
+    grid-template-columns: 1fr auto;
+    gap: 10px;
+}
+
+.quiz-question h3 {
+    margin-top: 0;
+    font-size: 28px;
+}
+
+.options-grid {
+    display: grid;
+    gap: 12px;
+    margin-top: 18px;
+}
+
+.option-btn {
+    width: 100%;
+    border-radius: 18px;
+    text-align: left;
+    box-shadow: none;
+    background: white;
+    color: var(--dark);
+    border: 2px solid var(--line);
+}
+
+.option-btn.correct {
+    background: #dcfce7;
+    color: #166534;
+    border-color: #86efac;
+}
+
+.option-btn.wrong {
+    background: #fee2e2;
+    color: #991b1b;
+    border-color: #fecaca;
+}
+
+.memory-grid, .matching-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
+    gap: 12px;
+}
+
+.memory-card, .matching-card {
+    min-height: 86px;
+    display: grid;
+    place-items: center;
+    text-align: center;
+    font-weight: 900;
+    cursor: pointer;
+    user-select: none;
+}
+
+.memory-card.flipped, .memory-card.matched, .matching-card.selected, .matching-card.matched {
+    background: linear-gradient(135deg, var(--blue), var(--red));
+    color: white;
+}
+
+.matching-card.matched {
+    opacity: 0.45;
+    pointer-events: none;
+}
+
+.phrase-item {
+    display: grid;
+    gap: 8px;
+}
+
+.phrase-item strong {
+    font-size: 24px;
+    color: var(--blue);
+}
+
+.profile-card {
+    display: grid;
+    max-width: 620px;
+    gap: 16px;
+}
+
+.profile-card label {
+    display: grid;
+    gap: 8px;
+    color: var(--muted);
+    font-weight: 800;
+}
+
+.toast {
+    position: fixed;
+    left: 50%;
+    bottom: 24px;
+    transform: translateX(-50%) translateY(100px);
+    background: var(--dark);
+    color: white;
+    border-radius: 999px;
+    padding: 12px 18px;
+    box-shadow: var(--shadow);
+    opacity: 0;
+    transition: all 0.25s ease;
+    z-index: 9999;
+    max-width: min(92vw, 520px);
+    text-align: center;
+}
+
+.toast.show {
+    opacity: 1;
+    transform: translateX(-50%) translateY(0);
+}
+
+@keyframes rise {
+    from {
+        opacity: 0;
+        transform: translateY(24px) scale(0.97);
+    }
+    to {
+        opacity: 1;
+        transform: translateY(0) scale(1);
+    }
+}
+
+@keyframes fade {
+    from {
+        opacity: 0;
+        transform: translateY(10px);
+    }
+    to {
+        opacity: 1;
+        transform: translateY(0);
+    }
+}
+
+@media (max-width: 980px) {
+    .app-shell {
+        grid-template-columns: 1fr;
+    }
+
+    .sidebar {
+        position: relative;
+        height: auto;
+        border-right: 0;
+        border-bottom: 1px solid var(--line);
+    }
+
+    .menu {
+        grid-template-columns: repeat(2, 1fr);
+    }
+
+    .hero-card, .pron-grid {
+        grid-template-columns: 1fr;
+    }
+
+    .dashboard-grid, .grammar-grid, .culture-grid, .lesson-roadmap {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+
+    .topbar {
+        align-items: flex-start;
+        flex-direction: column;
+    }
+}
+
+@media (max-width: 640px) {
+    .main-content, .sidebar, .welcome-screen {
+        padding: 14px;
+    }
+
+    .welcome-card, .hero-card, .section-heading, .practice-card, .game-area, .profile-card, .chat-layout {
+        padding: 20px;
+        border-radius: 22px;
+    }
+
+    .menu, .dashboard-grid, .grammar-grid, .culture-grid, .lesson-roadmap, .chat-form {
+        grid-template-columns: 1fr;
+    }
+
+    .status-grid {
+        width: 100%;
+        justify-content: stretch;
+    }
+
+    .status-pill {
+        flex: 1;
+    }
+
+    .message {
+        max-width: 92%;
+    }
+}
