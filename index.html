@@ -1,0 +1,378 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>PUTIRUSU — Russo com IA</title>
+  <link rel="stylesheet" href="./css/style.css" />
+</head>
+<body>
+  <div id="toast" class="toast"></div>
+
+  <section id="splash" class="splash">
+    <div class="flag-strip top"></div>
+    <div class="splash-card">
+      <div class="logo-ring">
+        <img src="./assets/logo-putirusu.svg" class="logo-main" alt="Logo PUTIRUSU" />
+      </div>
+      <p class="tag">русский язык • IA professora real</p>
+      <h1>PUTIRUSU</h1>
+      <div class="loader"><span></span></div>
+      <small>Carregando curso, revisão e professor virtual...</small>
+    </div>
+    <div class="flag-strip bottom"></div>
+  </section>
+
+  <section id="welcome" class="welcome hidden">
+    <div class="welcome-card auth-welcome-card">
+      <img src="./assets/logo-putirusu.svg" class="welcome-logo" alt="PUTIRUSU" />
+      <p class="tag">A1 AO C1 • POSTGRESQL • IA REAL</p>
+      <h1>Curso completo de russo.</h1>
+      <p>Entre para salvar aulas, erros, revisão e progresso no banco de dados.</p>
+
+      <div class="auth-tabs">
+        <button id="showLoginBtn" class="active" type="button">Entrar</button>
+        <button id="showRegisterBtn" class="ghost" type="button">Criar conta</button>
+      </div>
+
+      <form id="loginForm" class="auth-form">
+        <label>E-mail
+          <input id="loginEmail" type="email" value="demo@putirusu.com" required />
+        </label>
+        <label>Senha
+          <input id="loginPassword" type="password" value="putirusu123" required />
+        </label>
+        <button type="submit">Entrar no curso</button>
+      </form>
+
+      <form id="registerForm" class="auth-form hidden">
+        <label>Nome
+          <input id="registerName" required minlength="2" />
+        </label>
+        <label>E-mail
+          <input id="registerEmail" type="email" required />
+        </label>
+        <label>Senha
+          <input id="registerPassword" type="password" required minlength="6" />
+        </label>
+        <button type="submit">Criar conta</button>
+      </form>
+
+      <div id="welcomeStatus" class="feedback"></div>
+      <small>Conta demo: demo@putirusu.com • senha: putirusu123</small>
+    </div>
+  </section>
+
+  <div id="app" class="app hidden">
+    <aside id="sidebar" class="sidebar">
+      <div class="brand">
+        <img src="./assets/logo-putirusu.svg" class="logo-side" alt="PUTIRUSU" />
+        <div>
+          <strong>PUTIRUSU</strong>
+          <span>Русский с ИИ</span>
+        </div>
+      </div>
+
+      <nav>
+        <button class="active" data-screen="home">🏠 Início</button>
+        <button data-screen="course">🧭 Curso</button>
+        <button data-screen="alphabet">🔤 Alfabeto</button>
+        <button data-screen="teacher">🤖 IA Professora</button>
+        <button data-screen="chat">💬 Conversa Real</button>
+        <button data-screen="writing">✍️ Escrita</button>
+        <button data-screen="speaking">🎙️ Fala</button>
+        <button data-screen="review">🧠 Revisão IA</button>
+        <button data-screen="games">🎮 Jogos</button>
+        <button data-screen="dictionary">📚 Dicionário</button>
+        <button data-screen="profile">👤 Perfil</button>
+        <button id="logoutBtn" class="danger">🚪 Sair</button>
+      </nav>
+    </aside>
+
+    <main class="main">
+      <header class="topbar">
+        <button id="menuBtn" class="ghost menu-btn">☰</button>
+        <div>
+          <h2 id="screenTitle">Início</h2>
+          <p id="screenSubtitle">Seu painel de estudos.</p>
+        </div>
+        <div class="stats">
+          <span id="aiMode">IA: verificando...</span>
+          <span id="xpStat">⭐ 0 XP</span>
+          <span id="lessonStat">0 aulas</span>
+        </div>
+      </header>
+
+      <section id="home" class="screen active">
+        <div class="hero">
+          <div class="panel hero-main">
+            <p class="tag">Привет, estudante!</p>
+            <h1>Russo com professor IA de verdade.</h1>
+            <p>Estude por unidades, treine fala e escrita, converse em cenários reais e peça correções inteligentes.</p>
+            <div class="row">
+              <button data-go="course">Continuar curso</button>
+              <button class="ghost" data-go="teacher">Perguntar para IA</button>
+              <button class="ghost" data-go="review">Revisar erros</button>
+            </div>
+          </div>
+
+          <div class="panel flag-panel">
+            <div class="russian-flag"><span></span><span></span><span></span></div>
+            <h2>Сегодня</h2>
+            <p>Meta de hoje: 1 aula + 1 frase falada + 1 correção da IA.</p>
+            <div class="progress"><span id="homeProgress"></span></div>
+            <small id="homeProgressText">0% concluído</small>
+          </div>
+        </div>
+
+        <div class="quick">
+          <button data-go="alphabet"><strong>АБВ</strong><span>Alfabeto completo com som e exemplos.</span></button>
+          <button data-go="teacher"><strong>🤖</strong><span>IA explica, corrige e cria exercícios.</span></button>
+          <button data-go="chat"><strong>💬</strong><span>Conversa em mercado, aeroporto e escola.</span></button>
+          <button data-go="speaking"><strong>🎙️</strong><span>Microfone para treinar pronúncia.</span></button>
+        </div>
+      </section>
+
+      <section id="course" class="screen">
+        <div class="head">
+          <div>
+            <h1>Curso completo</h1>
+            <p>60 aulas do A1 ao C1 carregadas do PostgreSQL.</p>
+          </div>
+          <div class="row">
+            <button id="askLessonAiBtn" class="ghost">IA explica aula atual</button>
+            <button id="refreshCourseBtn" class="ghost">Atualizar curso</button>
+          </div>
+        </div>
+        <div id="levelTabs" class="tabs"></div>
+        <div id="courseGrid" class="grid"></div>
+        <div id="lessonView"></div>
+      </section>
+
+      <section id="alphabet" class="screen">
+        <div class="head">
+          <div>
+            <h1>Alfabeto cirílico</h1>
+            <p>Clique nas letras para ver som, exemplo e treino.</p>
+          </div>
+          <button id="randomLetterBtn">Sortear letra</button>
+        </div>
+        <div id="alphabetGrid" class="alphabet-grid"></div>
+        <div id="letterDetail"></div>
+      </section>
+
+      <section id="teacher" class="screen">
+        <div class="head">
+          <div>
+            <h1>IA Professora</h1>
+            <p>Correção real, explicação e exercícios personalizados.</p>
+          </div>
+          <button id="clearTeacherBtn" class="ghost">Limpar conversa</button>
+        </div>
+        <div class="teacher-layout">
+          <div class="panel">
+            <div id="teacherChat" class="chat"></div>
+            <div class="chat-input">
+              <textarea id="teacherInput" placeholder="Ex: Corrija minha frase: Я есть студент"></textarea>
+              <button id="sendTeacherBtn">Enviar para IA</button>
+            </div>
+          </div>
+          <div class="panel shortcuts">
+            <h3>Pedidos prontos</h3>
+            <button class="ghost teacher-prompt" data-text="Monte uma rotina de 20 minutos por dia para eu aprender russo do zero.">Rotina de estudo</button>
+            <button class="ghost teacher-prompt" data-text="Explique o alfabeto cirílico como se eu fosse iniciante.">Explicar alfabeto</button>
+            <button class="ghost teacher-prompt" data-text="Corrija minha frase: Я есть студент">Corrigir frase</button>
+            <button class="ghost teacher-prompt" data-text="Crie 5 exercícios de russo básico sem gabarito direto.">Criar exercícios</button>
+            <button class="ghost teacher-prompt" data-text="Me ensine frases para sobreviver em uma viagem para a Rússia.">Frases de viagem</button>
+          </div>
+        </div>
+      </section>
+
+      <section id="chat" class="screen">
+        <div class="head">
+          <div>
+            <h1>Conversa Real</h1>
+            <p>Escolha uma situação e converse com a IA.</p>
+          </div>
+          <select id="scenarioSelect"></select>
+        </div>
+        <div class="teacher-layout">
+          <div class="panel">
+            <div id="realChat" class="chat"></div>
+            <div class="chat-input">
+              <input id="realChatInput" placeholder="Digite sua resposta..." />
+              <button id="sendRealChatBtn">Responder</button>
+            </div>
+          </div>
+          <div class="panel">
+            <h3>Dica</h3>
+            <p>Você pode escrever em português no começo, mas tente colocar pelo menos uma palavra em russo.</p>
+            <button id="startScenarioBtn">Começar cenário</button>
+          </div>
+        </div>
+      </section>
+
+      <section id="writing" class="screen">
+        <div class="head">
+          <div>
+            <h1>Escrita com correção IA</h1>
+            <p>Escreva em russo e peça correção inteligente.</p>
+          </div>
+          <button id="newWritingBtn">Novo desafio</button>
+        </div>
+        <div class="writing-layout">
+          <div class="panel">
+            <p class="tag">Traduza para russo</p>
+            <h2 id="writingPrompt">Eu quero água.</h2>
+            <p id="writingHint">Use Я хочу...</p>
+            <textarea id="writingInput" placeholder="Digite em russo..."></textarea>
+            <div id="keyboard" class="keyboard"></div>
+            <div class="row">
+              <button id="correctWritingBtn">Corrigir com IA</button>
+              <button id="simpleCheckBtn" class="ghost">Correção rápida</button>
+            </div>
+          </div>
+          <div class="panel">
+            <h3>Correção</h3>
+            <div id="writingFeedback" class="feedback"></div>
+            <div id="writingModel" class="model small"></div>
+          </div>
+        </div>
+      </section>
+
+      <section id="speaking" class="screen">
+        <div class="head">
+          <div>
+            <h1>Fala</h1>
+            <p>Treine pronúncia com voz do navegador e microfone.</p>
+          </div>
+          <button id="newSpeakBtn">Nova frase</button>
+        </div>
+        <div class="speaking-layout">
+          <div class="panel speaking-card">
+            <p class="tag">Fale em russo</p>
+            <h2 id="speakRu">Привет</h2>
+            <p id="speakPron">privet</p>
+            <p id="speakPt">Oi</p>
+            <div class="wave"><span></span><span></span><span></span><span></span><span></span></div>
+            <div class="row">
+              <button id="hearSpeakBtn">Ouvir</button>
+              <button id="micBtn">Usar microfone</button>
+            </div>
+          </div>
+          <div class="panel">
+            <h3>Resultado</h3>
+            <div id="speechFeedback" class="feedback"></div>
+            <button id="askPronunciationAiBtn" class="ghost">Pedir dica de pronúncia para IA</button>
+          </div>
+        </div>
+      </section>
+
+      <section id="review" class="screen">
+        <div class="head">
+          <div>
+            <h1>Revisão IA</h1>
+            <p>A IA cria revisão com base nos seus erros.</p>
+          </div>
+          <button id="generateReviewBtn">Gerar revisão com IA</button>
+        </div>
+        <div class="review-layout">
+          <div class="panel">
+            <h3>Erros salvos</h3>
+            <ul id="mistakesList" class="plain-list"></ul>
+          </div>
+          <div class="panel">
+            <h3>Revisão gerada</h3>
+            <div id="aiReviewBox" class="feedback"></div>
+          </div>
+        </div>
+      </section>
+
+      <section id="games" class="screen">
+        <div class="head">
+          <div>
+            <h1>Jogos</h1>
+            <p>Fixação rápida de vocabulário.</p>
+          </div>
+          <button id="newGameBtn">Novo jogo</button>
+        </div>
+        <div id="gameArea"></div>
+      </section>
+
+      <section id="dictionary" class="screen">
+        <div class="head">
+          <div>
+            <h1>Dicionário</h1>
+            <p>Palavras principais do curso.</p>
+          </div>
+          <input id="dictSearch" placeholder="Pesquisar..." />
+        </div>
+        <div id="dictGrid" class="grid"></div>
+      </section>
+
+      <section id="profile" class="screen">
+        <div class="head">
+          <div>
+            <h1>Perfil</h1>
+            <p>Dados usados pela IA para personalizar respostas.</p>
+          </div>
+          <button id="saveProfileBtn">Salvar perfil</button>
+        </div>
+        <div class="profile-layout">
+          <div class="panel">
+            <label>Nome
+              <input id="profileName" />
+            </label>
+            <label>Nível
+              <select id="profileLevel">
+                <option>A1</option>
+                <option>A2</option>
+                <option>B1</option>
+                <option>B2</option>
+                <option>C1</option>
+              </select>
+            </label>
+            <label>Objetivo
+              <input id="profileGoal" />
+            </label>
+            <label>Meta diária (minutos)
+              <input id="profileDailyGoal" type="number" min="5" max="240" value="20" />
+            </label>
+            <label>Avatar
+              <select id="profileAvatar">
+                <option>🇷🇺</option>
+                <option>🐻</option>
+                <option>🎙️</option>
+                <option>📚</option>
+                <option>🎧</option>
+              </select>
+            </label>
+          </div>
+          <div class="panel profile-card">
+            <div id="avatarBig" class="avatar-big">🇷🇺</div>
+            <h2 id="profileViewName">Estudante</h2>
+            <p id="profileViewGoal">Aprender russo do zero</p>
+            <div class="progress"><span id="profileProgress"></span></div>
+            <p id="profileNumbers">0 XP • 0 aulas</p>
+          </div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <script src="./js/course-data.js"></script>
+  <script src="./js/core.js"></script>
+  <script src="./js/api.js"></script>
+  <script src="./js/auth.js"></script>
+  <script src="./js/dashboard.js"></script>
+  <script src="./js/speech.js"></script>
+  <script src="./js/course.js"></script>
+  <script src="./js/alphabet.js"></script>
+  <script src="./js/ai.js"></script>
+  <script src="./js/practice.js"></script>
+  <script src="./js/games.js"></script>
+  <script src="./js/dictionary.js"></script>
+  <script src="./js/profile.js"></script>
+  <script src="./js/app.js"></script>
+</body>
+</html>
