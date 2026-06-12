@@ -1,0 +1,290 @@
+window.PUTIRUSU_DATA = {
+  levels: [
+    { id: "basic", name: "Básico", desc: "Primeiros sons, letras e frases essenciais." },
+    { id: "intermediate", name: "Intermediário", desc: "Viagem, conversas e gramática aplicada." },
+    { id: "advanced", name: "Avançado", desc: "Opinião, textos, cultura e fala natural." }
+  ],
+
+  alphabet: [
+    { letter: "А а", sound: "a", example: "арбуз", pron: "arbuz", pt: "melancia", emoji: "🍉" },
+    { letter: "Б б", sound: "b", example: "банк", pron: "bank", pt: "banco", emoji: "🏦" },
+    { letter: "В в", sound: "v", example: "вода", pron: "vadá", pt: "água", emoji: "💧" },
+    { letter: "Г г", sound: "g", example: "город", pron: "górat", pt: "cidade", emoji: "🏙️" },
+    { letter: "Д д", sound: "d", example: "дом", pron: "dom", pt: "casa", emoji: "🏠" },
+    { letter: "Е е", sound: "ye/e", example: "есть", pron: "yest", pt: "comer / há", emoji: "🍽️" },
+    { letter: "Ё ё", sound: "yo", example: "ёлка", pron: "yólka", pt: "pinheiro", emoji: "🎄" },
+    { letter: "Ж ж", sound: "j forte", example: "журнал", pron: "jurnál", pt: "revista", emoji: "📰" },
+    { letter: "З з", sound: "z", example: "зима", pron: "zimá", pt: "inverno", emoji: "❄️" },
+    { letter: "И и", sound: "i", example: "имя", pron: "ímya", pt: "nome", emoji: "🏷️" },
+    { letter: "Й й", sound: "i curto", example: "чай", pron: "tchai", pt: "chá", emoji: "🍵" },
+    { letter: "К к", sound: "k", example: "кот", pron: "kot", pt: "gato", emoji: "🐱" },
+    { letter: "Л л", sound: "l", example: "лимон", pron: "limón", pt: "limão", emoji: "🍋" },
+    { letter: "М м", sound: "m", example: "мама", pron: "máma", pt: "mãe", emoji: "👩" },
+    { letter: "Н н", sound: "n", example: "нос", pron: "nos", pt: "nariz", emoji: "👃" },
+    { letter: "О о", sound: "o/a", example: "окно", pron: "aknó", pt: "janela", emoji: "🪟" },
+    { letter: "П п", sound: "p", example: "папа", pron: "pápa", pt: "pai", emoji: "👨" },
+    { letter: "Р р", sound: "r vibrante", example: "Россия", pron: "Rassíya", pt: "Rússia", emoji: "🇷🇺" },
+    { letter: "С с", sound: "s", example: "сок", pron: "sok", pt: "suco", emoji: "🧃" },
+    { letter: "Т т", sound: "t", example: "такси", pron: "taksí", pt: "táxi", emoji: "🚕" },
+    { letter: "У у", sound: "u", example: "утро", pron: "útra", pt: "manhã", emoji: "🌅" },
+    { letter: "Ф ф", sound: "f", example: "фильм", pron: "film", pt: "filme", emoji: "🎬" },
+    { letter: "Х х", sound: "kh", example: "хлеб", pron: "khlyep", pt: "pão", emoji: "🍞" },
+    { letter: "Ц ц", sound: "ts", example: "центр", pron: "tsentr", pt: "centro", emoji: "📍" },
+    { letter: "Ч ч", sound: "tch", example: "чай", pron: "tchai", pt: "chá", emoji: "🍵" },
+    { letter: "Ш ш", sound: "sh", example: "школа", pron: "shkóla", pt: "escola", emoji: "🏫" },
+    { letter: "Щ щ", sound: "shch", example: "щи", pron: "shchi", pt: "sopa russa", emoji: "🥣" },
+    { letter: "Ъ ъ", sound: "sinal duro", example: "объект", pron: "abyékt", pt: "objeto", emoji: "🔧" },
+    { letter: "Ы ы", sound: "y russo", example: "сыр", pron: "syr", pt: "queijo", emoji: "🧀" },
+    { letter: "Ь ь", sound: "sinal mole", example: "день", pron: "dyen", pt: "dia", emoji: "📅" },
+    { letter: "Э э", sound: "é", example: "это", pron: "éta", pt: "isto", emoji: "👉" },
+    { letter: "Ю ю", sound: "yu", example: "юг", pron: "yuk", pt: "sul", emoji: "🧭" },
+    { letter: "Я я", sound: "ya", example: "я", pron: "ya", pt: "eu", emoji: "🙋" }
+  ],
+
+  lessons: [
+    {
+      id: "b01",
+      level: "basic",
+      title: "Saudações",
+      goal: "Cumprimentar, agradecer e se despedir.",
+      xp: 25,
+      grammar: "Привет é informal. Здравствуйте é formal. Спасибо serve para obrigado.",
+      vocab: [
+        { ru: "Привет", pron: "privet", pt: "Oi" },
+        { ru: "Здравствуйте", pron: "zdrávstvuyte", pt: "Olá formal" },
+        { ru: "Спасибо", pron: "spasíba", pt: "Obrigado" },
+        { ru: "Пока", pron: "paká", pt: "Tchau" }
+      ],
+      examples: [
+        { ru: "Привет! Как дела?", pron: "privet! kak dyelá?", pt: "Oi! Como vai?" },
+        { ru: "Спасибо, хорошо.", pron: "spasíba, kharashó", pt: "Obrigado, bem." }
+      ],
+      exercises: [
+        { type: "choice", prompt: "Como dizer obrigado?", answer: "Спасибо", options: ["Пока", "Спасибо", "Дом", "Вода"] },
+        { type: "write", prompt: "Traduza: Oi", answer: "Привет" }
+      ]
+    },
+    {
+      id: "b02",
+      level: "basic",
+      title: "Apresentação",
+      goal: "Dizer nome e origem.",
+      xp: 30,
+      grammar: "Меня зовут significa meu nome é. Я из + lugar significa eu sou de.",
+      vocab: [
+        { ru: "Меня зовут", pron: "minyá zavút", pt: "Meu nome é" },
+        { ru: "Как тебя зовут?", pron: "kak tibyá zavút?", pt: "Qual é seu nome?" },
+        { ru: "Я из Бразилии", pron: "ya iz Brazílii", pt: "Eu sou do Brasil" },
+        { ru: "Очень приятно", pron: "ótchen priyátna", pt: "Muito prazer" }
+      ],
+      examples: [
+        { ru: "Меня зовут Анна.", pron: "minyá zavút Ánna", pt: "Meu nome é Anna." },
+        { ru: "Я из Бразилии.", pron: "ya iz Brazílii", pt: "Eu sou do Brasil." }
+      ],
+      exercises: [
+        { type: "choice", prompt: "Como dizer meu nome é?", answer: "Меня зовут", options: ["Как дела", "Меня зовут", "Доброе утро", "Пока"] },
+        { type: "write", prompt: "Traduza: Eu sou do Brasil", answer: "Я из Бразилии" }
+      ]
+    },
+    {
+      id: "b03",
+      level: "basic",
+      title: "Comida e bebida",
+      goal: "Pedir água, café e comida.",
+      xp: 35,
+      grammar: "Я хочу + objeto = eu quero algo. Можно? = pode?",
+      vocab: [
+        { ru: "вода", pron: "vadá", pt: "água" },
+        { ru: "кофе", pron: "kófe", pt: "café" },
+        { ru: "хлеб", pron: "khlyep", pt: "pão" },
+        { ru: "Я хочу", pron: "ya khachú", pt: "Eu quero" }
+      ],
+      examples: [
+        { ru: "Я хочу воду.", pron: "ya khachú vódu", pt: "Eu quero água." },
+        { ru: "Можно кофе?", pron: "mózhna kófe?", pt: "Pode ser café?" }
+      ],
+      exercises: [
+        { type: "choice", prompt: "Como dizer água?", answer: "вода", options: ["кофе", "вода", "хлеб", "чай"] },
+        { type: "write", prompt: "Traduza: Eu quero café", answer: "Я хочу кофе" }
+      ]
+    },
+    {
+      id: "b04",
+      level: "basic",
+      title: "Perguntas úteis",
+      goal: "Usar quem, o quê, onde e como.",
+      xp: 35,
+      grammar: "Perguntas podem usar palavras como кто, что, где, как.",
+      vocab: [
+        { ru: "кто?", pron: "kto?", pt: "quem?" },
+        { ru: "что?", pron: "shto?", pt: "o quê?" },
+        { ru: "где?", pron: "gdye?", pt: "onde?" },
+        { ru: "как?", pron: "kak?", pt: "como?" }
+      ],
+      examples: [
+        { ru: "Что это?", pron: "shto éta?", pt: "O que é isto?" },
+        { ru: "Где метро?", pron: "gdye mitró?", pt: "Onde fica o metrô?" }
+      ],
+      exercises: [
+        { type: "choice", prompt: "Como dizer onde?", answer: "где?", options: ["кто?", "где?", "что?", "как?"] },
+        { type: "write", prompt: "Traduza: O que é isto?", answer: "Что это?" }
+      ]
+    },
+    {
+      id: "i01",
+      level: "intermediate",
+      title: "Mercado e preço",
+      goal: "Comprar e perguntar preço.",
+      xp: 45,
+      grammar: "Сколько стоит? significa quanto custa? Мне нужно significa eu preciso.",
+      vocab: [
+        { ru: "Сколько стоит?", pron: "skólka stóit?", pt: "Quanto custa?" },
+        { ru: "Мне нужно", pron: "mnye nújna", pt: "Eu preciso" },
+        { ru: "дорого", pron: "dóraga", pt: "caro" },
+        { ru: "дёшево", pron: "dyóshiva", pt: "barato" }
+      ],
+      examples: [
+        { ru: "Сколько стоит вода?", pron: "skólka stóit vadá?", pt: "Quanto custa a água?" },
+        { ru: "Мне нужен хлеб.", pron: "mnye nújen khlyep", pt: "Eu preciso de pão." }
+      ],
+      exercises: [
+        { type: "choice", prompt: "Como perguntar quanto custa?", answer: "Сколько стоит?", options: ["Как дела?", "Сколько стоит?", "Где метро?", "Можно?"] },
+        { type: "write", prompt: "Traduza: Eu preciso de água", answer: "Мне нужна вода" }
+      ]
+    },
+    {
+      id: "i02",
+      level: "intermediate",
+      title: "Passado simples",
+      goal: "Falar o que aconteceu ontem.",
+      xp: 45,
+      grammar: "No passado, o russo marca gênero: он делал, она делала.",
+      vocab: [
+        { ru: "вчера", pron: "vchirá", pt: "ontem" },
+        { ru: "я был", pron: "ya byl", pt: "eu estava / fui" },
+        { ru: "я смотрел", pron: "ya smatrél", pt: "eu assisti" },
+        { ru: "я делал", pron: "ya dyélal", pt: "eu fazia / fiz" }
+      ],
+      examples: [
+        { ru: "Вчера я смотрел фильм.", pron: "vchirá ya smatrél film", pt: "Ontem assisti a um filme." },
+        { ru: "Я был дома.", pron: "ya byl dóma", pt: "Eu estava em casa." }
+      ],
+      exercises: [
+        { type: "choice", prompt: "Como dizer ontem?", answer: "вчера", options: ["завтра", "сегодня", "вчера", "сейчас"] },
+        { type: "write", prompt: "Traduza: Ontem assisti a um filme", answer: "Вчера я смотрел фильм" }
+      ]
+    },
+    {
+      id: "i03",
+      level: "intermediate",
+      title: "Viagem e transporte",
+      goal: "Perguntar direções e transporte.",
+      xp: 45,
+      grammar: "Где pergunta onde fica. Куда pergunta para onde.",
+      vocab: [
+        { ru: "метро", pron: "mitró", pt: "metrô" },
+        { ru: "аэропорт", pron: "aerapórt", pt: "aeroporto" },
+        { ru: "билет", pron: "bilét", pt: "passagem" },
+        { ru: "куда?", pron: "kudá?", pt: "para onde?" }
+      ],
+      examples: [
+        { ru: "Где аэропорт?", pron: "gdye aerapórt?", pt: "Onde fica o aeroporto?" },
+        { ru: "Куда идёт автобус?", pron: "kudá idyót avtóbus?", pt: "Para onde vai o ônibus?" }
+      ],
+      exercises: [
+        { type: "choice", prompt: "Куда significa...", answer: "para onde?", options: ["onde?", "para onde?", "quando?", "por quê?"] },
+        { type: "write", prompt: "Traduza: Onde fica o aeroporto?", answer: "Где аэропорт?" }
+      ]
+    },
+    {
+      id: "a01",
+      level: "advanced",
+      title: "Opinião e argumento",
+      goal: "Dar opinião com conectores.",
+      xp: 60,
+      grammar: "Use conectores para organizar pensamento: однако, поэтому, например.",
+      vocab: [
+        { ru: "я считаю, что", pron: "ya schitáyu, shto", pt: "eu considero que" },
+        { ru: "однако", pron: "adnáka", pt: "porém" },
+        { ru: "поэтому", pron: "paétamu", pt: "por isso" },
+        { ru: "например", pron: "naprimér", pt: "por exemplo" }
+      ],
+      examples: [
+        { ru: "Я считаю, что русский язык интересный.", pron: "ya schitáyu, shto rússkiy yazýk intirésnyy", pt: "Eu considero que russo é interessante." },
+        { ru: "Это сложно, однако полезно.", pron: "éta slózhna, adnáka polézna", pt: "É difícil, porém útil." }
+      ],
+      exercises: [
+        { type: "choice", prompt: "Como dizer porém?", answer: "однако", options: ["поэтому", "однако", "вчера", "куда"] },
+        { type: "write", prompt: "Traduza: Eu considero que russo é interessante", answer: "Я считаю, что русский язык интересный" }
+      ]
+    },
+    {
+      id: "a02",
+      level: "advanced",
+      title: "Resumo de texto",
+      goal: "Resumir uma ideia principal.",
+      xp: 60,
+      grammar: "Para resumir: Текст о... Главная идея... Автор говорит, что...",
+      vocab: [
+        { ru: "главная идея", pron: "glávnaya idéya", pt: "ideia principal" },
+        { ru: "текст о", pron: "tekst o", pt: "texto sobre" },
+        { ru: "автор говорит", pron: "ávtar gavarít", pt: "o autor diz" },
+        { ru: "важно", pron: "vázhna", pt: "é importante" }
+      ],
+      examples: [
+        { ru: "Текст о культуре.", pron: "tekst o kultúre", pt: "O texto é sobre cultura." },
+        { ru: "Главная идея текста — образование.", pron: "glávnaya idéya téksta — abrazavániye", pt: "A ideia principal do texto é educação." }
+      ],
+      exercises: [
+        { type: "choice", prompt: "Главная идея significa...", answer: "ideia principal", options: ["exemplo", "ideia principal", "resposta", "erro"] },
+        { type: "write", prompt: "Traduza: O texto é sobre cultura", answer: "Текст о культуре" }
+      ]
+    }
+  ],
+
+  dictionary: [
+    { ru: "Привет", pron: "privet", pt: "oi", cat: "saudação" },
+    { ru: "Здравствуйте", pron: "zdrávstvuyte", pt: "olá formal", cat: "saudação" },
+    { ru: "Спасибо", pron: "spasíba", pt: "obrigado", cat: "educação" },
+    { ru: "Пожалуйста", pron: "pajáluysta", pt: "por favor / de nada", cat: "educação" },
+    { ru: "Да", pron: "da", pt: "sim", cat: "básico" },
+    { ru: "Нет", pron: "nyet", pt: "não", cat: "básico" },
+    { ru: "Вода", pron: "vadá", pt: "água", cat: "comida" },
+    { ru: "Кофе", pron: "kófe", pt: "café", cat: "comida" },
+    { ru: "Хлеб", pron: "khlyep", pt: "pão", cat: "comida" },
+    { ru: "Дом", pron: "dom", pt: "casa", cat: "lugares" },
+    { ru: "Школа", pron: "shkóla", pt: "escola", cat: "lugares" },
+    { ru: "Город", pron: "górat", pt: "cidade", cat: "lugares" },
+    { ru: "Где?", pron: "gdye?", pt: "onde?", cat: "pergunta" },
+    { ru: "Что?", pron: "shto?", pt: "o quê?", cat: "pergunta" },
+    { ru: "Кто?", pron: "kto?", pt: "quem?", cat: "pergunta" },
+    { ru: "Когда?", pron: "kagdá?", pt: "quando?", cat: "pergunta" },
+    { ru: "Я хочу", pron: "ya khachú", pt: "eu quero", cat: "frase" },
+    { ru: "Мне нужно", pron: "mnye nújna", pt: "eu preciso", cat: "frase" },
+    { ru: "Сколько стоит?", pron: "skólka stóit?", pt: "quanto custa?", cat: "compras" },
+    { ru: "Очень вкусно", pron: "ótchen vkúsna", pt: "muito gostoso", cat: "restaurante" },
+    { ru: "До свидания", pron: "da svidániya", pt: "adeus", cat: "saudação" },
+    { ru: "Извините", pron: "izviníte", pt: "desculpe", cat: "educação" },
+    { ru: "Я не понимаю", pron: "ya ne panimáyu", pt: "eu não entendo", cat: "frase" },
+    { ru: "Повторите, пожалуйста", pron: "paftaríte, pajáluysta", pt: "repita, por favor", cat: "frase" }
+  ],
+
+  writingChallenges: [
+    { pt: "Oi", ru: "Привет", hint: "Saudação informal." },
+    { pt: "Obrigado", ru: "Спасибо", hint: "Palavra de educação." },
+    { pt: "Eu quero água", ru: "Я хочу воду", hint: "Use Я хочу + objeto." },
+    { pt: "Meu nome é Anna", ru: "Меня зовут Анна", hint: "Use Меня зовут + nome." },
+    { pt: "Eu sou do Brasil", ru: "Я из Бразилии", hint: "Use Я из + país." },
+    { pt: "Onde fica o metrô?", ru: "Где метро?", hint: "Где = onde." },
+    { pt: "Quanto custa o café?", ru: "Сколько стоит кофе?", hint: "Сколько стоит = quanto custa." },
+    { pt: "O texto é sobre cultura", ru: "Текст о культуре", hint: "Текст о + assunto." }
+  ],
+
+  scenarios: [
+    { id: "market", title: "Mercado", opener: "Você está no mercado. Peça água e pergunte o preço." },
+    { id: "airport", title: "Aeroporto", opener: "Você está no aeroporto. Pergunte onde fica o portão ou a passagem." },
+    { id: "school", title: "Escola", opener: "Você está na escola. Apresente-se e diga que aprende russo." },
+    { id: "restaurant", title: "Restaurante", opener: "Você está no restaurante. Peça cardápio ou a conta." },
+    { id: "travel", title: "Viagem", opener: "Você está viajando. Pergunte onde fica o metrô e como chegar." }
+  ]
+};
