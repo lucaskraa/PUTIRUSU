@@ -1,20 +1,36 @@
 {
-  "name": "putirusu",
-  "version": "17.0.0",
+  "name": "putirusu-cursive",
+  "version": "15.0.0",
   "private": true,
-  "description": "Curso completo de russo A1-C2 com progressão, fala, escrita cursiva, cultura, jogos e professor.",
+  "description": "Curso completo de russo com escrita cirílica de forma e cursiva, áudio, fala, revisão e professor com fallback local.",
   "main": "server.js",
   "type": "commonjs",
   "scripts": {
     "start": "node server.js",
-    "dev": "node --watch server.js",
-    "check": "node --check server.js && node --check script.js"
+    "dev": "nodemon server.js",
+    "check": "node --check server.js && node --check script.js",
+    "test": "npm run check"
   },
   "engines": {
     "node": ">=18"
   },
   "dependencies": {
+    "bcryptjs": "^2.4.3",
     "cors": "^2.8.5",
     "express": "^4.21.2"
-  }
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.7"
+  },
+  "keywords": [
+    "russo",
+    "cirilico",
+    "cursiva",
+    "caligrafia",
+    "idiomas",
+    "educacao",
+    "putirusu"
+  ],
+  "author": "Animal S",
+  "license": "MIT"
 }
