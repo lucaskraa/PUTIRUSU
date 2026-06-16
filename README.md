@@ -1,149 +1,216 @@
-PUTIRUSU v14 — curso completo de russo
-Aplicativo completo de estudos de russo com frontend, backend Node.js, PostgreSQL, progresso por usuário, microfone e IA real no servidor.
-Conteúdo incluído
-60 aulas do A1 ao C1.
-5 níveis: A1, A2, B1, B2 e C1.
-Vocabulário, diálogos, exemplos, exercícios e provas.
-Cadastro e login.
-Senha criptografada com bcrypt.
-Sessão por JWT.
-Progresso por aula salvo no PostgreSQL.
-Tentativas e notas.
-Revisão espaçada baseada nos erros.
-Conquistas e XP.
-IA professora real usando API no backend.
-Conversa por cenários.
-Correção de frases e textos.
-Revisão gerada pela IA.
-Microfone com reconhecimento de russo pelo navegador.
-Leitura de palavras e frases em russo.
-Jogos de tradução, digitação, escuta e memória.
-Dicionário pesquisável.
-Perfil, objetivo e meta diária.
-Design branco, azul e vermelho inspirado na bandeira russa.
-Animação de entrada com a logo PUTIRUSU.
-Estrutura
-```text
-putirusu_curso_completo_v14/
-├── server.js
-├── package.json
-├── database.sql
-├── docker-compose.yml
-├── .env.example
-├── database/
-│   ├── schema.sql
-│   └── seed.sql
-├── data/
-│   └── curriculum.json
-├── scripts/
-│   ├── migrate.js
-│   └── seed.js
-└── public/
-    ├── index.html
-    ├── assets/
-    │   └── logo-putirusu.svg
-    ├── css/
-    │   └── style.css
-    └── js/
-        ├── course-data.js
-        ├── core.js
-        ├── api.js
-        ├── auth.js
-        ├── dashboard.js
-        ├── speech.js
-        ├── course.js
-        ├── alphabet.js
-        ├── ai.js
-        ├── practice.js
-        ├── games.js
-        ├── dictionary.js
-        ├── profile.js
-        └── app.js
-```
-Instalação rápida com PostgreSQL instalado
-1. Crie o banco
-```sql
-CREATE DATABASE putirusu;
-```
-2. Copie o ambiente
-No Windows:
-```bat
-copy .env.example .env
-```
-No Linux/macOS:
-```bash
-cp .env.example .env
-```
-3. Edite o `.env`
-```env
-PORT=3000
-NODE_ENV=development
-DATABASE_URL=postgresql://postgres:postgres@localhost:5432/putirusu
-JWT_SECRET=troque_por_uma_chave_grande_e_secreta
-OPENAI_API_KEY=sua_chave_da_api
-OPENAI_MODEL=gpt-5.4-mini
-AI_MAX_OUTPUT_TOKENS=1000
-CORS_ORIGIN=http://localhost:3000
-```
-A chave da IA fica apenas no servidor. Nunca coloque a chave dentro do HTML ou do JavaScript do navegador.
-4. Instale as dependências
+# PUTIRUSU V15 — Escrita Cirílica e Cursiva
+
+O PUTIRUSU V15 é um curso de russo em sete arquivos. Esta versão mantém o aplicativo anterior e amplia o módulo de escrita para ensinar as 33 letras do alfabeto cirílico em letra de forma e cursiva.
+
+## Arquivos
+
+- `index.html` — telas e banco semântico offline do currículo.
+- `style.css` — interface responsiva, impressão e sistema de utilidades.
+- `script.js` — curso, escrita no canvas, áudio, microfone, revisão, jogos e progresso.
+- `server.js` — servidor Express, autenticação, progresso, tentativas e professor.
+- `database.sql` — esquema PostgreSQL e currículo completo.
+- `package.json` — dependências e comandos.
+- `README.md` — instalação e documentação.
+
+## Conteúdo de escrita
+
+O currículo de caligrafia possui 1.056 exercícios reais:
+
+- 33 letras cirílicas.
+- letra de forma e letra cursiva.
+- 16 etapas para cada modo.
+- níveis A1, A2, B1, B2 e C1.
+- palavras e traduções.
+- treino de maiúsculas e minúsculas.
+- ligações com `а`, `о`, `и` e `м`.
+- sílabas, palavras, frases, ditado, fluência e produção livre.
+
+## Funções principais
+
+- Cadastro e login.
+- Conta de demonstração.
+- Curso do A1 ao C2.
+- Alfabeto com som e exemplos.
+- Comparação entre forma e cursiva.
+- Canvas para desenhar com mouse, caneta ou dedo.
+- espessura do lápis ajustável.
+- guia com opacidade ajustável.
+- linhas de caderno.
+- modo para canhotos.
+- limpar e desfazer traços.
+- avaliação aproximada do treino.
+- progresso por letra.
+- caderno de cópia imprimível.
+- teclado cirílico na tela.
+- síntese de voz em russo.
+- reconhecimento de fala quando o navegador oferece suporte.
+- revisão de erros.
+- provas e jogos.
+- dicionário e cultura.
+- exportação do progresso.
+- API de currículo com filtros e paginação.
+
+## Requisitos
+
+- Node.js 18 ou superior.
+- npm.
+- Navegador moderno.
+- PostgreSQL é opcional; o servidor também funciona com banco JSON local.
+
+## Instalação
+
+No terminal, entre na pasta do projeto e execute:
+
 ```bash
 npm install
-```
-5. Crie as tabelas e insira o curso
-```bash
-npm run db:setup
-```
-6. Inicie
-```bash
 npm start
 ```
+
 Abra:
+
 ```text
 http://localhost:3000
 ```
-Instalação rápida com Docker
-Suba o PostgreSQL:
-```bash
-docker compose up -d
-```
-Depois:
-```bash
-cp .env.example .env
-npm install
-npm run db:seed
-npm start
-```
-Conta de teste
-Depois do seed:
+
+## Conta de teste
+
 ```text
-E-mail: demo@putirusu.com
-Senha: putirusu123
+E-mail: aluno@putirusu.com
+Senha: 123456
 ```
-IA real
-A IA real usa a rota `/api/ai/*` no `server.js` e a Responses API no backend.
-Configure:
-```env
-OPENAI_API_KEY=sua_chave
-OPENAI_MODEL=gpt-5.4-mini
-```
-Sem chave, o aplicativo continua abrindo em modo fallback local, mas as respostas não terão a mesma capacidade da IA real.
-Microfone
-O reconhecimento de fala usa a API de voz do navegador.
-Para maior compatibilidade, use Chrome ou Edge e abra o aplicativo por `http://localhost:3000`. Autorize o microfone quando o navegador solicitar.
-Comandos
+
+O arquivo `data/db.json` é criado automaticamente na primeira inicialização. Ele não precisa ser criado manualmente.
+
+## Banco PostgreSQL
+
+Crie um banco e execute:
+
 ```bash
-npm start
-npm run dev
-npm run check
-npm run db:migrate
-npm run db:seed
-npm run db:setup
+psql -U postgres -d putirusu -f database.sql
 ```
-Banco de dados
-Arquivos disponíveis:
-`database.sql`: tabelas + conquistas.
-`database/schema.sql`: estrutura completa.
-`database/seed.sql`: conquistas fixas.
-`scripts/seed.js`: insere as 60 aulas, vocabulário, exercícios e usuário demo a partir de `data/curriculum.json`.
-O seed em Node é proposital: ele mantém os relacionamentos de UUID corretos e permite atualizar o curso sem repetir registros.
+
+O SQL cria tabelas para usuários, progresso, alfabeto, currículo, tentativas de escrita, aulas, vocabulário, revisões, provas e conversas.
+
+## Professor com IA opcional
+
+O app funciona sem chave, usando o professor local. Para ativar um modelo externo, configure as variáveis antes de iniciar o servidor.
+
+Linux ou macOS:
+
+```bash
+export OPENAI_API_KEY="sua_chave"
+export OPENAI_MODEL="nome_do_modelo_disponivel_na_sua_conta"
+npm start
+```
+
+Windows PowerShell:
+
+```powershell
+$env:OPENAI_API_KEY="sua_chave"
+$env:OPENAI_MODEL="nome_do_modelo_disponivel_na_sua_conta"
+npm start
+```
+
+A chave fica somente no servidor. Nunca coloque a chave no `index.html` ou no `script.js`.
+
+## API
+
+### Saúde
+
+```http
+GET /api/health
+```
+
+### Cadastro
+
+```http
+POST /api/auth/register
+Content-Type: application/json
+
+{
+  "name": "Lucas",
+  "email": "lucas@email.com",
+  "password": "senha_segura"
+}
+```
+
+### Login
+
+```http
+POST /api/auth/login
+Content-Type: application/json
+
+{
+  "email": "aluno@putirusu.com",
+  "password": "123456"
+}
+```
+
+### Currículo de escrita
+
+```http
+GET /api/content/writing?letter=ж&mode=cursive&level=A1&limit=50
+```
+
+Filtros aceitos:
+
+- `letter`
+- `mode`
+- `level`
+- `stage`
+- `offset`
+- `limit`
+
+O total filtrado aparece no cabeçalho `X-Total-Count`.
+
+### Tentativa de escrita
+
+```http
+POST /api/writing/attempts
+Content-Type: application/json
+Authorization: Bearer TOKEN
+
+{
+  "letter": "ж",
+  "mode": "cursive",
+  "score": 82,
+  "strokes": 4
+}
+```
+
+### Professor
+
+```http
+POST /api/chat
+Content-Type: application/json
+
+{
+  "scenario": "writing",
+  "message": "Ensine a escrever Ж em cursiva"
+}
+```
+
+## Verificação
+
+```bash
+npm run check
+```
+
+Esse comando verifica a sintaxe de `server.js` e `script.js`.
+
+## Observações sobre cursiva
+
+A aparência exata da cursiva varia conforme escola, pessoa e fonte instalada. O PUTIRUSU ensina movimento, proporção, ligação e legibilidade. Para uma caligrafia escolar específica, compare também com um caderno de caligrafia produzido por um professor ou editora russa.
+
+## Segurança
+
+- Troque `TOKEN_SECRET` em produção.
+- Use HTTPS em produção.
+- Não publique chaves de API.
+- Use um banco PostgreSQL real em produção.
+- Restrinja CORS ao domínio do aplicativo.
+- Faça backup dos dados dos alunos.
+
+## Licença
+
+MIT.
