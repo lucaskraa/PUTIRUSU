@@ -1,4384 +1,19109 @@
+"use strict";
 const express = require("express");
 const cors = require("cors");
-const { Pool } = require("pg");
-const crypto = require("crypto");
 const path = require("path");
 const fs = require("fs");
+const crypto = require("crypto");
+const bcrypt = require("bcryptjs");
 
 const app = express();
-
 const PORT = Number(process.env.PORT || 3000);
-const SESSION_DAYS = 30;
-const IS_PRODUCTION = process.env.NODE_ENV === "production";
-
-const pool = new Pool({
-connectionString: process.env.DATABASE_URL,
-ssl:
-IS_PRODUCTION && process.env.DATABASE_SSL !== "false"
-? { rejectUnauthorized: false }
-: false,
-});
-
-app.disable("x-powered-by");
-
-app.use(
-cors({
-origin: true,
-credentials: true,
-methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-allowedHeaders: [
-"Content-Type",
-"Authorization",
-"X-Requested-With",
-],
-}),
-);
-
-app.use(express.json({ limit: "12mb" }));
-app.use(express.urlencoded({ extended: true, limit: "12mb" }));
-
-app.use(express.static(path.join(__dirname)));
-
-function normalizeEmail(value) {
-return String(value || "").trim().toLowerCase();
-}
-
-function normalizeText(value) {
-return String(value || "")
-.trim()
-.toLowerCase()
-.normalize("NFD")
-.replace(/[\u0300-\u036f]/g, "");
-}
-
-function createToken() {
-return crypto.randomBytes(48).toString("hex");
-}
-
-function hashToken(token) {
-return crypto.createHash("sha256").update(token).digest("hex");
-}
-
-function randomId() {
-return crypto.randomUUID();
-}
-
-function clamp(value, minimum, maximum) {
-const number = Number(value);
-
-if (!Number.isFinite(number)) {
-return minimum;
-}
-
-return Math.min(Math.max(number, minimum), maximum);
-}
-
-function safeInteger(value, fallback = 0) {
-const number = Number.parseInt(value, 10);
-
-if (!Number.isFinite(number)) {
-return fallback;
-}
-
-return number;
-}
-
-function safeNumber(value, fallback = 0) {
-const number = Number(value);
-
-if (!Number.isFinite(number)) {
-return fallback;
-}
-
-return number;
-}
-
-function todayISO() {
-return new Date().toISOString().slice(0, 10);
-}
-
-function dateToISO(date) {
-return new Date(date).toISOString().slice(0, 10);
-}
-
-function addDays(date, days) {
-const result = new Date(date);
-result.setDate(result.getDate() + days);
-return result;
-}
-
-function sanitizeName(value) {
-return String(value || "")
-.replace(/[<>]/g, "")
-.replace(/\s+/g, " ")
-.trim()
-.slice(0, 120);
-}
-
-function sanitizeShortText(value, maximum = 300) {
-return String(value || "")
-.replace(/[<>]/g, "")
-.trim()
-.slice(0, maximum);
-}
-
-function isValidEmail(email) {
-return /^[^\s@]+@[^\s@]+.[^\s@]+$/.test(email);
-}
-
-function isStrongEnoughPassword(password) {
-const value = String(password || "");
-
-return value.length >= 6 && value.length <= 128;
-}
-
-function getBearerToken(request) {
-const authorization = request.headers.authorization || "";
-
-if (!authorization.startsWith("Bearer ")) {
-return null;
-}
-
-return authorization.slice(7).trim();
-}
-
-function sendSuccess(response, data = {}, status = 200) {
-return response.status(status).json({
-success: true,
-...data,
-});
-}
-
-function sendError(response, message, status = 400, details = null) {
-return response.status(status).json({
-success: false,
-message,
-details,
-});
-}
-
-async function query(text, values = []) {
-return pool.query(text, values);
-}
-
-async function transaction(callback) {
-const client = await pool.connect();
-
-try {
-await client.query("BEGIN");
-
-```
-const result = await callback(client);
-
-await client.query("COMMIT");
-
-return result;
-```
-
-} catch (error) {
-await client.query("ROLLBACK");
-throw error;
-} finally {
-client.release();
-}
-}
-
-async function ensureDatabaseConnection() {
-try {
-await query("SELECT NOW()");
-console.log("Banco de dados conectado.");
-} catch (error) {
-console.error("Não foi possível conectar ao PostgreSQL.");
-console.error(error.message);
-}
-}
-
-async function createSession(userId, request) {
-const token = createToken();
-const tokenHash = hashToken(token);
-const expiresAt = addDays(new Date(), SESSION_DAYS);
-
-const deviceName = sanitizeShortText(
-request.headers["user-agent"] || "Dispositivo desconhecido",
-150,
-);
-
-const ipAddress =
-request.headers["x-forwarded-for"]?.split(",")[0]?.trim() ||
-request.socket.remoteAddress ||
-null;
-
-await query(
-`       INSERT INTO user_sessions (
-        user_id,
-        token_hash,
-        device_name,
-        ip_address,
-        expires_at
-      )
-      VALUES ($1, $2, $3, $4, $5)
-    `,
-[userId, tokenHash, deviceName, ipAddress, expiresAt],
-);
-
-return {
-token,
-expiresAt,
-};
-}
-
-async function revokeSession(token) {
-if (!token) {
-return;
-}
-
-await query(
-`       UPDATE user_sessions
-      SET revoked_at = CURRENT_TIMESTAMP
-      WHERE token_hash = $1
-    `,
-[hashToken(token)],
-);
-}
-
-async function removeExpiredSessions() {
-await query(
-`       DELETE FROM user_sessions
-      WHERE expires_at < CURRENT_TIMESTAMP
-      OR revoked_at IS NOT NULL
-    `,
-);
-}
-
-async function authMiddleware(request, response, next) {
-try {
-const token = getBearerToken(request);
-
-```
-if (!token) {
-  return sendError(response, "Sessão não encontrada.", 401);
-}
-
-const tokenHash = hashToken(token);
-
-const result = await query(
-  `
-    SELECT
-      u.id,
-      u.name,
-      u.email,
-      u.role,
-      u.account_status,
-      u.email_verified,
-      u.onboarding_completed,
-      s.id AS session_id,
-      s.expires_at
-    FROM user_sessions s
-    JOIN users u ON u.id = s.user_id
-    WHERE s.token_hash = $1
-    AND s.revoked_at IS NULL
-    AND s.expires_at > CURRENT_TIMESTAMP
-    LIMIT 1
-  `,
-  [tokenHash],
-);
-
-if (!result.rows.length) {
-  return sendError(response, "Sua sessão expirou. Entre novamente.", 401);
-}
-
-const user = result.rows[0];
-
-if (user.account_status !== "active") {
-  return sendError(response, "Esta conta não está ativa.", 403);
-}
-
-request.authToken = token;
-request.user = user;
-
-return next();
-```
-
-} catch (error) {
-console.error(error);
-return sendError(response, "Erro ao validar sua sessão.", 500);
-}
-}
-
-async function optionalAuthMiddleware(request, response, next) {
-const token = getBearerToken(request);
-
-if (!token) {
-request.user = null;
-return next();
-}
-
-return authMiddleware(request, response, next);
-}
-
-async function adminMiddleware(request, response, next) {
-if (!request.user || request.user.role !== "admin") {
-return sendError(response, "Acesso permitido somente para administradores.", 403);
-}
-
-return next();
-}
-
-async function getFullUser(userId) {
-const result = await query(
-`       SELECT
-        u.id,
-        u.name,
-        u.email,
-        u.avatar_url,
-        u.role,
-        u.email_verified,
-        u.onboarding_completed,
-        u.last_login_at,
-        u.created_at,
-        p.reason_to_learn,
-        p.current_level,
-        p.daily_goal_minutes,
-        p.preferred_study_time,
-        p.native_language,
-        p.knows_cyrillic,
-        p.primary_focus,
-        p.interests,
-        p.timezone,
-        p.biography,
-        pref.sound_enabled,
-        pref.music_enabled,
-        pref.microphone_enabled,
-        pref.notifications_enabled,
-        pref.daily_reminder_enabled,
-        pref.dark_mode,
-        pref.reduced_motion,
-        pref.left_handed_mode,
-        pref.transliteration_enabled,
-        pref.auto_play_audio,
-        pref.interface_language,
-        pref.speech_rate,
-        stats.total_xp,
-        stats.current_streak,
-        stats.longest_streak,
-        stats.activities_completed,
-        stats.units_completed,
-        stats.lessons_completed,
-        stats.exams_completed,
-        stats.games_played,
-        stats.words_learned,
-        stats.letters_learned,
-        stats.minutes_studied,
-        stats.last_study_date
-      FROM users u
-      LEFT JOIN user_profiles p ON p.user_id = u.id
-      LEFT JOIN user_preferences pref ON pref.user_id = u.id
-      LEFT JOIN user_stats stats ON stats.user_id = u.id
-      WHERE u.id = $1
-      LIMIT 1
-    `,
-[userId],
-);
-
-return result.rows[0] || null;
-}
-
-async function ensureUserRelatedRows(client, userId) {
-await client.query(
-`       INSERT INTO user_profiles (user_id)
-      VALUES ($1)
-      ON CONFLICT (user_id) DO NOTHING
-    `,
-[userId],
-);
-
-await client.query(
-`       INSERT INTO user_preferences (user_id)
-      VALUES ($1)
-      ON CONFLICT (user_id) DO NOTHING
-    `,
-[userId],
-);
-
-await client.query(
-`       INSERT INTO user_stats (user_id)
-      VALUES ($1)
-      ON CONFLICT (user_id) DO NOTHING
-    `,
-[userId],
-);
-}
-
-async function initializeCourseProgress(client, userId) {
-const units = await client.query(
-`       SELECT
-        cu.id,
-        cu.display_order,
-        cl.display_order AS level_order
-      FROM course_units cu
-      JOIN course_levels cl ON cl.id = cu.level_id
-      WHERE cu.is_published = TRUE
-      ORDER BY cl.display_order, cu.display_order
-    `,
-);
-
-let firstUnit = true;
-
-for (const unit of units.rows) {
-await client.query(
-`         INSERT INTO user_unit_progress (
-          user_id,
-          unit_id,
-          status,
-          progress_percent
-        )
-        VALUES ($1, $2, $3, 0)
-        ON CONFLICT (user_id, unit_id) DO NOTHING
-      `,
-[userId, unit.id, firstUnit ? "available" : "locked"],
-);
-
-```
-firstUnit = false;
-```
-
-}
-}
-
-async function updateStreak(client, userId) {
-const result = await client.query(
-`       SELECT
-        current_streak,
-        longest_streak,
-        last_study_date
-      FROM user_stats
-      WHERE user_id = $1
-      FOR UPDATE
-    `,
-[userId],
-);
-
-if (!result.rows.length) {
-return;
-}
-
-const stats = result.rows[0];
-const today = todayISO();
-const yesterday = dateToISO(addDays(new Date(), -1));
-
-let currentStreak = safeInteger(stats.current_streak, 0);
-let longestStreak = safeInteger(stats.longest_streak, 0);
-
-if (!stats.last_study_date) {
-currentStreak = 1;
-} else {
-const lastStudyDate = dateToISO(stats.last_study_date);
-
-```
-if (lastStudyDate === today) {
-  return;
-}
-
-if (lastStudyDate === yesterday) {
-  currentStreak += 1;
-} else {
-  currentStreak = 1;
-}
-```
-
-}
-
-longestStreak = Math.max(longestStreak, currentStreak);
-
-await client.query(
-`       UPDATE user_stats
-      SET
-        current_streak = $2,
-        longest_streak = $3,
-        last_study_date = CURRENT_DATE,
-        updated_at = CURRENT_TIMESTAMP
-      WHERE user_id = $1
-    `,
-[userId, currentStreak, longestStreak],
-);
-}
-
-function compareAnswer(submittedAnswer, expectedAnswer, acceptedAnswers = []) {
-const submitted = normalizeText(submittedAnswer);
-
-const answers = [expectedAnswer, ...acceptedAnswers]
-.filter(Boolean)
-.map(normalizeText);
-
-if (!submitted || !answers.length) {
-return false;
-}
-
-return answers.includes(submitted);
-}
-
-function calculateTextSimilarity(firstText, secondText) {
-const first = normalizeText(firstText);
-const second = normalizeText(secondText);
-
-if (!first || !second) {
-return 0;
-}
-
-if (first === second) {
-return 100;
-}
-
-const firstWords = first.split(/\s+/);
-const secondWords = second.split(/\s+/);
-
-let matches = 0;
-
-for (const word of firstWords) {
-if (secondWords.includes(word)) {
-matches += 1;
-}
-}
-
-const wordScore =
-(matches / Math.max(firstWords.length, secondWords.length)) * 100;
-
-let characterMatches = 0;
-const maximumLength = Math.max(first.length, second.length);
-
-for (let index = 0; index < maximumLength; index += 1) {
-if (first[index] === second[index]) {
-characterMatches += 1;
-}
-}
-
-const characterScore = (characterMatches / maximumLength) * 100;
-
-return Math.round(wordScore * 0.65 + characterScore * 0.35);
-}
-
-async function getFirstAvailableUnit(userId) {
-const result = await query(
-`       SELECT
-        cu.id,
-        cu.title,
-        cu.subtitle,
-        cu.display_order,
-        cl.code AS level_code,
-        up.status,
-        up.progress_percent,
-        up.last_accessed_at
-      FROM user_unit_progress up
-      JOIN course_units cu ON cu.id = up.unit_id
-      JOIN course_levels cl ON cl.id = cu.level_id
-      WHERE up.user_id = $1
-      AND up.status IN ('available', 'in_progress')
-      ORDER BY
-        up.last_accessed_at DESC NULLS LAST,
-        cl.display_order,
-        cu.display_order
-      LIMIT 1
-    `,
-[userId],
-);
-
-return result.rows[0] || null;
-}
-
-async function getFirstAvailableActivity(userId, unitId) {
-const result = await query(
-`       SELECT
-        a.id,
-        a.lesson_id,
-        a.activity_type,
-        a.display_order,
-        l.title AS lesson_title,
-        l.display_order AS lesson_order,
-        COALESCE(ap.status, 'available') AS status
-      FROM activities a
-      JOIN course_lessons l ON l.id = a.lesson_id
-      LEFT JOIN user_activity_progress ap
-        ON ap.activity_id = a.id
-        AND ap.user_id = $1
-      WHERE l.unit_id = $2
-      AND a.is_published = TRUE
-      AND l.is_published = TRUE
-      AND COALESCE(ap.completed, FALSE) = FALSE
-      ORDER BY l.display_order, a.display_order
-      LIMIT 1
-    `,
-[userId, unitId],
-);
-
-return result.rows[0] || null;
-}
-
-async function refreshLessonProgress(client, userId, lessonId) {
-const result = await client.query(
-`       SELECT
-        COUNT(a.id)::INTEGER AS total,
-        COUNT(ap.id) FILTER (WHERE ap.completed = TRUE)::INTEGER AS completed,
-        COALESCE(SUM(ap.xp_earned), 0)::INTEGER AS xp
-      FROM activities a
-      LEFT JOIN user_activity_progress ap
-        ON ap.activity_id = a.id
-        AND ap.user_id = $1
-      WHERE a.lesson_id = $2
-      AND a.is_published = TRUE
-    `,
-[userId, lessonId],
-);
-
-const row = result.rows[0];
-const total = safeInteger(row.total, 0);
-const completed = safeInteger(row.completed, 0);
-const progressPercent = total > 0 ? (completed / total) * 100 : 0;
-const completedLesson = total > 0 && completed >= total;
-
-await client.query(
-`       INSERT INTO user_lesson_progress (
-        user_id,
-        lesson_id,
-        status,
-        activities_completed,
-        progress_percent,
-        total_xp_earned,
-        started_at,
-        completed_at,
-        last_accessed_at
-      )
-      VALUES (
-        $1,
-        $2,
-        $3,
-        $4,
-        $5,
-        $6,
-        CURRENT_TIMESTAMP,
-        CASE WHEN $7 THEN CURRENT_TIMESTAMP ELSE NULL END,
-        CURRENT_TIMESTAMP
-      )
-      ON CONFLICT (user_id, lesson_id)
-      DO UPDATE SET
-        status = EXCLUDED.status,
-        activities_completed = EXCLUDED.activities_completed,
-        progress_percent = EXCLUDED.progress_percent,
-        total_xp_earned = EXCLUDED.total_xp_earned,
-        completed_at = CASE
-          WHEN $7 THEN COALESCE(
-            user_lesson_progress.completed_at,
-            CURRENT_TIMESTAMP
-          )
-          ELSE user_lesson_progress.completed_at
-        END,
-        last_accessed_at = CURRENT_TIMESTAMP,
-        updated_at = CURRENT_TIMESTAMP
-    `,
-[
-userId,
-lessonId,
-completedLesson ? "completed" : "in_progress",
-completed,
-progressPercent,
-safeInteger(row.xp, 0),
-completedLesson,
-],
-);
-
-return {
-total,
-completed,
-progressPercent,
-completedLesson,
-};
-}
-
-async function refreshUnitProgress(client, userId, unitId) {
-const result = await client.query(
-`       SELECT
-        COUNT(a.id)::INTEGER AS total_activities,
-        COUNT(ap.id) FILTER (WHERE ap.completed = TRUE)::INTEGER AS completed_activities,
-        COUNT(DISTINCT l.id)::INTEGER AS total_lessons,
-        COUNT(DISTINCT lp.lesson_id)
-          FILTER (WHERE lp.status = 'completed')::INTEGER AS completed_lessons,
-        COALESCE(SUM(ap.xp_earned), 0)::INTEGER AS xp
-      FROM course_lessons l
-      JOIN activities a ON a.lesson_id = l.id
-      LEFT JOIN user_activity_progress ap
-        ON ap.activity_id = a.id
-        AND ap.user_id = $1
-      LEFT JOIN user_lesson_progress lp
-        ON lp.lesson_id = l.id
-        AND lp.user_id = $1
-      WHERE l.unit_id = $2
-      AND l.is_published = TRUE
-      AND a.is_published = TRUE
-    `,
-[userId, unitId],
-);
-
-const requirementResult = await client.query(
-`       SELECT minimum_activities_to_complete
-      FROM course_units
-      WHERE id = $1
-    `,
-[unitId],
-);
-
-const row = result.rows[0];
-
-const totalActivities = safeInteger(row.total_activities, 0);
-const completedActivities = safeInteger(row.completed_activities, 0);
-const totalLessons = safeInteger(row.total_lessons, 0);
-const completedLessons = safeInteger(row.completed_lessons, 0);
-
-const minimumActivities = safeInteger(
-requirementResult.rows[0]?.minimum_activities_to_complete,
-totalActivities,
-);
-
-const requiredAmount = Math.min(
-Math.max(minimumActivities, 1),
-Math.max(totalActivities, 1),
-);
-
-const progressPercent =
-totalActivities > 0
-? Math.min((completedActivities / requiredAmount) * 100, 100)
-: 0;
-
-const completedUnit =
-totalActivities > 0 && completedActivities >= requiredAmount;
-
-await client.query(
-`       UPDATE user_unit_progress
-      SET
-        status = $3,
-        activities_completed = $4,
-        lessons_completed = $5,
-        progress_percent = $6,
-        total_xp_earned = $7,
-        started_at = COALESCE(started_at, CURRENT_TIMESTAMP),
-        completed_at = CASE
-          WHEN $8 THEN COALESCE(completed_at, CURRENT_TIMESTAMP)
-          ELSE completed_at
-        END,
-        last_accessed_at = CURRENT_TIMESTAMP,
-        updated_at = CURRENT_TIMESTAMP
-      WHERE user_id = $1
-      AND unit_id = $2
-    `,
-[
-userId,
-unitId,
-completedUnit ? "completed" : "in_progress",
-completedActivities,
-completedLessons,
-progressPercent,
-safeInteger(row.xp, 0),
-completedUnit,
-],
-);
-
-if (completedUnit) {
-const nextUnit = await client.query(
-`         SELECT next_unit.id
-        FROM course_units current_unit
-        JOIN course_levels current_level
-          ON current_level.id = current_unit.level_id
-        JOIN course_units next_unit
-          ON (
-            next_unit.level_id = current_unit.level_id
-            AND next_unit.display_order = current_unit.display_order + 1
-          )
-          OR (
-            next_unit.display_order = 1
-            AND next_unit.level_id = (
-              SELECT id
-              FROM course_levels
-              WHERE display_order = current_level.display_order + 1
-              LIMIT 1
-            )
-          )
-        WHERE current_unit.id = $1
-        ORDER BY next_unit.display_order
-        LIMIT 1
-      `,
-[unitId],
-);
-
-```
-if (nextUnit.rows.length) {
-  await client.query(
-    `
-      INSERT INTO user_unit_progress (
-        user_id,
-        unit_id,
-        status,
-        progress_percent
-      )
-      VALUES ($1, $2, 'available', 0)
-      ON CONFLICT (user_id, unit_id)
-      DO UPDATE SET
-        status = CASE
-          WHEN user_unit_progress.status = 'locked'
-          THEN 'available'
-          ELSE user_unit_progress.status
-        END,
-        updated_at = CURRENT_TIMESTAMP
-    `,
-    [userId, nextUnit.rows[0].id],
-  );
-}
-```
-
-}
-
-return {
-totalActivities,
-completedActivities,
-totalLessons,
-completedLessons,
-progressPercent,
-completedUnit,
-};
-}
-
-async function updateDailyMissionProgress(
-client,
-userId,
-missionType,
-increment = 1,
-) {
-await client.query(
-`       UPDATE user_daily_missions udm
-      SET
-        current_amount = LEAST(
-          udm.current_amount + $3,
-          udm.target_amount
-        ),
-        completed = (
-          udm.current_amount + $3 >= udm.target_amount
-        ),
-        completed_at = CASE
-          WHEN udm.current_amount + $3 >= udm.target_amount
-          THEN COALESCE(udm.completed_at, CURRENT_TIMESTAMP)
-          ELSE udm.completed_at
-        END
-      FROM mission_templates mt
-      WHERE udm.mission_template_id = mt.id
-      AND udm.user_id = $1
-      AND udm.mission_date = CURRENT_DATE
-      AND mt.mission_type = $2
-    `,
-[userId, missionType, increment],
-);
-}
-
-async function createDailyMissions(userId) {
-const existing = await query(
-`       SELECT COUNT(*)::INTEGER AS amount
-      FROM user_daily_missions
-      WHERE user_id = $1
-      AND mission_date = CURRENT_DATE
-    `,
-[userId],
-);
-
-if (safeInteger(existing.rows[0].amount, 0) >= 3) {
-return;
-}
-
-const templates = await query(
-`       SELECT
-        id,
-        title,
-        description,
-        target_amount,
-        xp_reward
-      FROM mission_templates
-      WHERE is_active = TRUE
-      ORDER BY RANDOM()
-      LIMIT 3
-    `,
-);
-
-for (const mission of templates.rows) {
-await query(
-`         INSERT INTO user_daily_missions (
-          user_id,
-          mission_template_id,
-          mission_date,
-          title,
-          description,
-          target_amount,
-          xp_reward
-        )
-        VALUES ($1, $2, CURRENT_DATE, $3, $4, $5, $6)
-        ON CONFLICT (user_id, mission_date, title)
-        DO NOTHING
-      `,
-[
-userId,
-mission.id,
-mission.title,
-mission.description,
-mission.target_amount,
-mission.xp_reward,
-],
-);
-}
-}
-
-async function checkAchievements(client, userId) {
-const statsResult = await client.query(
-`       SELECT *
-      FROM user_stats
-      WHERE user_id = $1
-    `,
-[userId],
-);
-
-if (!statsResult.rows.length) {
-return [];
-}
-
-const stats = statsResult.rows[0];
-
-const achievements = await client.query(
-`       SELECT *
-      FROM achievements
-      ORDER BY requirement_value
-    `,
-);
-
-const unlocked = [];
-
-for (const achievement of achievements.rows) {
-const currentValue = safeInteger(
-stats[achievement.requirement_type],
-0,
-);
-
-```
-if (currentValue < achievement.requirement_value) {
-  continue;
-}
-
-const result = await client.query(
-  `
-    INSERT INTO user_achievements (
-      user_id,
-      achievement_id
-    )
-    VALUES ($1, $2)
-    ON CONFLICT (user_id, achievement_id)
-    DO NOTHING
-    RETURNING *
-  `,
-  [userId, achievement.id],
-);
-
-if (result.rows.length) {
-  unlocked.push({
-    ...achievement,
-    unlocked_at: result.rows[0].unlocked_at,
-  });
-
-  await client.query(
-    `
-      UPDATE user_stats
-      SET
-        total_xp = total_xp + $2,
-        updated_at = CURRENT_TIMESTAMP
-      WHERE user_id = $1
-    `,
-    [userId, achievement.xp_reward],
-  );
-}
-```
-
-}
-
-return unlocked;
-}
-
-function buildLocalTeacherResponse({
-message,
-mode,
-level,
-userName,
-}) {
-const text = String(message || "").trim();
-const normalized = normalizeText(text);
-
-if (!text) {
-return {
-answer: "Escreva uma pergunta para eu ajudar com seu russo.",
-examples: [],
-corrections: [],
-exercise: null,
-};
-}
-
-const translations = {
-"oi": {
-russian: "Привет!",
-transliteration: "Privet!",
-explanation: "Forma informal de dizer oi.",
-},
-"ola": {
-russian: "Здравствуйте!",
-transliteration: "Zdravstvuyte!",
-explanation: "Forma formal e educada de dizer olá.",
-},
-"bom dia": {
-russian: "Доброе утро!",
-transliteration: "Dobroye utro!",
-explanation: "Usado durante a manhã.",
-},
-"boa tarde": {
-russian: "Добрый день!",
-transliteration: "Dobryy den!",
-explanation: "Cumprimento usado durante o dia.",
-},
-"boa noite": {
-russian: "Добрый вечер!",
-transliteration: "Dobryy vecher!",
-explanation: "Cumprimento usado no período da noite.",
-},
-"obrigado": {
-russian: "Спасибо!",
-transliteration: "Spasibo!",
-explanation: "Obrigado ou obrigada em russo.",
-},
-"por favor": {
-russian: "Пожалуйста.",
-transliteration: "Pozhaluysta.",
-explanation: "Pode significar por favor ou de nada.",
-},
-"meu nome e lucas": {
-russian: "Меня зовут Лукас.",
-transliteration: "Menya zovut Lukas.",
-explanation: "Literalmente: chamam-me Lucas.",
-},
-"eu sou brasileiro": {
-russian: "Я бразилец.",
-transliteration: "Ya brazilets.",
-explanation: "Forma masculina de dizer que é brasileiro.",
-},
-"eu sou brasileira": {
-russian: "Я бразильянка.",
-transliteration: "Ya brazilyanka.",
-explanation: "Forma feminina de dizer que é brasileira.",
-},
-"eu te amo": {
-russian: "Я тебя люблю.",
-transliteration: "Ya tebya lyublyu.",
-explanation: "Ordem literal: eu você amo.",
-},
-"como voce esta": {
-russian: "Как ты?",
-transliteration: "Kak ty?",
-explanation: "Forma informal de perguntar como alguém está.",
-},
-"onde fica o banheiro": {
-russian: "Где находится туалет?",
-transliteration: "Gde nakhoditsya tualet?",
-explanation: "Frase útil para viagens.",
-},
-};
-
-if (mode === "translate" || normalized.startsWith("traduza")) {
-const cleaned = normalized
-.replace(/^traduza\s*/, "")
-.replace(/^para russo\s*/, "")
-.trim();
-
-```
-const direct = translations[cleaned] || translations[normalized];
-
-if (direct) {
+const ROOT = __dirname;
+const DATA_DIR = path.join(ROOT, "data");
+const DATA_FILE = path.join(DATA_DIR, "db.json");
+const TOKEN_SECRET = process.env.TOKEN_SECRET || "putirusu-local-secret-change-me";
+
+app.use(cors({ origin: true, credentials: true }));
+app.use(express.json({ limit: "8mb" }));
+app.use(express.urlencoded({ extended: true }));
+app.use(express.static(ROOT, { extensions: ["html"] }));
+
+function defaultDatabase() {
+  const passwordHash = bcrypt.hashSync("123456", 10);
   return {
-    answer:
-      `${direct.russian}\n\n` +
-      `Transliteração: ${direct.transliteration}\n\n` +
-      direct.explanation,
-    examples: [direct.russian],
-    corrections: [],
-    exercise: {
-      instruction: "Repita a frase em voz alta.",
-      expected_answer: direct.russian,
-    },
+    users: [{ id: "demo-user", name: "Aluno", email: "aluno@putirusu.com", passwordHash, level: "A1", minutes: 20, createdAt: new Date().toISOString() }],
+    progress: [{ userId: "demo-user", xp: 0, streak: 1, lessons: 0, letters: {}, updatedAt: new Date().toISOString() }],
+    writingAttempts: [], chats: [], examResults: [], reviewEvents: [], notes: [], audit: []
   };
 }
+function ensureDatabase() {
+  fs.mkdirSync(DATA_DIR, { recursive: true });
+  if (!fs.existsSync(DATA_FILE)) fs.writeFileSync(DATA_FILE, JSON.stringify(defaultDatabase(), null, 2));
+}
+function readDatabase() {
+  ensureDatabase();
+  try { return JSON.parse(fs.readFileSync(DATA_FILE, "utf8")); }
+  catch (error) { const backup = `${DATA_FILE}.broken-${Date.now()}`; try { fs.copyFileSync(DATA_FILE, backup); } catch (_) {} const db=defaultDatabase(); writeDatabase(db); return db; }
+}
+function writeDatabase(data) {
+  ensureDatabase();
+  const temp = `${DATA_FILE}.tmp`;
+  fs.writeFileSync(temp, JSON.stringify(data, null, 2));
+  fs.renameSync(temp, DATA_FILE);
+}
+function id(prefix="id") { return `${prefix}_${Date.now().toString(36)}_${crypto.randomBytes(5).toString("hex")}`; }
+function safeUser(user) { const { passwordHash, ...safe } = user; return safe; }
+function base64url(value) { return Buffer.from(value).toString("base64url"); }
+function signToken(userId) { const payload=base64url(JSON.stringify({sub:userId,exp:Date.now()+1000*60*60*24*30})); const signature=crypto.createHmac("sha256",TOKEN_SECRET).update(payload).digest("base64url"); return `${payload}.${signature}`; }
+function verifyToken(token) { try { const [payload,signature]=String(token||"").split("."); const expected=crypto.createHmac("sha256",TOKEN_SECRET).update(payload).digest("base64url"); if(!crypto.timingSafeEqual(Buffer.from(signature),Buffer.from(expected)))return null; const data=JSON.parse(Buffer.from(payload,"base64url").toString("utf8")); if(data.exp<Date.now())return null; return data.sub; } catch (_) { return null; } }
+function auth(req,res,next) { const token=(req.headers.authorization||"").replace(/^Bearer\s+/i,""); const userId=verifyToken(token); if(!userId)return res.status(401).json({error:"Sessão inválida ou expirada."}); req.userId=userId; next(); }
+function audit(db,userId,action,details={}) { db.audit.push({id:id("audit"),userId,action,details,createdAt:new Date().toISOString()}); if(db.audit.length>5000)db.audit=db.audit.slice(-5000); }
+function findProgress(db,userId) { let progress=db.progress.find(p=>p.userId===userId); if(!progress){progress={userId,xp:0,streak:1,lessons:0,letters:{},updatedAt:new Date().toISOString()};db.progress.push(progress);} return progress; }
+function validateEmail(email) { return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(email||"").toLowerCase()); }
+function normalizeText(text) { return String(text||"").trim().toLowerCase().replace(/ё/g,"е").replace(/\s+/g," "); }
 
-return {
-  answer:
-    "Ainda não reconheci essa frase no tradutor local. " +
-    "Posso explicar as palavras separadamente ou usar uma integração de IA configurada no servidor.",
-  examples: [],
-  corrections: [],
-  exercise: {
-    instruction: "Tente escrever uma frase mais curta.",
-    expected_answer: null,
-  },
-};
-```
-
+app.get("/api/health", (req,res)=>res.json({ok:true,app:"PUTIRUSU",version:"15.0.0",time:new Date().toISOString()}));
+app.post("/api/auth/register", (req,res)=>{
+  const db=readDatabase(); const name=String(req.body.name||"").trim(); const email=String(req.body.email||"").trim().toLowerCase(); const password=String(req.body.password||"");
+  if(name.length<2)return res.status(400).json({error:"Informe um nome válido."}); if(!validateEmail(email))return res.status(400).json({error:"E-mail inválido."}); if(password.length<4)return res.status(400).json({error:"A senha precisa ter pelo menos 4 caracteres."}); if(db.users.some(u=>u.email===email))return res.status(409).json({error:"Este e-mail já está cadastrado."});
+  const user={id:id("user"),name,email,passwordHash:bcrypt.hashSync(password,10),level:"A1",minutes:20,createdAt:new Date().toISOString()}; db.users.push(user); const progress=findProgress(db,user.id); audit(db,user.id,"register"); writeDatabase(db); res.status(201).json({user:safeUser(user),token:signToken(user.id),progress});
+});
+app.post("/api/auth/login", (req,res)=>{
+  const db=readDatabase(); const email=String(req.body.email||"").trim().toLowerCase(); const user=db.users.find(u=>u.email===email); if(!user||!bcrypt.compareSync(String(req.body.password||""),user.passwordHash))return res.status(401).json({error:"E-mail ou senha incorretos."}); const progress=findProgress(db,user.id);audit(db,user.id,"login");writeDatabase(db);res.json({user:safeUser(user),token:signToken(user.id),progress});
+});
+app.get("/api/me",auth,(req,res)=>{const db=readDatabase();const user=db.users.find(u=>u.id===req.userId);if(!user)return res.status(404).json({error:"Usuário não encontrado."});res.json({user:safeUser(user),progress:findProgress(db,user.id)});});
+app.put("/api/profile",auth,(req,res)=>{const db=readDatabase();const user=db.users.find(u=>u.id===req.userId);if(!user)return res.status(404).json({error:"Usuário não encontrado."});if(req.body.name)user.name=String(req.body.name).trim().slice(0,80);if(req.body.level)user.level=String(req.body.level).slice(0,2);if(req.body.minutes)user.minutes=Math.max(5,Math.min(180,Number(req.body.minutes)));user.updatedAt=new Date().toISOString();audit(db,req.userId,"profile_update");writeDatabase(db);res.json({user:safeUser(user)});});
+app.get("/api/progress",auth,(req,res)=>{const db=readDatabase();res.json(findProgress(db,req.userId));});
+app.put("/api/progress",auth,(req,res)=>{const db=readDatabase();const p=findProgress(db,req.userId);["xp","streak","lessons"].forEach(k=>{if(Number.isFinite(Number(req.body[k])))p[k]=Number(req.body[k]);});if(req.body.letters&&typeof req.body.letters==="object")p.letters=req.body.letters;p.updatedAt=new Date().toISOString();audit(db,req.userId,"progress_update");writeDatabase(db);res.json(p);});
+app.post("/api/writing/attempts",(req,res)=>{const token=(req.headers.authorization||"").replace(/^Bearer\s+/i,"");const userId=verifyToken(token)||"local-demo";const db=readDatabase();const letter=String(req.body.letter||"").slice(0,2);const score=Math.max(0,Math.min(100,Number(req.body.score)||0));const attempt={id:id("write"),userId,letter,mode:req.body.mode==="print"?"print":"cursive",score,strokes:Math.max(0,Number(req.body.strokes)||0),createdAt:new Date().toISOString()};db.writingAttempts.push(attempt);if(userId!=="local-demo"){const p=findProgress(db,userId);const old=p.letters[letter]||{score:0,attempts:0};p.letters[letter]={score:Math.max(old.score||0,score),attempts:(old.attempts||0)+1,mode:attempt.mode,updatedAt:attempt.createdAt};p.xp+=(score>=75?15:5);p.updatedAt=attempt.createdAt;}writeDatabase(db);res.status(201).json(attempt);});
+app.get("/api/writing/attempts",auth,(req,res)=>{const db=readDatabase();res.json(db.writingAttempts.filter(a=>a.userId===req.userId).slice(-200).reverse());});
+app.get("/api/writing/stats",auth,(req,res)=>{const db=readDatabase();const attempts=db.writingAttempts.filter(a=>a.userId===req.userId);const byLetter={};attempts.forEach(a=>{byLetter[a.letter]||={attempts:0,best:0,average:0,total:0};const x=byLetter[a.letter];x.attempts++;x.best=Math.max(x.best,a.score);x.total+=a.score;x.average=Math.round(x.total/x.attempts);});res.json({total:attempts.length,byLetter});});
+app.post("/api/chat",async(req,res)=>{const token=(req.headers.authorization||"").replace(/^Bearer\s+/i,"");const userId=verifyToken(token)||"local-demo";const message=String(req.body.message||"").trim();const scenario=String(req.body.scenario||"professor");let answer=null;let provider="local";try{answer=await realTeacherAnswer(message,scenario);if(answer)provider="openai";}catch(error){console.error("Falha na IA externa:",error.message);}if(!answer)answer=teacherAnswer(message,scenario);const db=readDatabase();db.chats.push({id:id("chat"),userId,message,scenario,answer,provider,createdAt:new Date().toISOString()});if(db.chats.length>10000)db.chats=db.chats.slice(-10000);writeDatabase(db);res.json({answer,provider});});
+function teacherAnswer(message,scenario){const m=normalizeText(message);if(!m)return "Escreva uma pergunta sobre russo.";if(m.includes("я есть студент"))return "Correção: Я студент. No presente, o verbo быть normalmente é omitido. Tradução: Eu sou estudante.";if(m.includes("т")&&m.includes("curs"))return "Т т: a letra de forma lembra T. A minúscula cursiva escolar frequentemente parece um m latino. Treine ттт e depois escreva там.";if(m.includes("ж")&&(m.includes("escre")||m.includes("curs")))return "Ж ж: faça um centro firme e abra os braços com simetria. Som parecido com o j francês. Pratique: жа, же, жи, жизнь.";if(m.includes("obrigad"))return "Спасибо — obrigado. Pronúncia aproximada: spa-sí-ba. Copie três vezes em cursiva.";if(scenario==="writing")return "Envie a letra que deseja treinar. Eu explicarei forma, cursiva, direção, ligação e uma palavra.";if(scenario==="market")return "No mercado: Сколько это стоит? — Quanto isso custa?";if(scenario==="airport")return "No aeroporto: Где выход на посадку? — Onde fica o portão de embarque?";if(scenario==="restaurant")return "No restaurante: Я хотел бы чай, пожалуйста. — Eu gostaria de chá, por favor.";return "Professor PUTIRUSU: diga qual palavra, letra ou frase você quer aprender. Eu mostrarei russo, tradução, pronúncia, explicação e exercício.";}
+async function realTeacherAnswer(message,scenario){
+  const apiKey=process.env.OPENAI_API_KEY;
+  const model=process.env.OPENAI_MODEL;
+  if(!apiKey||!model||!message)return null;
+  const instructions="Você é a professora do PUTIRUSU. Ensine russo em português brasileiro. Sempre apresente: russo, tradução, pronúncia aproximada, explicação curta e um exercício. Para escrita, diferencie letra de forma e cursiva e priorize legibilidade.";
+  const response=await fetch("https://api.openai.com/v1/responses",{method:"POST",headers:{"Authorization":`Bearer ${apiKey}`,"Content-Type":"application/json"},body:JSON.stringify({model,instructions,input:`Cenário: ${scenario}\nAluno: ${message}`})});
+  if(!response.ok)throw new Error(`OpenAI respondeu ${response.status}`);
+  const data=await response.json();
+  if(typeof data.output_text==="string"&&data.output_text.trim())return data.output_text.trim();
+  const parts=[];
+  for(const item of data.output||[])for(const content of item.content||[])if(content.type==="output_text"&&content.text)parts.push(content.text);
+  return parts.join("\n").trim()||null;
 }
 
-if (
-normalized.includes("alfabeto") ||
-normalized.includes("cirilico")
-) {
-return {
-answer:
-"O alfabeto russo possui 33 letras. Comece separando-as em três grupos: " +
-"letras parecidas com o português, letras com formato conhecido mas som diferente " +
-"e letras completamente novas. Pratique primeiro А, К, М, О e Т.",
-examples: [
-"А — арбуз",
-"К — кот",
-"М — мама",
-"О — окно",
-"Т — торт",
-],
-corrections: [],
-exercise: {
-instruction: "Qual dessas letras possui som de N: Н, Р ou С?",
-expected_answer: "Н",
-},
-};
-}
+app.post("/api/exams",auth,(req,res)=>{const db=readDatabase();const result={id:id("exam"),userId:req.userId,score:Number(req.body.score)||0,total:Number(req.body.total)||0,answers:req.body.answers||[],createdAt:new Date().toISOString()};db.examResults.push(result);audit(db,req.userId,"exam_submit",{score:result.score,total:result.total});writeDatabase(db);res.status(201).json(result);});
+app.get("/api/exams",auth,(req,res)=>{const db=readDatabase();res.json(db.examResults.filter(x=>x.userId===req.userId).reverse());});
+app.post("/api/review",auth,(req,res)=>{const db=readDatabase();const event={id:id("review"),userId:req.userId,item:String(req.body.item||"").slice(0,200),result:req.body.result==="correct"?"correct":"wrong",createdAt:new Date().toISOString()};db.reviewEvents.push(event);writeDatabase(db);res.status(201).json(event);});
+app.get("/api/content/writing",(req,res)=>{const letter=String(req.query.letter||"").toLowerCase();const mode=String(req.query.mode||"");const level=String(req.query.level||"").toUpperCase();const stageCode=String(req.query.stage||"");const offset=Math.max(0,Number(req.query.offset)||0);const limit=Math.max(1,Math.min(300,Number(req.query.limit)||100));let items=PUTIRUSU_WRITING_CURRICULUM;if(letter)items=items.filter(x=>x.letter===letter);if(mode)items=items.filter(x=>x.mode===mode);if(level)items=items.filter(x=>x.level===level);if(stageCode)items=items.filter(x=>x.stageCode===stageCode);res.set("X-Total-Count",String(items.length));res.json(items.slice(offset,offset+limit));});
+app.get("/api/content/random",(req,res)=>res.json(PUTIRUSU_WRITING_CURRICULUM[Math.floor(Math.random()*PUTIRUSU_WRITING_CURRICULUM.length)]));
+app.get("/api/export",auth,(req,res)=>{const db=readDatabase();const user=db.users.find(u=>u.id===req.userId);res.json({user:safeUser(user),progress:findProgress(db,req.userId),writingAttempts:db.writingAttempts.filter(a=>a.userId===req.userId),examResults:db.examResults.filter(a=>a.userId===req.userId),reviewEvents:db.reviewEvents.filter(a=>a.userId===req.userId),exportedAt:new Date().toISOString()});});
+app.use("/api",(req,res)=>res.status(404).json({error:"Rota da API não encontrada."}));
+app.get("*",(req,res)=>res.sendFile(path.join(ROOT,"index.html")));
+app.use((error,req,res,next)=>{console.error(error);res.status(500).json({error:"Erro interno do servidor."});});
+if(require.main===module){ensureDatabase();app.listen(PORT,()=>console.log(`PUTIRUSU 15 rodando em http://localhost:${PORT}`));}
+module.exports={app,readDatabase,writeDatabase,teacherAnswer,verifyToken};
 
-if (
-normalized.includes("cursiva") ||
-normalized.includes("escrever")
-) {
-return {
-answer:
-"Na cursiva russa, algumas letras mudam bastante. A letra д minúscula pode lembrar um g latino, " +
-"e a letra т minúscula pode lembrar um m. Pratique devagar, mantendo as ligações entre as letras.",
-examples: [
-"мама",
-"привет",
-"Россия",
-"Москва",
-],
-corrections: [],
-exercise: {
-instruction: "Copie três vezes a palavra привет.",
-expected_answer: "привет",
-},
-};
-}
-
-if (
-normalized.includes("pronuncia") ||
-normalized.includes("falar")
-) {
-return {
-answer:
-"Para melhorar a pronúncia, escute uma frase curta, repita lentamente e depois fale na velocidade normal. " +
-"Preste atenção ao acento tônico, porque as vogais sem acento podem mudar de som.",
-examples: [
-"Спасибо — spa-SÍ-ba",
-"Хорошо — kha-ra-SHÔ",
-"Молоко — ma-la-KÔ",
-],
-corrections: [],
-exercise: {
-instruction: "Fale lentamente: Спасибо за помощь.",
-expected_answer: "Спасибо за помощь.",
-},
-};
-}
-
-if (mode === "correct") {
-return {
-answer:
-"Envie uma frase em russo e eu analisarei a ordem das palavras, as terminações e a concordância. " +
-"Também mostrarei uma versão corrigida e explicarei cada alteração.",
-examples: [
-"Я живу в Бразилии.",
-"Меня зовут Лукас.",
-],
-corrections: [],
-exercise: {
-instruction: "Escreva uma frase usando Я.",
-expected_answer: null,
-},
-};
-}
-
-return {
-answer:
-`Olá, ${userName || "aluno"}! Vou explicar no nível ${level || "A1"}. ` +
-"Posso ajudar com tradução, gramática, pronúncia, cursiva, vocabulário ou criar um exercício. " +
-"Escreva uma frase específica para receber uma explicação detalhada.",
-examples: [
-"Меня зовут...",
-"Я живу в...",
-"Я люблю...",
-],
-corrections: [],
-exercise: {
-instruction: "Complete: Меня зовут ...",
-expected_answer: null,
-},
-};
-}
-
-async function callExternalTeacher({
-messages,
-mode,
-level,
-}) {
-const apiKey = process.env.OPENAI_API_KEY;
-
-if (!apiKey) {
-return null;
-}
-
-const systemPrompt = `
-Você é o professor virtual do aplicativo PUTIRUSU.
-Ensine russo para um aluno brasileiro.
-Nível atual: ${level || "A1"}.
-Modo solicitado: ${mode || "general"}.
-
-Regras:
-
-* Responda em português, usando russo quando necessário.
-* Sempre mostre transliteração em frases para iniciantes.
-* Corrija erros de modo claro e respeitoso.
-* Não invente regras gramaticais.
-* Dê no máximo três exemplos por resposta.
-* Termine com um pequeno exercício.
-* Não responda de forma genérica.
-  `.trim();
-
-  try {
-  const response = await fetch(
-  "https://api.openai.com/v1/responses",
+const PUTIRUSU_WRITING_CURRICULUM = [
   {
-  method: "POST",
-  headers: {
-  "Content-Type": "application/json",
-  Authorization: `Bearer ${apiKey}`,
+    id: 1,
+    letterPosition: 1,
+    upper: "А",
+    letter: "а",
+    mode: "print",
+    stageNumber: 1,
+    stageCode: "observacao",
+    stageTitle: "Observar proporções",
+    level: "A1",
+    target: "ааааа",
+    word: "арбуз",
+    translation: "melancia",
+    sound: "a",
+    prompt: "Observar proporções: pratique А а em letra de forma. Compare altura, largura, inclinação e posição na linha.",
+    objective: "Reconhecer a forma antes de escrever.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
   },
-  body: JSON.stringify({
-  model: process.env.OPENAI_MODEL || "gpt-4.1-mini",
-  input: [
   {
-  role: "system",
-  content: systemPrompt,
+    id: 2,
+    letterPosition: 1,
+    upper: "А",
+    letter: "а",
+    mode: "print",
+    stageNumber: 2,
+    stageCode: "movimento_ar",
+    stageTitle: "Desenhar no ar",
+    level: "A1",
+    target: "ааааа",
+    word: "арбуз",
+    translation: "melancia",
+    sound: "a",
+    prompt: "Desenhar no ar: pratique А а em letra de forma. Faça o movimento amplo com o braço antes de usar o lápis.",
+    objective: "Memorizar a direção geral do traço.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
   },
-  ...messages.map((message) => ({
-  role: message.sender === "assistant" ? "assistant" : "user",
-  content: message.content,
-  })),
-  ],
-  max_output_tokens: 800,
-  }),
-  },
-  );
-
-  if (!response.ok) {
-  const errorText = await response.text();
-  console.error("Erro do professor externo:", errorText);
-  return null;
-  }
-
-  const data = await response.json();
-
-  const text =
-  data.output_text ||
-  data.output
-  ?.flatMap((item) => item.content || [])
-  ?.map((content) => content.text || "")
-  ?.join("\n")
-  ?.trim();
-
-  if (!text) {
-  return null;
-  }
-
-  return {
-  answer: text,
-  examples: [],
-  corrections: [],
-  exercise: null,
-  };
-  } catch (error) {
-  console.error("Falha ao chamar professor externo:", error.message);
-  return null;
-  }
-  }
-
-app.get("/api/health", async (request, response) => {
-try {
-const databaseResult = await query(
-"SELECT CURRENT_TIMESTAMP AS database_time",
-);
-
-```
-return sendSuccess(response, {
-  status: "online",
-  serverTime: new Date().toISOString(),
-  databaseTime: databaseResult.rows[0].database_time,
-  version: "17.0.0",
-});
-```
-
-} catch (error) {
-return sendError(
-response,
-"Servidor online, mas o banco de dados não respondeu.",
-503,
-error.message,
-);
-}
-});
-
-app.post("/api/auth/register", async (request, response) => {
-try {
-const name = sanitizeName(request.body.name);
-const email = normalizeEmail(request.body.email);
-const password = String(request.body.password || "");
-
-```
-if (name.length < 2) {
-  return sendError(
-    response,
-    "Digite um nome com pelo menos dois caracteres.",
-  );
-}
-
-if (!isValidEmail(email)) {
-  return sendError(response, "Digite um e-mail válido.");
-}
-
-if (!isStrongEnoughPassword(password)) {
-  return sendError(
-    response,
-    "A senha precisa ter entre 6 e 128 caracteres.",
-  );
-}
-
-const existingUser = await query(
-  `
-    SELECT id
-    FROM users
-    WHERE email = $1
-    LIMIT 1
-  `,
-  [email],
-);
-
-if (existingUser.rows.length) {
-  return sendError(
-    response,
-    "Já existe uma conta cadastrada com este e-mail.",
-    409,
-  );
-}
-
-const result = await transaction(async (client) => {
-  const insertedUser = await client.query(
-    `
-      INSERT INTO users (
-        name,
-        email,
-        password_hash,
-        role,
-        account_status,
-        onboarding_completed
-      )
-      VALUES (
-        $1,
-        $2,
-        crypt($3, gen_salt('bf')),
-        'student',
-        'active',
-        FALSE
-      )
-      RETURNING
-        id,
-        name,
-        email,
-        role,
-        onboarding_completed,
-        created_at
-    `,
-    [name, email, password],
-  );
-
-  const user = insertedUser.rows[0];
-
-  await ensureUserRelatedRows(client, user.id);
-  await initializeCourseProgress(client, user.id);
-
-  return user;
-});
-
-const session = await createSession(result.id, request);
-
-return sendSuccess(
-  response,
   {
-    message: "Conta criada com sucesso.",
-    token: session.token,
-    expiresAt: session.expiresAt,
-    user: result,
-    nextStep: "onboarding",
+    id: 3,
+    letterPosition: 1,
+    upper: "А",
+    letter: "а",
+    mode: "print",
+    stageNumber: 3,
+    stageCode: "maiuscula_guiada",
+    stageTitle: "Traçar maiúscula",
+    level: "A1",
+    target: "ААААА",
+    word: "арбуз",
+    translation: "melancia",
+    sound: "a",
+    prompt: "Traçar maiúscula: pratique А а em letra de forma. Passe sobre o modelo maiúsculo sem acelerar.",
+    objective: "Controlar início, direção e encerramento.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
   },
-  201,
-);
-```
-
-} catch (error) {
-console.error(error);
-
-```
-return sendError(
-  response,
-  "Não foi possível criar sua conta.",
-  500,
-  error.message,
-);
-```
-
-}
-});
-
-app.post("/api/auth/login", async (request, response) => {
-try {
-const email = normalizeEmail(request.body.email);
-const password = String(request.body.password || "");
-
-```
-if (!isValidEmail(email) || !password) {
-  return sendError(response, "E-mail ou senha inválidos.");
-}
-
-const result = await query(
-  `
-    SELECT
-      id,
-      name,
-      email,
-      role,
-      account_status,
-      onboarding_completed,
-      email_verified
-    FROM users
-    WHERE email = $1
-    AND password_hash = crypt($2, password_hash)
-    LIMIT 1
-  `,
-  [email, password],
-);
-
-if (!result.rows.length) {
-  return sendError(response, "E-mail ou senha incorretos.", 401);
-}
-
-const user = result.rows[0];
-
-if (user.account_status !== "active") {
-  return sendError(response, "Esta conta não está ativa.", 403);
-}
-
-await query(
-  `
-    UPDATE users
-    SET last_login_at = CURRENT_TIMESTAMP
-    WHERE id = $1
-  `,
-  [user.id],
-);
-
-const session = await createSession(user.id, request);
-
-await createDailyMissions(user.id);
-
-const fullUser = await getFullUser(user.id);
-
-return sendSuccess(response, {
-  message: "Login realizado com sucesso.",
-  token: session.token,
-  expiresAt: session.expiresAt,
-  user: fullUser,
-  nextStep: user.onboarding_completed ? "loading" : "onboarding",
-});
-```
-
-} catch (error) {
-console.error(error);
-
-```
-return sendError(
-  response,
-  "Não foi possível entrar na conta.",
-  500,
-  error.message,
-);
-```
-
-}
-});
-
-app.post(
-"/api/auth/logout",
-authMiddleware,
-async (request, response) => {
-try {
-await revokeSession(request.authToken);
-
-```
-  return sendSuccess(response, {
-    message: "Você saiu da conta.",
-  });
-} catch (error) {
-  console.error(error);
-
-  return sendError(
-    response,
-    "Não foi possível encerrar a sessão.",
-    500,
-  );
-}
-```
-
-},
-);
-
-app.get(
-"/api/auth/me",
-authMiddleware,
-async (request, response) => {
-try {
-const user = await getFullUser(request.user.id);
-
-```
-  if (!user) {
-    return sendError(response, "Usuário não encontrado.", 404);
-  }
-
-  return sendSuccess(response, { user });
-} catch (error) {
-  console.error(error);
-  return sendError(response, "Erro ao carregar seu perfil.", 500);
-}
-```
-
-},
-);
-
-app.post(
-"/api/onboarding",
-authMiddleware,
-async (request, response) => {
-try {
-const reasonToLearn = sanitizeShortText(
-request.body.reasonToLearn,
-100,
-);
-
-```
-  const currentLevel = ["A1", "A2", "B1", "B2", "C1", "C2"].includes(
-    request.body.currentLevel,
-  )
-    ? request.body.currentLevel
-    : "A1";
-
-  const dailyGoalMinutes = clamp(
-    request.body.dailyGoalMinutes,
-    5,
-    240,
-  );
-
-  const preferredStudyTime =
-    request.body.preferredStudyTime || null;
-
-  const knowsCyrillic = Boolean(request.body.knowsCyrillic);
-
-  const primaryFocus = sanitizeShortText(
-    request.body.primaryFocus || "general",
-    50,
-  );
-
-  const interests = Array.isArray(request.body.interests)
-    ? request.body.interests
-        .map((item) => sanitizeShortText(item, 60))
-        .filter(Boolean)
-        .slice(0, 12)
-    : [];
-
-  await transaction(async (client) => {
-    await client.query(
-      `
-        INSERT INTO user_profiles (
-          user_id,
-          reason_to_learn,
-          current_level,
-          daily_goal_minutes,
-          preferred_study_time,
-          knows_cyrillic,
-          primary_focus,
-          interests
-        )
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-        ON CONFLICT (user_id)
-        DO UPDATE SET
-          reason_to_learn = EXCLUDED.reason_to_learn,
-          current_level = EXCLUDED.current_level,
-          daily_goal_minutes = EXCLUDED.daily_goal_minutes,
-          preferred_study_time = EXCLUDED.preferred_study_time,
-          knows_cyrillic = EXCLUDED.knows_cyrillic,
-          primary_focus = EXCLUDED.primary_focus,
-          interests = EXCLUDED.interests,
-          updated_at = CURRENT_TIMESTAMP
-      `,
-      [
-        request.user.id,
-        reasonToLearn,
-        currentLevel,
-        dailyGoalMinutes,
-        preferredStudyTime,
-        knowsCyrillic,
-        primaryFocus,
-        interests,
-      ],
-    );
-
-    await client.query(
-      `
-        UPDATE users
-        SET onboarding_completed = TRUE
-        WHERE id = $1
-      `,
-      [request.user.id],
-    );
-  });
-
-  await createDailyMissions(request.user.id);
-
-  const user = await getFullUser(request.user.id);
-
-  return sendSuccess(response, {
-    message: "Seu plano de estudo foi preparado.",
-    user,
-    nextStep: "loading",
-  });
-} catch (error) {
-  console.error(error);
-
-  return sendError(
-    response,
-    "Não foi possível salvar suas respostas.",
-    500,
-    error.message,
-  );
-}
-```
-
-},
-);
-
-app.get(
-"/api/dashboard",
-authMiddleware,
-async (request, response) => {
-try {
-await createDailyMissions(request.user.id);
-
-```
-  const user = await getFullUser(request.user.id);
-  const currentUnit = await getFirstAvailableUnit(request.user.id);
-
-  let currentActivity = null;
-
-  if (currentUnit) {
-    currentActivity = await getFirstAvailableActivity(
-      request.user.id,
-      currentUnit.id,
-    );
-  }
-
-  const missions = await query(
-    `
-      SELECT
-        id,
-        title,
-        description,
-        target_amount,
-        current_amount,
-        completed,
-        xp_reward
-      FROM user_daily_missions
-      WHERE user_id = $1
-      AND mission_date = CURRENT_DATE
-      ORDER BY completed, title
-    `,
-    [request.user.id],
-  );
-
-  const achievements = await query(
-    `
-      SELECT
-        a.title,
-        a.description,
-        a.icon,
-        ua.unlocked_at
-      FROM user_achievements ua
-      JOIN achievements a ON a.id = ua.achievement_id
-      WHERE ua.user_id = $1
-      ORDER BY ua.unlocked_at DESC
-      LIMIT 5
-    `,
-    [request.user.id],
-  );
-
-  return sendSuccess(response, {
-    user,
-    currentUnit,
-    currentActivity,
-    missions: missions.rows,
-    achievements: achievements.rows,
-  });
-} catch (error) {
-  console.error(error);
-
-  return sendError(
-    response,
-    "Não foi possível carregar a tela inicial.",
-    500,
-  );
-}
-```
-
-},
-);
-
-app.get(
-"/api/course",
-authMiddleware,
-async (request, response) => {
-try {
-const result = await query(
-`           SELECT
-            cl.id AS level_id,
-            cl.code AS level_code,
-            cl.name AS level_name,
-            cl.description AS level_description,
-            cl.display_order AS level_order,
-            cu.id AS unit_id,
-            cu.title,
-            cu.subtitle,
-            cu.description,
-            cu.icon,
-            cu.display_order AS unit_order,
-            cu.minimum_activities_to_complete,
-            cu.xp_reward,
-            COALESCE(up.status, 'locked') AS status,
-            COALESCE(up.activities_completed, 0) AS activities_completed,
-            COALESCE(up.lessons_completed, 0) AS lessons_completed,
-            COALESCE(up.progress_percent, 0) AS progress_percent,
-            up.last_accessed_at
-          FROM course_levels cl
-          JOIN course_units cu ON cu.level_id = cl.id
-          LEFT JOIN user_unit_progress up
-            ON up.unit_id = cu.id
-            AND up.user_id = $1
-          WHERE cu.is_published = TRUE
-          ORDER BY cl.display_order, cu.display_order
-        `,
-[request.user.id],
-);
-
-```
-  const levelsMap = new Map();
-
-  for (const row of result.rows) {
-    if (!levelsMap.has(row.level_id)) {
-      levelsMap.set(row.level_id, {
-        id: row.level_id,
-        code: row.level_code,
-        name: row.level_name,
-        description: row.level_description,
-        order: row.level_order,
-        units: [],
-      });
-    }
-
-    levelsMap.get(row.level_id).units.push({
-      id: row.unit_id,
-      title: row.title,
-      subtitle: row.subtitle,
-      description: row.description,
-      icon: row.icon,
-      order: row.unit_order,
-      status: row.status,
-      progressPercent: safeNumber(row.progress_percent),
-      activitiesCompleted: row.activities_completed,
-      lessonsCompleted: row.lessons_completed,
-      minimumActivitiesToComplete:
-        row.minimum_activities_to_complete,
-      xpReward: row.xp_reward,
-      lastAccessedAt: row.last_accessed_at,
-    });
-  }
-
-  return sendSuccess(response, {
-    levels: Array.from(levelsMap.values()),
-  });
-} catch (error) {
-  console.error(error);
-
-  return sendError(
-    response,
-    "Não foi possível carregar o curso.",
-    500,
-  );
-}
-```
-
-},
-);
-
-app.get(
-"/api/course/continue",
-authMiddleware,
-async (request, response) => {
-try {
-const unit = await getFirstAvailableUnit(request.user.id);
-
-```
-  if (!unit) {
-    return sendSuccess(response, {
-      completed: true,
-      message: "Você concluiu todas as unidades disponíveis.",
-    });
-  }
-
-  const activity = await getFirstAvailableActivity(
-    request.user.id,
-    unit.id,
-  );
-
-  return sendSuccess(response, {
-    completed: false,
-    unit,
-    activity,
-  });
-} catch (error) {
-  console.error(error);
-
-  return sendError(
-    response,
-    "Não foi possível encontrar sua próxima atividade.",
-    500,
-  );
-}
-```
-
-},
-);
-
-app.get(
-"/api/units/:unitId",
-authMiddleware,
-async (request, response) => {
-try {
-const unitId = request.params.unitId;
-
-```
-  const accessResult = await query(
-    `
-      SELECT
-        cu.*,
-        cl.code AS level_code,
-        cl.name AS level_name,
-        COALESCE(up.status, 'locked') AS user_status,
-        COALESCE(up.progress_percent, 0) AS progress_percent,
-        COALESCE(up.activities_completed, 0) AS activities_completed
-      FROM course_units cu
-      JOIN course_levels cl ON cl.id = cu.level_id
-      LEFT JOIN user_unit_progress up
-        ON up.unit_id = cu.id
-        AND up.user_id = $2
-      WHERE cu.id = $1
-      LIMIT 1
-    `,
-    [unitId, request.user.id],
-  );
-
-  if (!accessResult.rows.length) {
-    return sendError(response, "Unidade não encontrada.", 404);
-  }
-
-  const unit = accessResult.rows[0];
-
-  if (unit.user_status === "locked") {
-    return sendError(
-      response,
-      "Conclua a unidade atual para desbloquear esta unidade.",
-      403,
-    );
-  }
-
-  await query(
-    `
-      UPDATE user_unit_progress
-      SET
-        status = CASE
-          WHEN status = 'available' THEN 'in_progress'
-          ELSE status
-        END,
-        started_at = COALESCE(started_at, CURRENT_TIMESTAMP),
-        last_accessed_at = CURRENT_TIMESTAMP,
-        updated_at = CURRENT_TIMESTAMP
-      WHERE user_id = $1
-      AND unit_id = $2
-    `,
-    [request.user.id, unitId],
-  );
-
-  const lessonsResult = await query(
-    `
-      SELECT
-        l.id,
-        l.title,
-        l.description,
-        l.lesson_type,
-        l.display_order,
-        l.xp_reward,
-        l.estimated_minutes,
-        COALESCE(lp.status, 'available') AS status,
-        COALESCE(lp.activities_completed, 0) AS activities_completed,
-        COALESCE(lp.progress_percent, 0) AS progress_percent,
-        COUNT(a.id)::INTEGER AS total_activities
-      FROM course_lessons l
-      LEFT JOIN activities a
-        ON a.lesson_id = l.id
-        AND a.is_published = TRUE
-      LEFT JOIN user_lesson_progress lp
-        ON lp.lesson_id = l.id
-        AND lp.user_id = $2
-      WHERE l.unit_id = $1
-      AND l.is_published = TRUE
-      GROUP BY l.id, lp.id
-      ORDER BY l.display_order
-    `,
-    [unitId, request.user.id],
-  );
-
-  return sendSuccess(response, {
-    unit,
-    lessons: lessonsResult.rows,
-  });
-} catch (error) {
-  console.error(error);
-
-  return sendError(
-    response,
-    "Não foi possível abrir esta unidade.",
-    500,
-  );
-}
-```
-
-},
-);
-
-app.get(
-"/api/lessons/:lessonId",
-authMiddleware,
-async (request, response) => {
-try {
-const lessonId = request.params.lessonId;
-
-```
-  const lessonResult = await query(
-    `
-      SELECT
-        l.*,
-        cu.title AS unit_title,
-        cu.id AS unit_id,
-        COALESCE(up.status, 'locked') AS unit_status
-      FROM course_lessons l
-      JOIN course_units cu ON cu.id = l.unit_id
-      LEFT JOIN user_unit_progress up
-        ON up.unit_id = cu.id
-        AND up.user_id = $2
-      WHERE l.id = $1
-      LIMIT 1
-    `,
-    [lessonId, request.user.id],
-  );
-
-  if (!lessonResult.rows.length) {
-    return sendError(response, "Aula não encontrada.", 404);
-  }
-
-  const lesson = lessonResult.rows[0];
-
-  if (lesson.unit_status === "locked") {
-    return sendError(
-      response,
-      "Esta aula ainda está bloqueada.",
-      403,
-    );
-  }
-
-  const activitiesResult = await query(
-    `
-      SELECT
-        a.id,
-        a.activity_type,
-        a.instruction,
-        a.question,
-        a.russian_text,
-        a.portuguese_text,
-        a.transliteration,
-        a.audio_text,
-        a.audio_url,
-        a.image_url,
-        a.difficulty,
-        a.xp_reward,
-        a.display_order,
-        a.metadata,
-        COALESCE(ap.status, 'available') AS status,
-        COALESCE(ap.attempts, 0) AS attempts,
-        COALESCE(ap.best_score, 0) AS best_score,
-        COALESCE(ap.completed, FALSE) AS completed
-      FROM activities a
-      LEFT JOIN user_activity_progress ap
-        ON ap.activity_id = a.id
-        AND ap.user_id = $2
-      WHERE a.lesson_id = $1
-      AND a.is_published = TRUE
-      ORDER BY a.display_order
-    `,
-    [lessonId, request.user.id],
-  );
-
-  return sendSuccess(response, {
-    lesson,
-    activities: activitiesResult.rows,
-  });
-} catch (error) {
-  console.error(error);
-
-  return sendError(
-    response,
-    "Não foi possível abrir esta aula.",
-    500,
-  );
-}
-```
-
-},
-);
-
-app.get(
-"/api/activities/:activityId",
-authMiddleware,
-async (request, response) => {
-try {
-const activityId = request.params.activityId;
-
-```
-  const result = await query(
-    `
-      SELECT
-        a.id,
-        a.lesson_id,
-        a.activity_type,
-        a.instruction,
-        a.question,
-        a.russian_text,
-        a.portuguese_text,
-        a.transliteration,
-        a.audio_text,
-        a.audio_url,
-        a.image_url,
-        a.difficulty,
-        a.xp_reward,
-        a.display_order,
-        a.metadata,
-        l.title AS lesson_title,
-        l.unit_id,
-        cu.title AS unit_title,
-        COALESCE(up.status, 'locked') AS unit_status,
-        COALESCE(ap.attempts, 0) AS attempts,
-        COALESCE(ap.best_score, 0) AS best_score,
-        COALESCE(ap.completed, FALSE) AS completed
-      FROM activities a
-      JOIN course_lessons l ON l.id = a.lesson_id
-      JOIN course_units cu ON cu.id = l.unit_id
-      LEFT JOIN user_unit_progress up
-        ON up.unit_id = cu.id
-        AND up.user_id = $2
-      LEFT JOIN user_activity_progress ap
-        ON ap.activity_id = a.id
-        AND ap.user_id = $2
-      WHERE a.id = $1
-      AND a.is_published = TRUE
-      LIMIT 1
-    `,
-    [activityId, request.user.id],
-  );
-
-  if (!result.rows.length) {
-    return sendError(response, "Atividade não encontrada.", 404);
-  }
-
-  const activity = result.rows[0];
-
-  if (activity.unit_status === "locked") {
-    return sendError(
-      response,
-      "Conclua a unidade atual antes de acessar esta atividade.",
-      403,
-    );
-  }
-
-  const options = await query(
-    `
-      SELECT
-        id,
-        option_text,
-        option_audio_text,
-        option_image_url,
-        display_order
-      FROM activity_options
-      WHERE activity_id = $1
-      ORDER BY display_order
-    `,
-    [activityId],
-  );
-
-  await query(
-    `
-      INSERT INTO user_activity_progress (
-        user_id,
-        activity_id,
-        status,
-        attempts,
-        first_attempt_at
-      )
-      VALUES ($1, $2, 'in_progress', 0, CURRENT_TIMESTAMP)
-      ON CONFLICT (user_id, activity_id)
-      DO UPDATE SET
-        status = CASE
-          WHEN user_activity_progress.completed = TRUE
-          THEN 'completed'
-          ELSE 'in_progress'
-        END,
-        updated_at = CURRENT_TIMESTAMP
-    `,
-    [request.user.id, activityId],
-  );
-
-  return sendSuccess(response, {
-    activity,
-    options: options.rows,
-  });
-} catch (error) {
-  console.error(error);
-
-  return sendError(
-    response,
-    "Não foi possível carregar a atividade.",
-    500,
-  );
-}
-```
-
-},
-);
-
-app.post(
-"/api/activities/:activityId/submit",
-authMiddleware,
-async (request, response) => {
-try {
-const activityId = request.params.activityId;
-
-```
-  const submittedAnswer = String(
-    request.body.answer || request.body.submittedAnswer || "",
-  ).trim();
-
-  const selectedOptionId =
-    request.body.selectedOptionId || null;
-
-  const recognizedText = String(
-    request.body.recognizedText || "",
-  ).trim();
-
-  const drawingData = request.body.drawingData || null;
-
-  const timeSpentSeconds = clamp(
-    request.body.timeSpentSeconds,
-    0,
-    7200,
-  );
-
-  const result = await transaction(async (client) => {
-    const activityResult = await client.query(
-      `
-        SELECT
-          a.*,
-          l.unit_id
-        FROM activities a
-        JOIN course_lessons l ON l.id = a.lesson_id
-        WHERE a.id = $1
-        AND a.is_published = TRUE
-        LIMIT 1
-        FOR UPDATE
-      `,
-      [activityId],
-    );
-
-    if (!activityResult.rows.length) {
-      const error = new Error("Atividade não encontrada.");
-      error.status = 404;
-      throw error;
-    }
-
-    const activity = activityResult.rows[0];
-
-    const accessResult = await client.query(
-      `
-        SELECT status
-        FROM user_unit_progress
-        WHERE user_id = $1
-        AND unit_id = $2
-        LIMIT 1
-      `,
-      [request.user.id, activity.unit_id],
-    );
-
-    if (
-      !accessResult.rows.length ||
-      accessResult.rows[0].status === "locked"
-    ) {
-      const error = new Error("Esta atividade ainda está bloqueada.");
-      error.status = 403;
-      throw error;
-    }
-
-    let isCorrect = false;
-    let score = 0;
-    let pronunciationScore = null;
-    let finalSubmittedAnswer = submittedAnswer;
-    let feedback = "";
-
-    if (selectedOptionId) {
-      const optionResult = await client.query(
-        `
-          SELECT
-            option_text,
-            is_correct
-          FROM activity_options
-          WHERE id = $1
-          AND activity_id = $2
-          LIMIT 1
-        `,
-        [selectedOptionId, activityId],
-      );
-
-      if (optionResult.rows.length) {
-        finalSubmittedAnswer =
-          optionResult.rows[0].option_text;
-
-        isCorrect = optionResult.rows[0].is_correct;
-        score = isCorrect ? 100 : 0;
-      }
-    } else if (activity.activity_type === "speak") {
-      const textToCompare = recognizedText || submittedAnswer;
-
-      pronunciationScore = calculateTextSimilarity(
-        textToCompare,
-        activity.expected_answer ||
-          activity.russian_text ||
-          activity.audio_text,
-      );
-
-      score = pronunciationScore;
-      isCorrect = pronunciationScore >= 70;
-
-      finalSubmittedAnswer = textToCompare;
-
-      feedback = isCorrect
-        ? "Boa pronúncia. Continue praticando ritmo e entonação."
-        : "Tente novamente mais devagar e escute o áudio antes de repetir.";
-    } else if (activity.activity_type === "cursive_writing") {
-      score = clamp(request.body.writingScore, 0, 100);
-      isCorrect = score >= 70;
-
-      feedback = isCorrect
-        ? "Seu traçado ficou bom."
-        : "Repita o exercício seguindo as linhas-guia.";
-    } else {
-      isCorrect = compareAnswer(
-        submittedAnswer,
-        activity.expected_answer,
-        activity.accepted_answers,
-      );
-
-      score = isCorrect ? 100 : 0;
-    }
-
-    if (!feedback) {
-      feedback = isCorrect
-        ? activity.explanation ||
-          "Resposta correta. Muito bem!"
-        : activity.explanation ||
-          "A resposta ainda não está correta. Revise o exemplo e tente novamente.";
-    }
-
-    const previousProgress = await client.query(
-      `
-        SELECT
-          completed,
-          xp_earned,
-          attempts
-        FROM user_activity_progress
-        WHERE user_id = $1
-        AND activity_id = $2
-        FOR UPDATE
-      `,
-      [request.user.id, activityId],
-    );
-
-    const alreadyCompleted =
-      previousProgress.rows[0]?.completed === true;
-
-    const xpEarned =
-      isCorrect && !alreadyCompleted
-        ? safeInteger(activity.xp_reward, 10)
-        : 0;
-
-    await client.query(
-      `
-        INSERT INTO activity_attempts (
-          user_id,
-          activity_id,
-          submitted_answer,
-          submitted_drawing,
-          is_correct,
-          score,
-          pronunciation_score,
-          feedback,
-          time_spent_seconds,
-          xp_earned
-        )
-        VALUES (
-          $1,
-          $2,
-          $3,
-          $4,
-          $5,
-          $6,
-          $7,
-          $8,
-          $9,
-          $10
-        )
-      `,
-      [
-        request.user.id,
-        activityId,
-        finalSubmittedAnswer,
-        drawingData,
-        isCorrect,
-        score,
-        pronunciationScore,
-        feedback,
-        timeSpentSeconds,
-        xpEarned,
-      ],
-    );
-
-    await client.query(
-      `
-        INSERT INTO user_activity_progress (
-          user_id,
-          activity_id,
-          status,
-          attempts,
-          best_score,
-          last_score,
-          completed,
-          xp_earned,
-          first_attempt_at,
-          completed_at
-        )
-        VALUES (
-          $1,
-          $2,
-          $3,
-          1,
-          $4,
-          $4,
-          $5,
-          $6,
-          CURRENT_TIMESTAMP,
-          CASE WHEN $5 THEN CURRENT_TIMESTAMP ELSE NULL END
-        )
-        ON CONFLICT (user_id, activity_id)
-        DO UPDATE SET
-          status = CASE
-            WHEN $5 THEN 'completed'
-            ELSE 'in_progress'
-          END,
-          attempts = user_activity_progress.attempts + 1,
-          best_score = GREATEST(
-            user_activity_progress.best_score,
-            $4
-          ),
-          last_score = $4,
-          completed = (
-            user_activity_progress.completed OR $5
-          ),
-          xp_earned = user_activity_progress.xp_earned + $6,
-          completed_at = CASE
-            WHEN $5
-            THEN COALESCE(
-              user_activity_progress.completed_at,
-              CURRENT_TIMESTAMP
-            )
-            ELSE user_activity_progress.completed_at
-          END,
-          updated_at = CURRENT_TIMESTAMP
-      `,
-      [
-        request.user.id,
-        activityId,
-        isCorrect ? "completed" : "in_progress",
-        score,
-        isCorrect,
-        xpEarned,
-      ],
-    );
-
-    if (xpEarned > 0) {
-      await client.query(
-        `
-          UPDATE user_stats
-          SET
-            total_xp = total_xp + $2,
-            activities_completed = activities_completed + 1,
-            minutes_studied = minutes_studied +
-              GREATEST(ROUND($3::NUMERIC / 60), 1),
-            updated_at = CURRENT_TIMESTAMP
-          WHERE user_id = $1
-        `,
-        [
-          request.user.id,
-          xpEarned,
-          timeSpentSeconds,
-        ],
-      );
-
-      await updateStreak(client, request.user.id);
-      await updateDailyMissionProgress(
-        client,
-        request.user.id,
-        "complete_activities",
-        1,
-      );
-
-      if (activity.activity_type === "speak") {
-        await updateDailyMissionProgress(
-          client,
-          request.user.id,
-          "practice_speaking",
-          1,
-        );
-      }
-
-      if (
-        activity.activity_type === "write" ||
-        activity.activity_type === "cursive_writing"
-      ) {
-        await updateDailyMissionProgress(
-          client,
-          request.user.id,
-          "practice_writing",
-          1,
-        );
-      }
-
-      if (
-        activity.activity_type === "listen_select" ||
-        activity.activity_type === "listen_write"
-      ) {
-        await updateDailyMissionProgress(
-          client,
-          request.user.id,
-          "listen_words",
-          1,
-        );
-      }
-    }
-
-    const lessonProgress = await refreshLessonProgress(
-      client,
-      request.user.id,
-      activity.lesson_id,
-    );
-
-    const unitProgress = await refreshUnitProgress(
-      client,
-      request.user.id,
-      activity.unit_id,
-    );
-
-    const unlockedAchievements = await checkAchievements(
-      client,
-      request.user.id,
-    );
-
-    return {
-      isCorrect,
-      score,
-      pronunciationScore,
-      feedback,
-      xpEarned,
-      expectedAnswer: activity.expected_answer,
-      explanation: activity.explanation,
-      lessonProgress,
-      unitProgress,
-      unlockedAchievements,
-    };
-  });
-
-  return sendSuccess(response, result);
-} catch (error) {
-  console.error(error);
-
-  return sendError(
-    response,
-    error.message || "Não foi possível corrigir a atividade.",
-    error.status || 500,
-  );
-}
-```
-
-},
-);
-
-app.get(
-"/api/alphabet",
-optionalAuthMiddleware,
-async (request, response) => {
-try {
-const result = await query(
-`           SELECT *
-          FROM alphabet_letters
-          ORDER BY display_order
-        `,
-);
-
-```
-  return sendSuccess(response, {
-    letters: result.rows,
-  });
-} catch (error) {
-  console.error(error);
-
-  return sendError(
-    response,
-    "Não foi possível carregar o alfabeto.",
-    500,
-  );
-}
-```
-
-},
-);
-
-app.post(
-"/api/writing/attempt",
-authMiddleware,
-async (request, response) => {
-try {
-const letterId = request.body.letterId || null;
-const activityId = request.body.activityId || null;
-const referenceText = sanitizeShortText(
-request.body.referenceText,
-1000,
-);
-
-```
-  const writtenText = sanitizeShortText(
-    request.body.writtenText,
-    1000,
-  );
-
-  const drawingData = request.body.drawingData || {};
-  const score = clamp(request.body.score, 0, 100);
-
-  const feedback =
-    score >= 85
-      ? "Traçado excelente."
-      : score >= 70
-        ? "Bom trabalho. Tente deixar as ligações mais suaves."
-        : "Continue praticando com as linhas-guia.";
-
-  const result = await query(
-    `
-      INSERT INTO writing_attempts (
-        user_id,
-        letter_id,
-        activity_id,
-        reference_text,
-        written_text,
-        drawing_data,
-        score,
-        feedback
-      )
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-      RETURNING *
-    `,
-    [
-      request.user.id,
-      letterId,
-      activityId,
-      referenceText,
-      writtenText,
-      drawingData,
-      score,
-      feedback,
-    ],
-  );
-
-  return sendSuccess(response, {
-    attempt: result.rows[0],
-  });
-} catch (error) {
-  console.error(error);
-
-  return sendError(
-    response,
-    "Não foi possível salvar sua escrita.",
-    500,
-  );
-}
-```
-
-},
-);
-
-app.post(
-"/api/pronunciation/evaluate",
-authMiddleware,
-async (request, response) => {
-try {
-const expectedText = sanitizeShortText(
-request.body.expectedText,
-1000,
-);
-
-```
-  const recognizedText = sanitizeShortText(
-    request.body.recognizedText,
-    1000,
-  );
-
-  if (!expectedText || !recognizedText) {
-    return sendError(
-      response,
-      "Envie o texto esperado e o texto reconhecido.",
-    );
-  }
-
-  const accuracyScore = calculateTextSimilarity(
-    recognizedText,
-    expectedText,
-  );
-
-  const pronunciationScore = accuracyScore;
-  const fluencyScore = clamp(
-    request.body.fluencyScore || accuracyScore,
-    0,
-    100,
-  );
-
-  const feedback =
-    pronunciationScore >= 85
-      ? "Pronúncia muito boa."
-      : pronunciationScore >= 70
-        ? "Boa tentativa. Preste atenção ao acento tônico."
-        : "Escute novamente e repita a frase mais devagar.";
-
-  const result = await query(
-    `
-      INSERT INTO pronunciation_attempts (
-        user_id,
-        activity_id,
-        expected_text,
-        recognized_text,
-        pronunciation_score,
-        accuracy_score,
-        fluency_score,
-        feedback
-      )
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-      RETURNING *
-    `,
-    [
-      request.user.id,
-      request.body.activityId || null,
-      expectedText,
-      recognizedText,
-      pronunciationScore,
-      accuracyScore,
-      fluencyScore,
-      feedback,
-    ],
-  );
-
-  return sendSuccess(response, {
-    evaluation: result.rows[0],
-  });
-} catch (error) {
-  console.error(error);
-
-  return sendError(
-    response,
-    "Não foi possível avaliar sua pronúncia.",
-    500,
-  );
-}
-```
-
-},
-);
-
-app.get(
-"/api/dictionary",
-optionalAuthMiddleware,
-async (request, response) => {
-try {
-const search = sanitizeShortText(request.query.search, 150);
-const category = sanitizeShortText(
-request.query.category,
-100,
-);
-
-```
-  const level = sanitizeShortText(request.query.level, 10);
-  const limit = clamp(request.query.limit || 50, 1, 200);
-  const offset = Math.max(safeInteger(request.query.offset, 0), 0);
-
-  const values = [];
-  const conditions = [];
-
-  if (search) {
-    values.push(`%${search}%`);
-    const index = values.length;
-
-    conditions.push(`
-      (
-        de.russian_word ILIKE $${index}
-        OR de.portuguese_translation ILIKE $${index}
-        OR de.transliteration ILIKE $${index}
-        OR de.search_text ILIKE $${index}
-      )
-    `);
-  }
-
-  if (category) {
-    values.push(category);
-    conditions.push(`dc.slug = $${values.length}`);
-  }
-
-  if (level) {
-    values.push(level);
-    conditions.push(`de.difficulty = $${values.length}`);
-  }
-
-  values.push(limit);
-  const limitIndex = values.length;
-
-  values.push(offset);
-  const offsetIndex = values.length;
-
-  const userId = request.user?.id || null;
-  values.push(userId);
-  const userIndex = values.length;
-
-  const result = await query(
-    `
-      SELECT
-        de.*,
-        dc.name AS category_name,
-        dc.slug AS category_slug,
-        dc.icon AS category_icon,
-        EXISTS (
-          SELECT 1
-          FROM dictionary_favorites df
-          WHERE df.entry_id = de.id
-          AND df.user_id = $${userIndex}
-        ) AS is_favorite,
-        COALESCE(
-          (
-            SELECT json_agg(
-              json_build_object(
-                'id', dex.id,
-                'russianSentence', dex.russian_sentence,
-                'portugueseSentence', dex.portuguese_sentence,
-                'transliteration', dex.transliteration,
-                'explanation', dex.explanation,
-                'audioText', dex.audio_text
-              )
-            )
-            FROM dictionary_examples dex
-            WHERE dex.entry_id = de.id
-          ),
-          '[]'::JSON
-        ) AS examples
-      FROM dictionary_entries de
-      LEFT JOIN dictionary_categories dc
-        ON dc.id = de.category_id
-      ${conditions.length ? `WHERE ${conditions.join(" AND ")}` : ""}
-      ORDER BY de.difficulty, de.russian_word
-      LIMIT $${limitIndex}
-      OFFSET $${offsetIndex}
-    `,
-    values,
-  );
-
-  if (request.user && search) {
-    await query(
-      `
-        INSERT INTO dictionary_history (
-          user_id,
-          searched_term
-        )
-        VALUES ($1, $2)
-      `,
-      [request.user.id, search],
-    );
-  }
-
-  return sendSuccess(response, {
-    entries: result.rows,
-    pagination: {
-      limit,
-      offset,
-      returned: result.rows.length,
-    },
-  });
-} catch (error) {
-  console.error(error);
-
-  return sendError(
-    response,
-    "Não foi possível pesquisar o dicionário.",
-    500,
-  );
-}
-```
-
-},
-);
-
-app.post(
-"/api/dictionary/:entryId/favorite",
-authMiddleware,
-async (request, response) => {
-try {
-const entryId = request.params.entryId;
-
-```
-  const existing = await query(
-    `
-      SELECT 1
-      FROM dictionary_favorites
-      WHERE user_id = $1
-      AND entry_id = $2
-    `,
-    [request.user.id, entryId],
-  );
-
-  if (existing.rows.length) {
-    await query(
-      `
-        DELETE FROM dictionary_favorites
-        WHERE user_id = $1
-        AND entry_id = $2
-      `,
-      [request.user.id, entryId],
-    );
-
-    return sendSuccess(response, {
-      favorite: false,
-    });
-  }
-
-  await query(
-    `
-      INSERT INTO dictionary_favorites (
-        user_id,
-        entry_id
-      )
-      VALUES ($1, $2)
-    `,
-    [request.user.id, entryId],
-  );
-
-  return sendSuccess(response, {
-    favorite: true,
-  });
-} catch (error) {
-  console.error(error);
-
-  return sendError(
-    response,
-    "Não foi possível atualizar os favoritos.",
-    500,
-  );
-}
-```
-
-},
-);
-
-app.get(
-"/api/culture",
-optionalAuthMiddleware,
-async (request, response) => {
-try {
-const category = sanitizeShortText(
-request.query.category,
-100,
-);
-
-```
-  const values = [];
-  let condition = "";
-
-  if (category) {
-    values.push(category);
-    condition = "WHERE cc.slug = $1";
-  }
-
-  const result = await query(
-    `
-      SELECT
-        ca.id,
-        ca.title,
-        ca.subtitle,
-        ca.summary,
-        ca.author_name,
-        ca.historical_period,
-        ca.image_url,
-        ca.difficulty,
-        ca.reading_minutes,
-        cc.name AS category_name,
-        cc.slug AS category_slug,
-        cc.icon AS category_icon
-      FROM culture_articles ca
-      JOIN culture_categories cc
-        ON cc.id = ca.category_id
-      ${condition}
-      AND ca.is_published = TRUE
-      ORDER BY cc.display_order, ca.title
-    `.replace(
-      category ? "AND ca.is_published" : "AND ca.is_published",
-      category
-        ? "AND ca.is_published"
-        : "WHERE ca.is_published",
-    ),
-    values,
-  );
-
-  const categories = await query(
-    `
-      SELECT *
-      FROM culture_categories
-      ORDER BY display_order
-    `,
-  );
-
-  return sendSuccess(response, {
-    categories: categories.rows,
-    articles: result.rows,
-  });
-} catch (error) {
-  console.error(error);
-
-  return sendError(
-    response,
-    "Não foi possível carregar a biblioteca cultural.",
-    500,
-  );
-}
-```
-
-},
-);
-
-app.get(
-"/api/culture/:articleId",
-optionalAuthMiddleware,
-async (request, response) => {
-try {
-const result = await query(
-`           SELECT
-            ca.*,
-            cc.name AS category_name,
-            cc.slug AS category_slug,
-            cc.icon AS category_icon
-          FROM culture_articles ca
-          JOIN culture_categories cc
-            ON cc.id = ca.category_id
-          WHERE ca.id = $1
-          AND ca.is_published = TRUE
-          LIMIT 1
-        `,
-[request.params.articleId],
-);
-
-```
-  if (!result.rows.length) {
-    return sendError(response, "Conteúdo não encontrado.", 404);
-  }
-
-  return sendSuccess(response, {
-    article: result.rows[0],
-  });
-} catch (error) {
-  console.error(error);
-
-  return sendError(
-    response,
-    "Não foi possível abrir este conteúdo.",
-    500,
-  );
-}
-```
-
-},
-);
-
-app.get(
-"/api/music",
-optionalAuthMiddleware,
-async (request, response) => {
-try {
-const result = await query(
-`           SELECT
-            mt.id,
-            mt.title,
-            mt.russian_title,
-            mt.description,
-            mt.difficulty,
-            mt.vocabulary,
-            mt.study_notes,
-            mt.external_url,
-            mt.cover_url,
-            ma.name AS artist_name,
-            ma.russian_name AS artist_russian_name,
-            ma.description AS artist_description,
-            ma.genres
-          FROM music_tracks mt
-          JOIN music_artists ma ON ma.id = mt.artist_id
-          WHERE mt.is_recommended = TRUE
-          ORDER BY
-            CASE
-              WHEN ma.name = 'DDT' THEN 1
-              WHEN ma.name = 'Katya Lel' THEN 2
-              WHEN ma.name = 'Mumiy Troll' THEN 3
-              WHEN ma.name = 'Valery Meladze' THEN 4
-              ELSE 5
-            END,
-            mt.title
-        `,
-);
-
-```
-  return sendSuccess(response, {
-    tracks: result.rows,
-  });
-} catch (error) {
-  console.error(error);
-
-  return sendError(
-    response,
-    "Não foi possível carregar as recomendações musicais.",
-    500,
-  );
-}
-```
-
-},
-);
-
-app.get(
-"/api/games",
-authMiddleware,
-async (request, response) => {
-try {
-const result = await query(
-`           SELECT
-            g.*,
-            COALESCE(gr.best_score, 0) AS best_score,
-            COALESCE(gr.total_plays, 0) AS total_plays,
-            COALESCE(gr.total_xp, 0) AS total_xp
-          FROM games g
-          LEFT JOIN game_records gr
-            ON gr.game_id = g.id
-            AND gr.user_id = $1
-          WHERE g.is_published = TRUE
-          ORDER BY g.title
-        `,
-[request.user.id],
-);
-
-```
-  return sendSuccess(response, {
-    games: result.rows,
-  });
-} catch (error) {
-  console.error(error);
-
-  return sendError(
-    response,
-    "Não foi possível carregar os jogos.",
-    500,
-  );
-}
-```
-
-},
-);
-
-app.post(
-"/api/games/:gameId/result",
-authMiddleware,
-async (request, response) => {
-try {
-const gameId = request.params.gameId;
-const score = Math.max(safeInteger(request.body.score, 0), 0);
-const correctAnswers = Math.max(
-safeInteger(request.body.correctAnswers, 0),
-0,
-);
-
-```
-  const wrongAnswers = Math.max(
-    safeInteger(request.body.wrongAnswers, 0),
-    0,
-  );
-
-  const durationSeconds = clamp(
-    request.body.durationSeconds,
-    0,
-    7200,
-  );
-
-  const details = request.body.details || {};
-
-  const gameResult = await query(
-    `
-      SELECT *
-      FROM games
-      WHERE id = $1
-      AND is_published = TRUE
-      LIMIT 1
-    `,
-    [gameId],
-  );
-
-  if (!gameResult.rows.length) {
-    return sendError(response, "Jogo não encontrado.", 404);
-  }
-
-  const game = gameResult.rows[0];
-
-  const accuracy =
-    correctAnswers + wrongAnswers > 0
-      ? correctAnswers / (correctAnswers + wrongAnswers)
-      : 0;
-
-  const xpEarned = Math.round(
-    game.xp_reward * Math.max(accuracy, 0.25),
-  );
-
-  const result = await transaction(async (client) => {
-    const sessionResult = await client.query(
-      `
-        INSERT INTO game_sessions (
-          user_id,
-          game_id,
-          score,
-          correct_answers,
-          wrong_answers,
-          duration_seconds,
-          xp_earned,
-          details
-        )
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-        RETURNING *
-      `,
-      [
-        request.user.id,
-        gameId,
-        score,
-        correctAnswers,
-        wrongAnswers,
-        durationSeconds,
-        xpEarned,
-        details,
-      ],
-    );
-
-    await client.query(
-      `
-        INSERT INTO game_records (
-          user_id,
-          game_id,
-          best_score,
-          total_plays,
-          total_xp
-        )
-        VALUES ($1, $2, $3, 1, $4)
-        ON CONFLICT (user_id, game_id)
-        DO UPDATE SET
-          best_score = GREATEST(
-            game_records.best_score,
-            EXCLUDED.best_score
-          ),
-          total_plays = game_records.total_plays + 1,
-          total_xp = game_records.total_xp + EXCLUDED.total_xp,
-          updated_at = CURRENT_TIMESTAMP
-      `,
-      [request.user.id, gameId, score, xpEarned],
-    );
-
-    await client.query(
-      `
-        UPDATE user_stats
-        SET
-          total_xp = total_xp + $2,
-          games_played = games_played + 1,
-          minutes_studied = minutes_studied +
-            GREATEST(ROUND($3::NUMERIC / 60), 1),
-          updated_at = CURRENT_TIMESTAMP
-        WHERE user_id = $1
-      `,
-      [request.user.id, xpEarned, durationSeconds],
-    );
-
-    await updateStreak(client, request.user.id);
-    await updateDailyMissionProgress(
-      client,
-      request.user.id,
-      "play_game",
-      1,
-    );
-
-    const achievements = await checkAchievements(
-      client,
-      request.user.id,
-    );
-
-    return {
-      session: sessionResult.rows[0],
-      achievements,
-    };
-  });
-
-  return sendSuccess(response, {
-    ...result,
-    xpEarned,
-  });
-} catch (error) {
-  console.error(error);
-
-  return sendError(
-    response,
-    "Não foi possível salvar o resultado do jogo.",
-    500,
-  );
-}
-```
-
-},
-);
-
-app.get(
-"/api/exams",
-authMiddleware,
-async (request, response) => {
-try {
-const result = await query(
-`           SELECT
-            e.id,
-            e.title,
-            e.description,
-            e.minimum_activities_required,
-            e.passing_score,
-            e.time_limit_minutes,
-            e.xp_reward,
-            e.maximum_attempts,
-            cl.code AS level_code,
-            cu.title AS unit_title,
-            COALESCE(us.activities_completed, 0) AS activities_completed,
-            GREATEST(
-              e.minimum_activities_required -
-              COALESCE(us.activities_completed, 0),
-              0
-            ) AS activities_remaining,
-            (
-              COALESCE(us.activities_completed, 0) >=
-              e.minimum_activities_required
-            ) AS unlocked,
-            COALESCE(
-              (
-                SELECT MAX(uea.score)
-                FROM user_exam_attempts uea
-                WHERE uea.exam_id = e.id
-                AND uea.user_id = $1
-              ),
-              0
-            ) AS best_score
-          FROM exams e
-          LEFT JOIN course_levels cl ON cl.id = e.level_id
-          LEFT JOIN course_units cu ON cu.id = e.unit_id
-          LEFT JOIN user_stats us ON us.user_id = $1
-          WHERE e.is_published = TRUE
-          ORDER BY cl.display_order NULLS LAST, e.title
-        `,
-[request.user.id],
-);
-
-```
-  return sendSuccess(response, {
-    exams: result.rows,
-  });
-} catch (error) {
-  console.error(error);
-
-  return sendError(
-    response,
-    "Não foi possível carregar as provas.",
-    500,
-  );
-}
-```
-
-},
-);
-
-app.post(
-"/api/exams/:examId/start",
-authMiddleware,
-async (request, response) => {
-try {
-const examId = request.params.examId;
-
-```
-  const accessResult = await query(
-    `
-      SELECT
-        e.*,
-        COALESCE(us.activities_completed, 0) AS activities_completed
-      FROM exams e
-      LEFT JOIN user_stats us ON us.user_id = $2
-      WHERE e.id = $1
-      AND e.is_published = TRUE
-      LIMIT 1
-    `,
-    [examId, request.user.id],
-  );
-
-  if (!accessResult.rows.length) {
-    return sendError(response, "Prova não encontrada.", 404);
-  }
-
-  const exam = accessResult.rows[0];
-
-  if (
-    exam.activities_completed <
-    exam.minimum_activities_required
-  ) {
-    return sendError(
-      response,
-      `Conclua mais ${
-        exam.minimum_activities_required -
-        exam.activities_completed
-      } atividades para liberar esta prova.`,
-      403,
-    );
-  }
-
-  const attemptsResult = await query(
-    `
-      SELECT COUNT(*)::INTEGER AS amount
-      FROM user_exam_attempts
-      WHERE user_id = $1
-      AND exam_id = $2
-    `,
-    [request.user.id, examId],
-  );
-
-  const attemptNumber =
-    safeInteger(attemptsResult.rows[0].amount, 0) + 1;
-
-  if (
-    exam.maximum_attempts &&
-    attemptNumber > exam.maximum_attempts
-  ) {
-    return sendError(
-      response,
-      "Você atingiu o limite de tentativas desta prova.",
-      403,
-    );
-  }
-
-  const attemptResult = await query(
-    `
-      INSERT INTO user_exam_attempts (
-        user_id,
-        exam_id,
-        attempt_number
-      )
-      VALUES ($1, $2, $3)
-      RETURNING *
-    `,
-    [request.user.id, examId, attemptNumber],
-  );
-
-  const questionsResult = await query(
-    `
-      SELECT
-        q.id,
-        q.question_type,
-        q.instruction,
-        q.question,
-        q.russian_text,
-        q.portuguese_text,
-        q.transliteration,
-        q.audio_text,
-        q.points,
-        q.display_order,
-        COALESCE(
-          (
-            SELECT json_agg(
-              json_build_object(
-                'id', qo.id,
-                'text', qo.option_text,
-                'order', qo.display_order
-              )
-              ORDER BY qo.display_order
-            )
-            FROM exam_question_options qo
-            WHERE qo.question_id = q.id
-          ),
-          '[]'::JSON
-        ) AS options
-      FROM exam_questions q
-      WHERE q.exam_id = $1
-      ORDER BY q.display_order
-    `,
-    [examId],
-  );
-
-  return sendSuccess(response, {
-    exam: {
-      id: exam.id,
-      title: exam.title,
-      description: exam.description,
-      passingScore: exam.passing_score,
-      timeLimitMinutes: exam.time_limit_minutes,
-      xpReward: exam.xp_reward,
-    },
-    attempt: attemptResult.rows[0],
-    questions: questionsResult.rows,
-  });
-} catch (error) {
-  console.error(error);
-
-  return sendError(
-    response,
-    "Não foi possível iniciar a prova.",
-    500,
-  );
-}
-```
-
-},
-);
-
-app.post(
-"/api/exams/attempts/:attemptId/finish",
-authMiddleware,
-async (request, response) => {
-try {
-const attemptId = request.params.attemptId;
-const answers = Array.isArray(request.body.answers)
-? request.body.answers
-: [];
-
-```
-  const timeSpentSeconds = clamp(
-    request.body.timeSpentSeconds,
-    0,
-    14400,
-  );
-
-  const result = await transaction(async (client) => {
-    const attemptResult = await client.query(
-      `
-        SELECT
-          uea.*,
-          e.passing_score,
-          e.xp_reward
-        FROM user_exam_attempts uea
-        JOIN exams e ON e.id = uea.exam_id
-        WHERE uea.id = $1
-        AND uea.user_id = $2
-        AND uea.completed_at IS NULL
-        LIMIT 1
-        FOR UPDATE
-      `,
-      [attemptId, request.user.id],
-    );
-
-    if (!attemptResult.rows.length) {
-      const error = new Error(
-        "Tentativa não encontrada ou já concluída.",
-      );
-
-      error.status = 404;
-      throw error;
-    }
-
-    const attempt = attemptResult.rows[0];
-
-    const questionsResult = await client.query(
-      `
-        SELECT *
-        FROM exam_questions
-        WHERE exam_id = $1
-      `,
-      [attempt.exam_id],
-    );
-
-    let totalPoints = 0;
-    let earnedPoints = 0;
-    const corrections = [];
-
-    for (const question of questionsResult.rows) {
-      totalPoints += safeNumber(question.points, 0);
-
-      const answer = answers.find(
-        (item) => item.questionId === question.id,
-      );
-
-      const submittedAnswer = String(
-        answer?.answer || "",
-      ).trim();
-
-      let isCorrect = false;
-      let questionScore = 0;
-
-      if (answer?.selectedOptionId) {
-        const optionResult = await client.query(
-          `
-            SELECT is_correct, option_text
-            FROM exam_question_options
-            WHERE id = $1
-            AND question_id = $2
-            LIMIT 1
-          `,
-          [answer.selectedOptionId, question.id],
-        );
-
-        if (optionResult.rows.length) {
-          isCorrect = optionResult.rows[0].is_correct;
-        }
-      } else if (question.question_type === "speak") {
-        const similarity = calculateTextSimilarity(
-          answer?.recognizedText || submittedAnswer,
-          question.expected_answer ||
-            question.russian_text ||
-            question.audio_text,
-        );
-
-        isCorrect = similarity >= 70;
-        questionScore =
-          (safeNumber(question.points, 0) * similarity) / 100;
-      } else {
-        isCorrect = compareAnswer(
-          submittedAnswer,
-          question.expected_answer,
-          question.accepted_answers,
-        );
-      }
-
-      if (
-        question.question_type !== "speak" &&
-        isCorrect
-      ) {
-        questionScore = safeNumber(question.points, 0);
-      }
-
-      earnedPoints += questionScore;
-
-      await client.query(
-        `
-          INSERT INTO user_exam_answers (
-            attempt_id,
-            question_id,
-            submitted_answer,
-            is_correct,
-            score,
-            feedback
-          )
-          VALUES ($1, $2, $3, $4, $5, $6)
-        `,
-        [
-          attemptId,
-          question.id,
-          submittedAnswer,
-          isCorrect,
-          questionScore,
-          isCorrect
-            ? "Resposta correta."
-            : question.explanation ||
-              "Revise este conteúdo.",
-        ],
-      );
-
-      corrections.push({
-        questionId: question.id,
-        isCorrect,
-        score: questionScore,
-        expectedAnswer: question.expected_answer,
-        explanation: question.explanation,
-      });
-    }
-
-    const finalScore =
-      totalPoints > 0
-        ? Math.round((earnedPoints / totalPoints) * 100)
-        : 0;
-
-    const passed = finalScore >= attempt.passing_score;
-
-    const xpEarned = passed
-      ? safeInteger(attempt.xp_reward, 0)
-      : Math.round(safeInteger(attempt.xp_reward, 0) * 0.25);
-
-    await client.query(
-      `
-        UPDATE user_exam_attempts
-        SET
-          score = $2,
-          passed = $3,
-          completed_at = CURRENT_TIMESTAMP,
-          time_spent_seconds = $4,
-          xp_earned = $5
-        WHERE id = $1
-      `,
-      [
-        attemptId,
-        finalScore,
-        passed,
-        timeSpentSeconds,
-        xpEarned,
-      ],
-    );
-
-    await client.query(
-      `
-        UPDATE user_stats
-        SET
-          total_xp = total_xp + $2,
-          exams_completed = exams_completed +
-            CASE WHEN $3 THEN 1 ELSE 0 END,
-          minutes_studied = minutes_studied +
-            GREATEST(ROUND($4::NUMERIC / 60), 1),
-          updated_at = CURRENT_TIMESTAMP
-        WHERE user_id = $1
-      `,
-      [
-        request.user.id,
-        xpEarned,
-        passed,
-        timeSpentSeconds,
-      ],
-    );
-
-    await updateStreak(client, request.user.id);
-
-    const achievements = await checkAchievements(
-      client,
-      request.user.id,
-    );
-
-    return {
-      score: finalScore,
-      passed,
-      xpEarned,
-      corrections,
-      achievements,
-    };
-  });
-
-  return sendSuccess(response, result);
-} catch (error) {
-  console.error(error);
-
-  return sendError(
-    response,
-    error.message || "Não foi possível finalizar a prova.",
-    error.status || 500,
-  );
-}
-```
-
-},
-);
-
-app.get(
-"/api/teacher/conversations",
-authMiddleware,
-async (request, response) => {
-try {
-const result = await query(
-`           SELECT
-            id,
-            title,
-            conversation_mode,
-            created_at,
-            updated_at
-          FROM ai_conversations
-          WHERE user_id = $1
-          ORDER BY updated_at DESC
-          LIMIT 50
-        `,
-[request.user.id],
-);
-
-```
-  return sendSuccess(response, {
-    conversations: result.rows,
-  });
-} catch (error) {
-  console.error(error);
-
-  return sendError(
-    response,
-    "Não foi possível carregar as conversas.",
-    500,
-  );
-}
-```
-
-},
-);
-
-app.post(
-"/api/teacher/chat",
-authMiddleware,
-async (request, response) => {
-try {
-const message = sanitizeShortText(
-request.body.message,
-5000,
-);
-
-```
-  const mode = [
-    "general",
-    "translate",
-    "correct",
-    "explain",
-    "exercise",
-    "dialogue",
-    "pronunciation",
-  ].includes(request.body.mode)
-    ? request.body.mode
-    : "general";
-
-  let conversationId =
-    request.body.conversationId || null;
-
-  if (!message) {
-    return sendError(
-      response,
-      "Escreva uma mensagem para o professor.",
-    );
-  }
-
-  const user = await getFullUser(request.user.id);
-
-  if (!conversationId) {
-    const conversationResult = await query(
-      `
-        INSERT INTO ai_conversations (
-          user_id,
-          title,
-          conversation_mode
-        )
-        VALUES ($1, $2, $3)
-        RETURNING id
-      `,
-      [
-        request.user.id,
-        message.slice(0, 80),
-        mode,
-      ],
-    );
-
-    conversationId = conversationResult.rows[0].id;
-  } else {
-    const ownerResult = await query(
-      `
-        SELECT id
-        FROM ai_conversations
-        WHERE id = $1
-        AND user_id = $2
-        LIMIT 1
-      `,
-      [conversationId, request.user.id],
-    );
-
-    if (!ownerResult.rows.length) {
-      return sendError(
-        response,
-        "Conversa não encontrada.",
-        404,
-      );
-    }
-  }
-
-  await query(
-    `
-      INSERT INTO ai_messages (
-        conversation_id,
-        sender,
-        content
-      )
-      VALUES ($1, 'user', $2)
-    `,
-    [conversationId, message],
-  );
-
-  const historyResult = await query(
-    `
-      SELECT
-        sender,
-        content
-      FROM ai_messages
-      WHERE conversation_id = $1
-      ORDER BY created_at DESC
-      LIMIT 16
-    `,
-    [conversationId],
-  );
-
-  const history = historyResult.rows.reverse();
-
-  const externalResponse = await callExternalTeacher({
-    messages: history,
-    mode,
-    level: user?.current_level,
-  });
-
-  const teacherResponse =
-    externalResponse ||
-    buildLocalTeacherResponse({
-      message,
-      mode,
-      level: user?.current_level,
-      userName: user?.name,
-    });
-
-  await query(
-    `
-      INSERT INTO ai_messages (
-        conversation_id,
-        sender,
-        content,
-        correction_data
-      )
-      VALUES ($1, 'assistant', $2, $3)
-    `,
-    [
-      conversationId,
-      teacherResponse.answer,
-      {
-        examples: teacherResponse.examples,
-        corrections: teacherResponse.corrections,
-        exercise: teacherResponse.exercise,
-      },
-    ],
-  );
-
-  await query(
-    `
-      UPDATE ai_conversations
-      SET
-        conversation_mode = $2,
-        updated_at = CURRENT_TIMESTAMP
-      WHERE id = $1
-    `,
-    [conversationId, mode],
-  );
-
-  return sendSuccess(response, {
-    conversationId,
-    response: teacherResponse,
-    provider: externalResponse ? "external" : "local",
-  });
-} catch (error) {
-  console.error(error);
-
-  return sendError(
-    response,
-    "O professor não conseguiu responder agora.",
-    500,
-  );
-}
-```
-
-},
-);
-
-app.get(
-"/api/teacher/conversations/:conversationId",
-authMiddleware,
-async (request, response) => {
-try {
-const result = await query(
-`           SELECT
-            ac.id,
-            ac.title,
-            ac.conversation_mode,
-            ac.created_at,
-            ac.updated_at,
-            COALESCE(
-              json_agg(
-                json_build_object(
-                  'id', am.id,
-                  'sender', am.sender,
-                  'content', am.content,
-                  'correctionData', am.correction_data,
-                  'createdAt', am.created_at
-                )
-                ORDER BY am.created_at
-              ) FILTER (WHERE am.id IS NOT NULL),
-              '[]'::JSON
-            ) AS messages
-          FROM ai_conversations ac
-          LEFT JOIN ai_messages am
-            ON am.conversation_id = ac.id
-          WHERE ac.id = $1
-          AND ac.user_id = $2
-          GROUP BY ac.id
-          LIMIT 1
-        `,
-[
-request.params.conversationId,
-request.user.id,
-],
-);
-
-```
-  if (!result.rows.length) {
-    return sendError(response, "Conversa não encontrada.", 404);
-  }
-
-  return sendSuccess(response, {
-    conversation: result.rows[0],
-  });
-} catch (error) {
-  console.error(error);
-
-  return sendError(
-    response,
-    "Não foi possível abrir esta conversa.",
-    500,
-  );
-}
-```
-
-},
-);
-
-app.get(
-"/api/profile",
-authMiddleware,
-async (request, response) => {
-try {
-const user = await getFullUser(request.user.id);
-
-```
-  const progress = await query(
-    `
-      SELECT
-        cl.code AS level_code,
-        cu.title AS unit_title,
-        up.status,
-        up.progress_percent,
-        up.activities_completed,
-        up.lessons_completed,
-        up.last_accessed_at
-      FROM user_unit_progress up
-      JOIN course_units cu ON cu.id = up.unit_id
-      JOIN course_levels cl ON cl.id = cu.level_id
-      WHERE up.user_id = $1
-      ORDER BY cl.display_order, cu.display_order
-    `,
-    [request.user.id],
-  );
-
-  return sendSuccess(response, {
-    user,
-    courseProgress: progress.rows,
-  });
-} catch (error) {
-  console.error(error);
-
-  return sendError(
-    response,
-    "Não foi possível carregar o perfil.",
-    500,
-  );
-}
-```
-
-},
-);
-
-app.patch(
-"/api/profile",
-authMiddleware,
-async (request, response) => {
-try {
-const name = sanitizeName(request.body.name);
-
-```
-  const dailyGoalMinutes = clamp(
-    request.body.dailyGoalMinutes || 15,
-    5,
-    240,
-  );
-
-  const preferredStudyTime =
-    request.body.preferredStudyTime || null;
-
-  const biography = sanitizeShortText(
-    request.body.biography,
-    1000,
-  );
-
-  if (name.length < 2) {
-    return sendError(response, "Digite um nome válido.");
-  }
-
-  await transaction(async (client) => {
-    await client.query(
-      `
-        UPDATE users
-        SET name = $2
-        WHERE id = $1
-      `,
-      [request.user.id, name],
-    );
-
-    await client.query(
-      `
-        UPDATE user_profiles
-        SET
-          daily_goal_minutes = $2,
-          preferred_study_time = $3,
-          biography = $4,
-          updated_at = CURRENT_TIMESTAMP
-        WHERE user_id = $1
-      `,
-      [
-        request.user.id,
-        dailyGoalMinutes,
-        preferredStudyTime,
-        biography,
-      ],
-    );
-
-    await client.query(
-      `
-        UPDATE user_preferences
-        SET
-          sound_enabled = $2,
-          music_enabled = $3,
-          microphone_enabled = $4,
-          notifications_enabled = $5,
-          dark_mode = $6,
-          reduced_motion = $7,
-          left_handed_mode = $8,
-          transliteration_enabled = $9,
-          auto_play_audio = $10,
-          speech_rate = $11,
-          updated_at = CURRENT_TIMESTAMP
-        WHERE user_id = $1
-      `,
-      [
-        request.user.id,
-        request.body.soundEnabled !== false,
-        request.body.musicEnabled !== false,
-        request.body.microphoneEnabled !== false,
-        request.body.notificationsEnabled !== false,
-        Boolean(request.body.darkMode),
-        Boolean(request.body.reducedMotion),
-        Boolean(request.body.leftHandedMode),
-        request.body.transliterationEnabled !== false,
-        Boolean(request.body.autoPlayAudio),
-        clamp(request.body.speechRate || 0.9, 0.5, 1.5),
-      ],
-    );
-  });
-
-  const user = await getFullUser(request.user.id);
-
-  return sendSuccess(response, {
-    message: "Perfil atualizado.",
-    user,
-  });
-} catch (error) {
-  console.error(error);
-
-  return sendError(
-    response,
-    "Não foi possível atualizar o perfil.",
-    500,
-  );
-}
-```
-
-},
-);
-
-app.get(
-"/api/notifications",
-authMiddleware,
-async (request, response) => {
-try {
-const result = await query(
-`           SELECT *
-          FROM notifications
-          WHERE user_id = $1
-          ORDER BY created_at DESC
-          LIMIT 50
-        `,
-[request.user.id],
-);
-
-```
-  return sendSuccess(response, {
-    notifications: result.rows,
-  });
-} catch (error) {
-  console.error(error);
-
-  return sendError(
-    response,
-    "Não foi possível carregar as notificações.",
-    500,
-  );
-}
-```
-
-},
-);
-
-app.patch(
-"/api/notifications/:notificationId/read",
-authMiddleware,
-async (request, response) => {
-try {
-await query(
-`           UPDATE notifications
-          SET read_at = CURRENT_TIMESTAMP
-          WHERE id = $1
-          AND user_id = $2
-        `,
-[
-request.params.notificationId,
-request.user.id,
-],
-);
-
-```
-  return sendSuccess(response, {
-    message: "Notificação marcada como lida.",
-  });
-} catch (error) {
-  console.error(error);
-
-  return sendError(
-    response,
-    "Não foi possível atualizar a notificação.",
-    500,
-  );
-}
-```
-
-},
-);
-
-app.get(
-"/api/admin/users",
-authMiddleware,
-adminMiddleware,
-async (request, response) => {
-try {
-const result = await query(
-`           SELECT
-            u.id,
-            u.name,
-            u.email,
-            u.role,
-            u.account_status,
-            u.email_verified,
-            u.onboarding_completed,
-            u.last_login_at,
-            u.created_at,
-            COALESCE(us.total_xp, 0) AS total_xp,
-            COALESCE(us.activities_completed, 0) AS activities_completed
-          FROM users u
-          LEFT JOIN user_stats us ON us.user_id = u.id
-          ORDER BY u.created_at DESC
-          LIMIT 500
-        `,
-);
-
-```
-  return sendSuccess(response, {
-    users: result.rows,
-  });
-} catch (error) {
-  console.error(error);
-
-  return sendError(
-    response,
-    "Não foi possível carregar os usuários.",
-    500,
-  );
-}
-```
-
-},
-);
-
-app.patch(
-"/api/admin/users/:userId/status",
-authMiddleware,
-adminMiddleware,
-async (request, response) => {
-try {
-const status = request.body.status;
-
-```
-  if (!["active", "blocked", "deleted"].includes(status)) {
-    return sendError(response, "Status inválido.");
-  }
-
-  await query(
-    `
-      UPDATE users
-      SET account_status = $2
-      WHERE id = $1
-    `,
-    [
-      request.params.userId,
-      status,
-    ],
-  );
-
-  return sendSuccess(response, {
-    message: "Status da conta atualizado.",
-  });
-} catch (error) {
-  console.error(error);
-
-  return sendError(
-    response,
-    "Não foi possível atualizar a conta.",
-    500,
-  );
-}
-```
-
-},
-);
-
-app.get("*", (request, response) => {
-const indexPath = path.join(__dirname, "index.html");
-
-if (!fs.existsSync(indexPath)) {
-return response
-.status(404)
-.send("Arquivo index.html não encontrado.");
-}
-
-return response.sendFile(indexPath);
-});
-
-app.use((error, request, response, next) => {
-console.error("Erro inesperado:", error);
-
-if (response.headersSent) {
-return next(error);
-}
-
-return sendError(
-response,
-"O servidor encontrou um erro inesperado.",
-500,
-IS_PRODUCTION ? null : error.message,
-);
-});
-
-const server = app.listen(PORT, async () => {
-console.log(`PUTIRUSU iniciado em http://localhost:${PORT}`);
-
-await ensureDatabaseConnection();
-await removeExpiredSessions();
-});
-
-function shutdown(signal) {
-console.log(`${signal} recebido. Encerrando servidor...`);
-
-server.close(async () => {
-await pool.end();
-process.exit(0);
-});
-
-setTimeout(() => {
-process.exit(1);
-}, 10000).unref();
-}
-
-process.on("SIGTERM", () => shutdown("SIGTERM"));
-process.on("SIGINT", () => shutdown("SIGINT"));
-
-process.on("unhandledRejection", (error) => {
-console.error("Promessa rejeitada sem tratamento:", error);
-});
-
-process.on("uncaughtException", (error) => {
-console.error("Erro não capturado:", error);
-});
+  {
+    id: 4,
+    letterPosition: 1,
+    upper: "А",
+    letter: "а",
+    mode: "print",
+    stageNumber: 4,
+    stageCode: "minuscula_guiada",
+    stageTitle: "Traçar minúscula",
+    level: "A1",
+    target: "ааааа",
+    word: "арбуз",
+    translation: "melancia",
+    sound: "a",
+    prompt: "Traçar minúscula: pratique А а em letra de forma. Passe sobre o modelo minúsculo mantendo a altura.",
+    objective: "Dominar a forma usada dentro das palavras.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 5,
+    letterPosition: 1,
+    upper: "А",
+    letter: "а",
+    mode: "print",
+    stageNumber: 5,
+    stageCode: "copia_isolada",
+    stageTitle: "Copiar isoladamente",
+    level: "A1",
+    target: "ааааа",
+    word: "арбуз",
+    translation: "melancia",
+    sound: "a",
+    prompt: "Copiar isoladamente: pratique А а em letra de forma. Copie a letra cinco vezes ao lado do modelo.",
+    objective: "Manter tamanho e espaçamento consistentes.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 6,
+    letterPosition: 1,
+    upper: "А",
+    letter: "а",
+    mode: "print",
+    stageNumber: 6,
+    stageCode: "ritmo",
+    stageTitle: "Criar ritmo",
+    level: "A2",
+    target: "аааа аааа аааа",
+    word: "арбуз",
+    translation: "melancia",
+    sound: "a",
+    prompt: "Criar ritmo: pratique А а em letra de forma. Escreva uma linha contínua com intervalos regulares.",
+    objective: "Automatizar o movimento sem perder legibilidade.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 7,
+    letterPosition: 1,
+    upper: "А",
+    letter: "а",
+    mode: "print",
+    stageNumber: 7,
+    stageCode: "ligacao_a",
+    stageTitle: "Ligar com а",
+    level: "A2",
+    target: "аа аа",
+    word: "арбуз",
+    translation: "melancia",
+    sound: "a",
+    prompt: "Ligar com а: pratique А а em letra de forma. Pratique a ligação de entrada e saída com а.",
+    objective: "Aprender uma conexão frequente.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 8,
+    letterPosition: 1,
+    upper: "А",
+    letter: "а",
+    mode: "print",
+    stageNumber: 8,
+    stageCode: "ligacao_o",
+    stageTitle: "Ligar com о",
+    level: "A2",
+    target: "ао оа",
+    word: "арбуз",
+    translation: "melancia",
+    sound: "a",
+    prompt: "Ligar com о: pratique А а em letra de forma. Pratique a ligação de entrada e saída com о.",
+    objective: "Evitar que as letras se encostem demais.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 9,
+    letterPosition: 1,
+    upper: "А",
+    letter: "а",
+    mode: "print",
+    stageNumber: 9,
+    stageCode: "ligacao_i",
+    stageTitle: "Ligar com и",
+    level: "A2",
+    target: "аи иа",
+    word: "арбуз",
+    translation: "melancia",
+    sound: "a",
+    prompt: "Ligar com и: pratique А а em letra de forma. Pratique a ligação de entrada e saída com и.",
+    objective: "Manter o fluxo da cursiva.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 10,
+    letterPosition: 1,
+    upper: "А",
+    letter: "а",
+    mode: "print",
+    stageNumber: 10,
+    stageCode: "ligacao_m",
+    stageTitle: "Ligar com м",
+    level: "A2",
+    target: "ам ма",
+    word: "арбуз",
+    translation: "melancia",
+    sound: "a",
+    prompt: "Ligar com м: pratique А а em letra de forma. Pratique a ligação de entrada e saída com м.",
+    objective: "Diferenciar arcos e hastes semelhantes.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 11,
+    letterPosition: 1,
+    upper: "А",
+    letter: "а",
+    mode: "print",
+    stageNumber: 11,
+    stageCode: "silaba",
+    stageTitle: "Copiar sílabas",
+    level: "A2",
+    target: "аа ао ау аи",
+    word: "арбуз",
+    translation: "melancia",
+    sound: "a",
+    prompt: "Copiar sílabas: pratique А а em letra de forma. Copie sílabas curtas e leia em voz alta.",
+    objective: "Unir escrita, leitura e som.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 12,
+    letterPosition: 1,
+    upper: "А",
+    letter: "а",
+    mode: "print",
+    stageNumber: 12,
+    stageCode: "palavra",
+    stageTitle: "Copiar palavra",
+    level: "B1",
+    target: "арбуз",
+    word: "арбуз",
+    translation: "melancia",
+    sound: "a",
+    prompt: "Copiar palavra: pratique А а em letra de forma. Copie a palavra-modelo e confira cada ligação.",
+    objective: "Aplicar a letra em vocabulário real.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 13,
+    letterPosition: 1,
+    upper: "А",
+    letter: "а",
+    mode: "print",
+    stageNumber: 13,
+    stageCode: "frase",
+    stageTitle: "Copiar frase",
+    level: "B1",
+    target: "Я пишу слово «арбуз».",
+    word: "арбуз",
+    translation: "melancia",
+    sound: "a",
+    prompt: "Copiar frase: pratique А а em letra de forma. Copie uma frase curta sem interromper o ritmo.",
+    objective: "Aplicar a letra em contexto.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 14,
+    letterPosition: 1,
+    upper: "А",
+    letter: "а",
+    mode: "print",
+    stageNumber: 14,
+    stageCode: "ditado",
+    stageTitle: "Escrever por ditado",
+    level: "B1",
+    target: "арбуз",
+    word: "арбуз",
+    translation: "melancia",
+    sound: "a",
+    prompt: "Escrever por ditado: pratique А а em letra de forma. Ouça o modelo e escreva sem olhar; depois compare.",
+    objective: "Recuperar a grafia pela memória.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 15,
+    letterPosition: 1,
+    upper: "А",
+    letter: "а",
+    mode: "print",
+    stageNumber: 15,
+    stageCode: "fluencia",
+    stageTitle: "Treino de fluência",
+    level: "B2",
+    target: "арбуз",
+    word: "арбуз",
+    translation: "melancia",
+    sound: "a",
+    prompt: "Treino de fluência: pratique А а em letra de forma. Escreva com tempo controlado sem sacrificar clareza.",
+    objective: "Ganhar velocidade com legibilidade.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 16,
+    letterPosition: 1,
+    upper: "А",
+    letter: "а",
+    mode: "print",
+    stageNumber: 16,
+    stageCode: "producao",
+    stageTitle: "Produção livre",
+    level: "C1",
+    target: "Я пишу слово «арбуз».",
+    word: "арбуз",
+    translation: "melancia",
+    sound: "a",
+    prompt: "Produção livre: pratique А а em letra de forma. Crie uma frase curta usando a palavra-modelo.",
+    objective: "Usar a escrita de maneira independente.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 17,
+    letterPosition: 1,
+    upper: "А",
+    letter: "а",
+    mode: "cursive",
+    stageNumber: 1,
+    stageCode: "observacao",
+    stageTitle: "Observar proporções",
+    level: "A1",
+    target: "ааааа",
+    word: "арбуз",
+    translation: "melancia",
+    sound: "a",
+    prompt: "Observar proporções: pratique А а em letra cursiva. Compare altura, largura, inclinação e posição na linha.",
+    objective: "Reconhecer a forma antes de escrever.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 18,
+    letterPosition: 1,
+    upper: "А",
+    letter: "а",
+    mode: "cursive",
+    stageNumber: 2,
+    stageCode: "movimento_ar",
+    stageTitle: "Desenhar no ar",
+    level: "A1",
+    target: "ааааа",
+    word: "арбуз",
+    translation: "melancia",
+    sound: "a",
+    prompt: "Desenhar no ar: pratique А а em letra cursiva. Faça o movimento amplo com o braço antes de usar o lápis.",
+    objective: "Memorizar a direção geral do traço.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 19,
+    letterPosition: 1,
+    upper: "А",
+    letter: "а",
+    mode: "cursive",
+    stageNumber: 3,
+    stageCode: "maiuscula_guiada",
+    stageTitle: "Traçar maiúscula",
+    level: "A1",
+    target: "ААААА",
+    word: "арбуз",
+    translation: "melancia",
+    sound: "a",
+    prompt: "Traçar maiúscula: pratique А а em letra cursiva. Passe sobre o modelo maiúsculo sem acelerar.",
+    objective: "Controlar início, direção e encerramento.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 20,
+    letterPosition: 1,
+    upper: "А",
+    letter: "а",
+    mode: "cursive",
+    stageNumber: 4,
+    stageCode: "minuscula_guiada",
+    stageTitle: "Traçar minúscula",
+    level: "A1",
+    target: "ааааа",
+    word: "арбуз",
+    translation: "melancia",
+    sound: "a",
+    prompt: "Traçar minúscula: pratique А а em letra cursiva. Passe sobre o modelo minúsculo mantendo a altura.",
+    objective: "Dominar a forma usada dentro das palavras.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 21,
+    letterPosition: 1,
+    upper: "А",
+    letter: "а",
+    mode: "cursive",
+    stageNumber: 5,
+    stageCode: "copia_isolada",
+    stageTitle: "Copiar isoladamente",
+    level: "A1",
+    target: "ааааа",
+    word: "арбуз",
+    translation: "melancia",
+    sound: "a",
+    prompt: "Copiar isoladamente: pratique А а em letra cursiva. Copie a letra cinco vezes ao lado do modelo.",
+    objective: "Manter tamanho e espaçamento consistentes.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 22,
+    letterPosition: 1,
+    upper: "А",
+    letter: "а",
+    mode: "cursive",
+    stageNumber: 6,
+    stageCode: "ritmo",
+    stageTitle: "Criar ritmo",
+    level: "A2",
+    target: "аааа аааа аааа",
+    word: "арбуз",
+    translation: "melancia",
+    sound: "a",
+    prompt: "Criar ritmo: pratique А а em letra cursiva. Escreva uma linha contínua com intervalos regulares.",
+    objective: "Automatizar o movimento sem perder legibilidade.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 23,
+    letterPosition: 1,
+    upper: "А",
+    letter: "а",
+    mode: "cursive",
+    stageNumber: 7,
+    stageCode: "ligacao_a",
+    stageTitle: "Ligar com а",
+    level: "A2",
+    target: "аа аа",
+    word: "арбуз",
+    translation: "melancia",
+    sound: "a",
+    prompt: "Ligar com а: pratique А а em letra cursiva. Pratique a ligação de entrada e saída com а.",
+    objective: "Aprender uma conexão frequente.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 24,
+    letterPosition: 1,
+    upper: "А",
+    letter: "а",
+    mode: "cursive",
+    stageNumber: 8,
+    stageCode: "ligacao_o",
+    stageTitle: "Ligar com о",
+    level: "A2",
+    target: "ао оа",
+    word: "арбуз",
+    translation: "melancia",
+    sound: "a",
+    prompt: "Ligar com о: pratique А а em letra cursiva. Pratique a ligação de entrada e saída com о.",
+    objective: "Evitar que as letras se encostem demais.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 25,
+    letterPosition: 1,
+    upper: "А",
+    letter: "а",
+    mode: "cursive",
+    stageNumber: 9,
+    stageCode: "ligacao_i",
+    stageTitle: "Ligar com и",
+    level: "A2",
+    target: "аи иа",
+    word: "арбуз",
+    translation: "melancia",
+    sound: "a",
+    prompt: "Ligar com и: pratique А а em letra cursiva. Pratique a ligação de entrada e saída com и.",
+    objective: "Manter o fluxo da cursiva.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 26,
+    letterPosition: 1,
+    upper: "А",
+    letter: "а",
+    mode: "cursive",
+    stageNumber: 10,
+    stageCode: "ligacao_m",
+    stageTitle: "Ligar com м",
+    level: "A2",
+    target: "ам ма",
+    word: "арбуз",
+    translation: "melancia",
+    sound: "a",
+    prompt: "Ligar com м: pratique А а em letra cursiva. Pratique a ligação de entrada e saída com м.",
+    objective: "Diferenciar arcos e hastes semelhantes.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 27,
+    letterPosition: 1,
+    upper: "А",
+    letter: "а",
+    mode: "cursive",
+    stageNumber: 11,
+    stageCode: "silaba",
+    stageTitle: "Copiar sílabas",
+    level: "A2",
+    target: "аа ао ау аи",
+    word: "арбуз",
+    translation: "melancia",
+    sound: "a",
+    prompt: "Copiar sílabas: pratique А а em letra cursiva. Copie sílabas curtas e leia em voz alta.",
+    objective: "Unir escrita, leitura e som.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 28,
+    letterPosition: 1,
+    upper: "А",
+    letter: "а",
+    mode: "cursive",
+    stageNumber: 12,
+    stageCode: "palavra",
+    stageTitle: "Copiar palavra",
+    level: "B1",
+    target: "арбуз",
+    word: "арбуз",
+    translation: "melancia",
+    sound: "a",
+    prompt: "Copiar palavra: pratique А а em letra cursiva. Copie a palavra-modelo e confira cada ligação.",
+    objective: "Aplicar a letra em vocabulário real.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 29,
+    letterPosition: 1,
+    upper: "А",
+    letter: "а",
+    mode: "cursive",
+    stageNumber: 13,
+    stageCode: "frase",
+    stageTitle: "Copiar frase",
+    level: "B1",
+    target: "Я пишу слово «арбуз».",
+    word: "арбуз",
+    translation: "melancia",
+    sound: "a",
+    prompt: "Copiar frase: pratique А а em letra cursiva. Copie uma frase curta sem interromper o ritmo.",
+    objective: "Aplicar a letra em contexto.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 30,
+    letterPosition: 1,
+    upper: "А",
+    letter: "а",
+    mode: "cursive",
+    stageNumber: 14,
+    stageCode: "ditado",
+    stageTitle: "Escrever por ditado",
+    level: "B1",
+    target: "арбуз",
+    word: "арбуз",
+    translation: "melancia",
+    sound: "a",
+    prompt: "Escrever por ditado: pratique А а em letra cursiva. Ouça o modelo e escreva sem olhar; depois compare.",
+    objective: "Recuperar a grafia pela memória.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 31,
+    letterPosition: 1,
+    upper: "А",
+    letter: "а",
+    mode: "cursive",
+    stageNumber: 15,
+    stageCode: "fluencia",
+    stageTitle: "Treino de fluência",
+    level: "B2",
+    target: "арбуз",
+    word: "арбуз",
+    translation: "melancia",
+    sound: "a",
+    prompt: "Treino de fluência: pratique А а em letra cursiva. Escreva com tempo controlado sem sacrificar clareza.",
+    objective: "Ganhar velocidade com legibilidade.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 32,
+    letterPosition: 1,
+    upper: "А",
+    letter: "а",
+    mode: "cursive",
+    stageNumber: 16,
+    stageCode: "producao",
+    stageTitle: "Produção livre",
+    level: "C1",
+    target: "Я пишу слово «арбуз».",
+    word: "арбуз",
+    translation: "melancia",
+    sound: "a",
+    prompt: "Produção livre: pratique А а em letra cursiva. Crie uma frase curta usando a palavra-modelo.",
+    objective: "Usar a escrita de maneira independente.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 33,
+    letterPosition: 2,
+    upper: "Б",
+    letter: "б",
+    mode: "print",
+    stageNumber: 1,
+    stageCode: "observacao",
+    stageTitle: "Observar proporções",
+    level: "A1",
+    target: "ббббб",
+    word: "банк",
+    translation: "banco",
+    sound: "b",
+    prompt: "Observar proporções: pratique Б б em letra de forma. Compare altura, largura, inclinação e posição na linha.",
+    objective: "Reconhecer a forma antes de escrever.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 34,
+    letterPosition: 2,
+    upper: "Б",
+    letter: "б",
+    mode: "print",
+    stageNumber: 2,
+    stageCode: "movimento_ar",
+    stageTitle: "Desenhar no ar",
+    level: "A1",
+    target: "ббббб",
+    word: "банк",
+    translation: "banco",
+    sound: "b",
+    prompt: "Desenhar no ar: pratique Б б em letra de forma. Faça o movimento amplo com o braço antes de usar o lápis.",
+    objective: "Memorizar a direção geral do traço.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 35,
+    letterPosition: 2,
+    upper: "Б",
+    letter: "б",
+    mode: "print",
+    stageNumber: 3,
+    stageCode: "maiuscula_guiada",
+    stageTitle: "Traçar maiúscula",
+    level: "A1",
+    target: "БББББ",
+    word: "банк",
+    translation: "banco",
+    sound: "b",
+    prompt: "Traçar maiúscula: pratique Б б em letra de forma. Passe sobre o modelo maiúsculo sem acelerar.",
+    objective: "Controlar início, direção e encerramento.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 36,
+    letterPosition: 2,
+    upper: "Б",
+    letter: "б",
+    mode: "print",
+    stageNumber: 4,
+    stageCode: "minuscula_guiada",
+    stageTitle: "Traçar minúscula",
+    level: "A1",
+    target: "ббббб",
+    word: "банк",
+    translation: "banco",
+    sound: "b",
+    prompt: "Traçar minúscula: pratique Б б em letra de forma. Passe sobre o modelo minúsculo mantendo a altura.",
+    objective: "Dominar a forma usada dentro das palavras.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 37,
+    letterPosition: 2,
+    upper: "Б",
+    letter: "б",
+    mode: "print",
+    stageNumber: 5,
+    stageCode: "copia_isolada",
+    stageTitle: "Copiar isoladamente",
+    level: "A1",
+    target: "ббббб",
+    word: "банк",
+    translation: "banco",
+    sound: "b",
+    prompt: "Copiar isoladamente: pratique Б б em letra de forma. Copie a letra cinco vezes ao lado do modelo.",
+    objective: "Manter tamanho e espaçamento consistentes.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 38,
+    letterPosition: 2,
+    upper: "Б",
+    letter: "б",
+    mode: "print",
+    stageNumber: 6,
+    stageCode: "ritmo",
+    stageTitle: "Criar ritmo",
+    level: "A2",
+    target: "бббб бббб бббб",
+    word: "банк",
+    translation: "banco",
+    sound: "b",
+    prompt: "Criar ritmo: pratique Б б em letra de forma. Escreva uma linha contínua com intervalos regulares.",
+    objective: "Automatizar o movimento sem perder legibilidade.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 39,
+    letterPosition: 2,
+    upper: "Б",
+    letter: "б",
+    mode: "print",
+    stageNumber: 7,
+    stageCode: "ligacao_a",
+    stageTitle: "Ligar com а",
+    level: "A2",
+    target: "ба аб",
+    word: "банк",
+    translation: "banco",
+    sound: "b",
+    prompt: "Ligar com а: pratique Б б em letra de forma. Pratique a ligação de entrada e saída com а.",
+    objective: "Aprender uma conexão frequente.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 40,
+    letterPosition: 2,
+    upper: "Б",
+    letter: "б",
+    mode: "print",
+    stageNumber: 8,
+    stageCode: "ligacao_o",
+    stageTitle: "Ligar com о",
+    level: "A2",
+    target: "бо об",
+    word: "банк",
+    translation: "banco",
+    sound: "b",
+    prompt: "Ligar com о: pratique Б б em letra de forma. Pratique a ligação de entrada e saída com о.",
+    objective: "Evitar que as letras se encostem demais.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 41,
+    letterPosition: 2,
+    upper: "Б",
+    letter: "б",
+    mode: "print",
+    stageNumber: 9,
+    stageCode: "ligacao_i",
+    stageTitle: "Ligar com и",
+    level: "A2",
+    target: "би иб",
+    word: "банк",
+    translation: "banco",
+    sound: "b",
+    prompt: "Ligar com и: pratique Б б em letra de forma. Pratique a ligação de entrada e saída com и.",
+    objective: "Manter o fluxo da cursiva.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 42,
+    letterPosition: 2,
+    upper: "Б",
+    letter: "б",
+    mode: "print",
+    stageNumber: 10,
+    stageCode: "ligacao_m",
+    stageTitle: "Ligar com м",
+    level: "A2",
+    target: "бм мб",
+    word: "банк",
+    translation: "banco",
+    sound: "b",
+    prompt: "Ligar com м: pratique Б б em letra de forma. Pratique a ligação de entrada e saída com м.",
+    objective: "Diferenciar arcos e hastes semelhantes.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 43,
+    letterPosition: 2,
+    upper: "Б",
+    letter: "б",
+    mode: "print",
+    stageNumber: 11,
+    stageCode: "silaba",
+    stageTitle: "Copiar sílabas",
+    level: "A2",
+    target: "ба бо бу би",
+    word: "банк",
+    translation: "banco",
+    sound: "b",
+    prompt: "Copiar sílabas: pratique Б б em letra de forma. Copie sílabas curtas e leia em voz alta.",
+    objective: "Unir escrita, leitura e som.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 44,
+    letterPosition: 2,
+    upper: "Б",
+    letter: "б",
+    mode: "print",
+    stageNumber: 12,
+    stageCode: "palavra",
+    stageTitle: "Copiar palavra",
+    level: "B1",
+    target: "банк",
+    word: "банк",
+    translation: "banco",
+    sound: "b",
+    prompt: "Copiar palavra: pratique Б б em letra de forma. Copie a palavra-modelo e confira cada ligação.",
+    objective: "Aplicar a letra em vocabulário real.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 45,
+    letterPosition: 2,
+    upper: "Б",
+    letter: "б",
+    mode: "print",
+    stageNumber: 13,
+    stageCode: "frase",
+    stageTitle: "Copiar frase",
+    level: "B1",
+    target: "Я пишу слово «банк».",
+    word: "банк",
+    translation: "banco",
+    sound: "b",
+    prompt: "Copiar frase: pratique Б б em letra de forma. Copie uma frase curta sem interromper o ritmo.",
+    objective: "Aplicar a letra em contexto.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 46,
+    letterPosition: 2,
+    upper: "Б",
+    letter: "б",
+    mode: "print",
+    stageNumber: 14,
+    stageCode: "ditado",
+    stageTitle: "Escrever por ditado",
+    level: "B1",
+    target: "банк",
+    word: "банк",
+    translation: "banco",
+    sound: "b",
+    prompt: "Escrever por ditado: pratique Б б em letra de forma. Ouça o modelo e escreva sem olhar; depois compare.",
+    objective: "Recuperar a grafia pela memória.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 47,
+    letterPosition: 2,
+    upper: "Б",
+    letter: "б",
+    mode: "print",
+    stageNumber: 15,
+    stageCode: "fluencia",
+    stageTitle: "Treino de fluência",
+    level: "B2",
+    target: "банк",
+    word: "банк",
+    translation: "banco",
+    sound: "b",
+    prompt: "Treino de fluência: pratique Б б em letra de forma. Escreva com tempo controlado sem sacrificar clareza.",
+    objective: "Ganhar velocidade com legibilidade.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 48,
+    letterPosition: 2,
+    upper: "Б",
+    letter: "б",
+    mode: "print",
+    stageNumber: 16,
+    stageCode: "producao",
+    stageTitle: "Produção livre",
+    level: "C1",
+    target: "Я пишу слово «банк».",
+    word: "банк",
+    translation: "banco",
+    sound: "b",
+    prompt: "Produção livre: pratique Б б em letra de forma. Crie uma frase curta usando a palavra-modelo.",
+    objective: "Usar a escrita de maneira independente.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 49,
+    letterPosition: 2,
+    upper: "Б",
+    letter: "б",
+    mode: "cursive",
+    stageNumber: 1,
+    stageCode: "observacao",
+    stageTitle: "Observar proporções",
+    level: "A1",
+    target: "ббббб",
+    word: "банк",
+    translation: "banco",
+    sound: "b",
+    prompt: "Observar proporções: pratique Б б em letra cursiva. Compare altura, largura, inclinação e posição na linha.",
+    objective: "Reconhecer a forma antes de escrever.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 50,
+    letterPosition: 2,
+    upper: "Б",
+    letter: "б",
+    mode: "cursive",
+    stageNumber: 2,
+    stageCode: "movimento_ar",
+    stageTitle: "Desenhar no ar",
+    level: "A1",
+    target: "ббббб",
+    word: "банк",
+    translation: "banco",
+    sound: "b",
+    prompt: "Desenhar no ar: pratique Б б em letra cursiva. Faça o movimento amplo com o braço antes de usar o lápis.",
+    objective: "Memorizar a direção geral do traço.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 51,
+    letterPosition: 2,
+    upper: "Б",
+    letter: "б",
+    mode: "cursive",
+    stageNumber: 3,
+    stageCode: "maiuscula_guiada",
+    stageTitle: "Traçar maiúscula",
+    level: "A1",
+    target: "БББББ",
+    word: "банк",
+    translation: "banco",
+    sound: "b",
+    prompt: "Traçar maiúscula: pratique Б б em letra cursiva. Passe sobre o modelo maiúsculo sem acelerar.",
+    objective: "Controlar início, direção e encerramento.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 52,
+    letterPosition: 2,
+    upper: "Б",
+    letter: "б",
+    mode: "cursive",
+    stageNumber: 4,
+    stageCode: "minuscula_guiada",
+    stageTitle: "Traçar minúscula",
+    level: "A1",
+    target: "ббббб",
+    word: "банк",
+    translation: "banco",
+    sound: "b",
+    prompt: "Traçar minúscula: pratique Б б em letra cursiva. Passe sobre o modelo minúsculo mantendo a altura.",
+    objective: "Dominar a forma usada dentro das palavras.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 53,
+    letterPosition: 2,
+    upper: "Б",
+    letter: "б",
+    mode: "cursive",
+    stageNumber: 5,
+    stageCode: "copia_isolada",
+    stageTitle: "Copiar isoladamente",
+    level: "A1",
+    target: "ббббб",
+    word: "банк",
+    translation: "banco",
+    sound: "b",
+    prompt: "Copiar isoladamente: pratique Б б em letra cursiva. Copie a letra cinco vezes ao lado do modelo.",
+    objective: "Manter tamanho e espaçamento consistentes.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 54,
+    letterPosition: 2,
+    upper: "Б",
+    letter: "б",
+    mode: "cursive",
+    stageNumber: 6,
+    stageCode: "ritmo",
+    stageTitle: "Criar ritmo",
+    level: "A2",
+    target: "бббб бббб бббб",
+    word: "банк",
+    translation: "banco",
+    sound: "b",
+    prompt: "Criar ritmo: pratique Б б em letra cursiva. Escreva uma linha contínua com intervalos regulares.",
+    objective: "Automatizar o movimento sem perder legibilidade.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 55,
+    letterPosition: 2,
+    upper: "Б",
+    letter: "б",
+    mode: "cursive",
+    stageNumber: 7,
+    stageCode: "ligacao_a",
+    stageTitle: "Ligar com а",
+    level: "A2",
+    target: "ба аб",
+    word: "банк",
+    translation: "banco",
+    sound: "b",
+    prompt: "Ligar com а: pratique Б б em letra cursiva. Pratique a ligação de entrada e saída com а.",
+    objective: "Aprender uma conexão frequente.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 56,
+    letterPosition: 2,
+    upper: "Б",
+    letter: "б",
+    mode: "cursive",
+    stageNumber: 8,
+    stageCode: "ligacao_o",
+    stageTitle: "Ligar com о",
+    level: "A2",
+    target: "бо об",
+    word: "банк",
+    translation: "banco",
+    sound: "b",
+    prompt: "Ligar com о: pratique Б б em letra cursiva. Pratique a ligação de entrada e saída com о.",
+    objective: "Evitar que as letras se encostem demais.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 57,
+    letterPosition: 2,
+    upper: "Б",
+    letter: "б",
+    mode: "cursive",
+    stageNumber: 9,
+    stageCode: "ligacao_i",
+    stageTitle: "Ligar com и",
+    level: "A2",
+    target: "би иб",
+    word: "банк",
+    translation: "banco",
+    sound: "b",
+    prompt: "Ligar com и: pratique Б б em letra cursiva. Pratique a ligação de entrada e saída com и.",
+    objective: "Manter o fluxo da cursiva.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 58,
+    letterPosition: 2,
+    upper: "Б",
+    letter: "б",
+    mode: "cursive",
+    stageNumber: 10,
+    stageCode: "ligacao_m",
+    stageTitle: "Ligar com м",
+    level: "A2",
+    target: "бм мб",
+    word: "банк",
+    translation: "banco",
+    sound: "b",
+    prompt: "Ligar com м: pratique Б б em letra cursiva. Pratique a ligação de entrada e saída com м.",
+    objective: "Diferenciar arcos e hastes semelhantes.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 59,
+    letterPosition: 2,
+    upper: "Б",
+    letter: "б",
+    mode: "cursive",
+    stageNumber: 11,
+    stageCode: "silaba",
+    stageTitle: "Copiar sílabas",
+    level: "A2",
+    target: "ба бо бу би",
+    word: "банк",
+    translation: "banco",
+    sound: "b",
+    prompt: "Copiar sílabas: pratique Б б em letra cursiva. Copie sílabas curtas e leia em voz alta.",
+    objective: "Unir escrita, leitura e som.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 60,
+    letterPosition: 2,
+    upper: "Б",
+    letter: "б",
+    mode: "cursive",
+    stageNumber: 12,
+    stageCode: "palavra",
+    stageTitle: "Copiar palavra",
+    level: "B1",
+    target: "банк",
+    word: "банк",
+    translation: "banco",
+    sound: "b",
+    prompt: "Copiar palavra: pratique Б б em letra cursiva. Copie a palavra-modelo e confira cada ligação.",
+    objective: "Aplicar a letra em vocabulário real.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 61,
+    letterPosition: 2,
+    upper: "Б",
+    letter: "б",
+    mode: "cursive",
+    stageNumber: 13,
+    stageCode: "frase",
+    stageTitle: "Copiar frase",
+    level: "B1",
+    target: "Я пишу слово «банк».",
+    word: "банк",
+    translation: "banco",
+    sound: "b",
+    prompt: "Copiar frase: pratique Б б em letra cursiva. Copie uma frase curta sem interromper o ritmo.",
+    objective: "Aplicar a letra em contexto.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 62,
+    letterPosition: 2,
+    upper: "Б",
+    letter: "б",
+    mode: "cursive",
+    stageNumber: 14,
+    stageCode: "ditado",
+    stageTitle: "Escrever por ditado",
+    level: "B1",
+    target: "банк",
+    word: "банк",
+    translation: "banco",
+    sound: "b",
+    prompt: "Escrever por ditado: pratique Б б em letra cursiva. Ouça o modelo e escreva sem olhar; depois compare.",
+    objective: "Recuperar a grafia pela memória.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 63,
+    letterPosition: 2,
+    upper: "Б",
+    letter: "б",
+    mode: "cursive",
+    stageNumber: 15,
+    stageCode: "fluencia",
+    stageTitle: "Treino de fluência",
+    level: "B2",
+    target: "банк",
+    word: "банк",
+    translation: "banco",
+    sound: "b",
+    prompt: "Treino de fluência: pratique Б б em letra cursiva. Escreva com tempo controlado sem sacrificar clareza.",
+    objective: "Ganhar velocidade com legibilidade.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 64,
+    letterPosition: 2,
+    upper: "Б",
+    letter: "б",
+    mode: "cursive",
+    stageNumber: 16,
+    stageCode: "producao",
+    stageTitle: "Produção livre",
+    level: "C1",
+    target: "Я пишу слово «банк».",
+    word: "банк",
+    translation: "banco",
+    sound: "b",
+    prompt: "Produção livre: pratique Б б em letra cursiva. Crie uma frase curta usando a palavra-modelo.",
+    objective: "Usar a escrita de maneira independente.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 65,
+    letterPosition: 3,
+    upper: "В",
+    letter: "в",
+    mode: "print",
+    stageNumber: 1,
+    stageCode: "observacao",
+    stageTitle: "Observar proporções",
+    level: "A1",
+    target: "ввввв",
+    word: "вода",
+    translation: "água",
+    sound: "v",
+    prompt: "Observar proporções: pratique В в em letra de forma. Compare altura, largura, inclinação e posição na linha.",
+    objective: "Reconhecer a forma antes de escrever.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 66,
+    letterPosition: 3,
+    upper: "В",
+    letter: "в",
+    mode: "print",
+    stageNumber: 2,
+    stageCode: "movimento_ar",
+    stageTitle: "Desenhar no ar",
+    level: "A1",
+    target: "ввввв",
+    word: "вода",
+    translation: "água",
+    sound: "v",
+    prompt: "Desenhar no ar: pratique В в em letra de forma. Faça o movimento amplo com o braço antes de usar o lápis.",
+    objective: "Memorizar a direção geral do traço.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 67,
+    letterPosition: 3,
+    upper: "В",
+    letter: "в",
+    mode: "print",
+    stageNumber: 3,
+    stageCode: "maiuscula_guiada",
+    stageTitle: "Traçar maiúscula",
+    level: "A1",
+    target: "ВВВВВ",
+    word: "вода",
+    translation: "água",
+    sound: "v",
+    prompt: "Traçar maiúscula: pratique В в em letra de forma. Passe sobre o modelo maiúsculo sem acelerar.",
+    objective: "Controlar início, direção e encerramento.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 68,
+    letterPosition: 3,
+    upper: "В",
+    letter: "в",
+    mode: "print",
+    stageNumber: 4,
+    stageCode: "minuscula_guiada",
+    stageTitle: "Traçar minúscula",
+    level: "A1",
+    target: "ввввв",
+    word: "вода",
+    translation: "água",
+    sound: "v",
+    prompt: "Traçar minúscula: pratique В в em letra de forma. Passe sobre o modelo minúsculo mantendo a altura.",
+    objective: "Dominar a forma usada dentro das palavras.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 69,
+    letterPosition: 3,
+    upper: "В",
+    letter: "в",
+    mode: "print",
+    stageNumber: 5,
+    stageCode: "copia_isolada",
+    stageTitle: "Copiar isoladamente",
+    level: "A1",
+    target: "ввввв",
+    word: "вода",
+    translation: "água",
+    sound: "v",
+    prompt: "Copiar isoladamente: pratique В в em letra de forma. Copie a letra cinco vezes ao lado do modelo.",
+    objective: "Manter tamanho e espaçamento consistentes.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 70,
+    letterPosition: 3,
+    upper: "В",
+    letter: "в",
+    mode: "print",
+    stageNumber: 6,
+    stageCode: "ritmo",
+    stageTitle: "Criar ritmo",
+    level: "A2",
+    target: "вввв вввв вввв",
+    word: "вода",
+    translation: "água",
+    sound: "v",
+    prompt: "Criar ritmo: pratique В в em letra de forma. Escreva uma linha contínua com intervalos regulares.",
+    objective: "Automatizar o movimento sem perder legibilidade.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 71,
+    letterPosition: 3,
+    upper: "В",
+    letter: "в",
+    mode: "print",
+    stageNumber: 7,
+    stageCode: "ligacao_a",
+    stageTitle: "Ligar com а",
+    level: "A2",
+    target: "ва ав",
+    word: "вода",
+    translation: "água",
+    sound: "v",
+    prompt: "Ligar com а: pratique В в em letra de forma. Pratique a ligação de entrada e saída com а.",
+    objective: "Aprender uma conexão frequente.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 72,
+    letterPosition: 3,
+    upper: "В",
+    letter: "в",
+    mode: "print",
+    stageNumber: 8,
+    stageCode: "ligacao_o",
+    stageTitle: "Ligar com о",
+    level: "A2",
+    target: "во ов",
+    word: "вода",
+    translation: "água",
+    sound: "v",
+    prompt: "Ligar com о: pratique В в em letra de forma. Pratique a ligação de entrada e saída com о.",
+    objective: "Evitar que as letras se encostem demais.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 73,
+    letterPosition: 3,
+    upper: "В",
+    letter: "в",
+    mode: "print",
+    stageNumber: 9,
+    stageCode: "ligacao_i",
+    stageTitle: "Ligar com и",
+    level: "A2",
+    target: "ви ив",
+    word: "вода",
+    translation: "água",
+    sound: "v",
+    prompt: "Ligar com и: pratique В в em letra de forma. Pratique a ligação de entrada e saída com и.",
+    objective: "Manter o fluxo da cursiva.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 74,
+    letterPosition: 3,
+    upper: "В",
+    letter: "в",
+    mode: "print",
+    stageNumber: 10,
+    stageCode: "ligacao_m",
+    stageTitle: "Ligar com м",
+    level: "A2",
+    target: "вм мв",
+    word: "вода",
+    translation: "água",
+    sound: "v",
+    prompt: "Ligar com м: pratique В в em letra de forma. Pratique a ligação de entrada e saída com м.",
+    objective: "Diferenciar arcos e hastes semelhantes.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 75,
+    letterPosition: 3,
+    upper: "В",
+    letter: "в",
+    mode: "print",
+    stageNumber: 11,
+    stageCode: "silaba",
+    stageTitle: "Copiar sílabas",
+    level: "A2",
+    target: "ва во ву ви",
+    word: "вода",
+    translation: "água",
+    sound: "v",
+    prompt: "Copiar sílabas: pratique В в em letra de forma. Copie sílabas curtas e leia em voz alta.",
+    objective: "Unir escrita, leitura e som.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 76,
+    letterPosition: 3,
+    upper: "В",
+    letter: "в",
+    mode: "print",
+    stageNumber: 12,
+    stageCode: "palavra",
+    stageTitle: "Copiar palavra",
+    level: "B1",
+    target: "вода",
+    word: "вода",
+    translation: "água",
+    sound: "v",
+    prompt: "Copiar palavra: pratique В в em letra de forma. Copie a palavra-modelo e confira cada ligação.",
+    objective: "Aplicar a letra em vocabulário real.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 77,
+    letterPosition: 3,
+    upper: "В",
+    letter: "в",
+    mode: "print",
+    stageNumber: 13,
+    stageCode: "frase",
+    stageTitle: "Copiar frase",
+    level: "B1",
+    target: "Я пишу слово «вода».",
+    word: "вода",
+    translation: "água",
+    sound: "v",
+    prompt: "Copiar frase: pratique В в em letra de forma. Copie uma frase curta sem interromper o ritmo.",
+    objective: "Aplicar a letra em contexto.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 78,
+    letterPosition: 3,
+    upper: "В",
+    letter: "в",
+    mode: "print",
+    stageNumber: 14,
+    stageCode: "ditado",
+    stageTitle: "Escrever por ditado",
+    level: "B1",
+    target: "вода",
+    word: "вода",
+    translation: "água",
+    sound: "v",
+    prompt: "Escrever por ditado: pratique В в em letra de forma. Ouça o modelo e escreva sem olhar; depois compare.",
+    objective: "Recuperar a grafia pela memória.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 79,
+    letterPosition: 3,
+    upper: "В",
+    letter: "в",
+    mode: "print",
+    stageNumber: 15,
+    stageCode: "fluencia",
+    stageTitle: "Treino de fluência",
+    level: "B2",
+    target: "вода",
+    word: "вода",
+    translation: "água",
+    sound: "v",
+    prompt: "Treino de fluência: pratique В в em letra de forma. Escreva com tempo controlado sem sacrificar clareza.",
+    objective: "Ganhar velocidade com legibilidade.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 80,
+    letterPosition: 3,
+    upper: "В",
+    letter: "в",
+    mode: "print",
+    stageNumber: 16,
+    stageCode: "producao",
+    stageTitle: "Produção livre",
+    level: "C1",
+    target: "Я пишу слово «вода».",
+    word: "вода",
+    translation: "água",
+    sound: "v",
+    prompt: "Produção livre: pratique В в em letra de forma. Crie uma frase curta usando a palavra-modelo.",
+    objective: "Usar a escrita de maneira independente.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 81,
+    letterPosition: 3,
+    upper: "В",
+    letter: "в",
+    mode: "cursive",
+    stageNumber: 1,
+    stageCode: "observacao",
+    stageTitle: "Observar proporções",
+    level: "A1",
+    target: "ввввв",
+    word: "вода",
+    translation: "água",
+    sound: "v",
+    prompt: "Observar proporções: pratique В в em letra cursiva. Compare altura, largura, inclinação e posição na linha.",
+    objective: "Reconhecer a forma antes de escrever.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 82,
+    letterPosition: 3,
+    upper: "В",
+    letter: "в",
+    mode: "cursive",
+    stageNumber: 2,
+    stageCode: "movimento_ar",
+    stageTitle: "Desenhar no ar",
+    level: "A1",
+    target: "ввввв",
+    word: "вода",
+    translation: "água",
+    sound: "v",
+    prompt: "Desenhar no ar: pratique В в em letra cursiva. Faça o movimento amplo com o braço antes de usar o lápis.",
+    objective: "Memorizar a direção geral do traço.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 83,
+    letterPosition: 3,
+    upper: "В",
+    letter: "в",
+    mode: "cursive",
+    stageNumber: 3,
+    stageCode: "maiuscula_guiada",
+    stageTitle: "Traçar maiúscula",
+    level: "A1",
+    target: "ВВВВВ",
+    word: "вода",
+    translation: "água",
+    sound: "v",
+    prompt: "Traçar maiúscula: pratique В в em letra cursiva. Passe sobre o modelo maiúsculo sem acelerar.",
+    objective: "Controlar início, direção e encerramento.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 84,
+    letterPosition: 3,
+    upper: "В",
+    letter: "в",
+    mode: "cursive",
+    stageNumber: 4,
+    stageCode: "minuscula_guiada",
+    stageTitle: "Traçar minúscula",
+    level: "A1",
+    target: "ввввв",
+    word: "вода",
+    translation: "água",
+    sound: "v",
+    prompt: "Traçar minúscula: pratique В в em letra cursiva. Passe sobre o modelo minúsculo mantendo a altura.",
+    objective: "Dominar a forma usada dentro das palavras.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 85,
+    letterPosition: 3,
+    upper: "В",
+    letter: "в",
+    mode: "cursive",
+    stageNumber: 5,
+    stageCode: "copia_isolada",
+    stageTitle: "Copiar isoladamente",
+    level: "A1",
+    target: "ввввв",
+    word: "вода",
+    translation: "água",
+    sound: "v",
+    prompt: "Copiar isoladamente: pratique В в em letra cursiva. Copie a letra cinco vezes ao lado do modelo.",
+    objective: "Manter tamanho e espaçamento consistentes.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 86,
+    letterPosition: 3,
+    upper: "В",
+    letter: "в",
+    mode: "cursive",
+    stageNumber: 6,
+    stageCode: "ritmo",
+    stageTitle: "Criar ritmo",
+    level: "A2",
+    target: "вввв вввв вввв",
+    word: "вода",
+    translation: "água",
+    sound: "v",
+    prompt: "Criar ritmo: pratique В в em letra cursiva. Escreva uma linha contínua com intervalos regulares.",
+    objective: "Automatizar o movimento sem perder legibilidade.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 87,
+    letterPosition: 3,
+    upper: "В",
+    letter: "в",
+    mode: "cursive",
+    stageNumber: 7,
+    stageCode: "ligacao_a",
+    stageTitle: "Ligar com а",
+    level: "A2",
+    target: "ва ав",
+    word: "вода",
+    translation: "água",
+    sound: "v",
+    prompt: "Ligar com а: pratique В в em letra cursiva. Pratique a ligação de entrada e saída com а.",
+    objective: "Aprender uma conexão frequente.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 88,
+    letterPosition: 3,
+    upper: "В",
+    letter: "в",
+    mode: "cursive",
+    stageNumber: 8,
+    stageCode: "ligacao_o",
+    stageTitle: "Ligar com о",
+    level: "A2",
+    target: "во ов",
+    word: "вода",
+    translation: "água",
+    sound: "v",
+    prompt: "Ligar com о: pratique В в em letra cursiva. Pratique a ligação de entrada e saída com о.",
+    objective: "Evitar que as letras se encostem demais.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 89,
+    letterPosition: 3,
+    upper: "В",
+    letter: "в",
+    mode: "cursive",
+    stageNumber: 9,
+    stageCode: "ligacao_i",
+    stageTitle: "Ligar com и",
+    level: "A2",
+    target: "ви ив",
+    word: "вода",
+    translation: "água",
+    sound: "v",
+    prompt: "Ligar com и: pratique В в em letra cursiva. Pratique a ligação de entrada e saída com и.",
+    objective: "Manter o fluxo da cursiva.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 90,
+    letterPosition: 3,
+    upper: "В",
+    letter: "в",
+    mode: "cursive",
+    stageNumber: 10,
+    stageCode: "ligacao_m",
+    stageTitle: "Ligar com м",
+    level: "A2",
+    target: "вм мв",
+    word: "вода",
+    translation: "água",
+    sound: "v",
+    prompt: "Ligar com м: pratique В в em letra cursiva. Pratique a ligação de entrada e saída com м.",
+    objective: "Diferenciar arcos e hastes semelhantes.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 91,
+    letterPosition: 3,
+    upper: "В",
+    letter: "в",
+    mode: "cursive",
+    stageNumber: 11,
+    stageCode: "silaba",
+    stageTitle: "Copiar sílabas",
+    level: "A2",
+    target: "ва во ву ви",
+    word: "вода",
+    translation: "água",
+    sound: "v",
+    prompt: "Copiar sílabas: pratique В в em letra cursiva. Copie sílabas curtas e leia em voz alta.",
+    objective: "Unir escrita, leitura e som.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 92,
+    letterPosition: 3,
+    upper: "В",
+    letter: "в",
+    mode: "cursive",
+    stageNumber: 12,
+    stageCode: "palavra",
+    stageTitle: "Copiar palavra",
+    level: "B1",
+    target: "вода",
+    word: "вода",
+    translation: "água",
+    sound: "v",
+    prompt: "Copiar palavra: pratique В в em letra cursiva. Copie a palavra-modelo e confira cada ligação.",
+    objective: "Aplicar a letra em vocabulário real.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 93,
+    letterPosition: 3,
+    upper: "В",
+    letter: "в",
+    mode: "cursive",
+    stageNumber: 13,
+    stageCode: "frase",
+    stageTitle: "Copiar frase",
+    level: "B1",
+    target: "Я пишу слово «вода».",
+    word: "вода",
+    translation: "água",
+    sound: "v",
+    prompt: "Copiar frase: pratique В в em letra cursiva. Copie uma frase curta sem interromper o ritmo.",
+    objective: "Aplicar a letra em contexto.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 94,
+    letterPosition: 3,
+    upper: "В",
+    letter: "в",
+    mode: "cursive",
+    stageNumber: 14,
+    stageCode: "ditado",
+    stageTitle: "Escrever por ditado",
+    level: "B1",
+    target: "вода",
+    word: "вода",
+    translation: "água",
+    sound: "v",
+    prompt: "Escrever por ditado: pratique В в em letra cursiva. Ouça o modelo e escreva sem olhar; depois compare.",
+    objective: "Recuperar a grafia pela memória.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 95,
+    letterPosition: 3,
+    upper: "В",
+    letter: "в",
+    mode: "cursive",
+    stageNumber: 15,
+    stageCode: "fluencia",
+    stageTitle: "Treino de fluência",
+    level: "B2",
+    target: "вода",
+    word: "вода",
+    translation: "água",
+    sound: "v",
+    prompt: "Treino de fluência: pratique В в em letra cursiva. Escreva com tempo controlado sem sacrificar clareza.",
+    objective: "Ganhar velocidade com legibilidade.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 96,
+    letterPosition: 3,
+    upper: "В",
+    letter: "в",
+    mode: "cursive",
+    stageNumber: 16,
+    stageCode: "producao",
+    stageTitle: "Produção livre",
+    level: "C1",
+    target: "Я пишу слово «вода».",
+    word: "вода",
+    translation: "água",
+    sound: "v",
+    prompt: "Produção livre: pratique В в em letra cursiva. Crie uma frase curta usando a palavra-modelo.",
+    objective: "Usar a escrita de maneira independente.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 97,
+    letterPosition: 4,
+    upper: "Г",
+    letter: "г",
+    mode: "print",
+    stageNumber: 1,
+    stageCode: "observacao",
+    stageTitle: "Observar proporções",
+    level: "A1",
+    target: "ггггг",
+    word: "город",
+    translation: "cidade",
+    sound: "g",
+    prompt: "Observar proporções: pratique Г г em letra de forma. Compare altura, largura, inclinação e posição na linha.",
+    objective: "Reconhecer a forma antes de escrever.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 98,
+    letterPosition: 4,
+    upper: "Г",
+    letter: "г",
+    mode: "print",
+    stageNumber: 2,
+    stageCode: "movimento_ar",
+    stageTitle: "Desenhar no ar",
+    level: "A1",
+    target: "ггггг",
+    word: "город",
+    translation: "cidade",
+    sound: "g",
+    prompt: "Desenhar no ar: pratique Г г em letra de forma. Faça o movimento amplo com o braço antes de usar o lápis.",
+    objective: "Memorizar a direção geral do traço.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 99,
+    letterPosition: 4,
+    upper: "Г",
+    letter: "г",
+    mode: "print",
+    stageNumber: 3,
+    stageCode: "maiuscula_guiada",
+    stageTitle: "Traçar maiúscula",
+    level: "A1",
+    target: "ГГГГГ",
+    word: "город",
+    translation: "cidade",
+    sound: "g",
+    prompt: "Traçar maiúscula: pratique Г г em letra de forma. Passe sobre o modelo maiúsculo sem acelerar.",
+    objective: "Controlar início, direção e encerramento.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 100,
+    letterPosition: 4,
+    upper: "Г",
+    letter: "г",
+    mode: "print",
+    stageNumber: 4,
+    stageCode: "minuscula_guiada",
+    stageTitle: "Traçar minúscula",
+    level: "A1",
+    target: "ггггг",
+    word: "город",
+    translation: "cidade",
+    sound: "g",
+    prompt: "Traçar minúscula: pratique Г г em letra de forma. Passe sobre o modelo minúsculo mantendo a altura.",
+    objective: "Dominar a forma usada dentro das palavras.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 101,
+    letterPosition: 4,
+    upper: "Г",
+    letter: "г",
+    mode: "print",
+    stageNumber: 5,
+    stageCode: "copia_isolada",
+    stageTitle: "Copiar isoladamente",
+    level: "A1",
+    target: "ггггг",
+    word: "город",
+    translation: "cidade",
+    sound: "g",
+    prompt: "Copiar isoladamente: pratique Г г em letra de forma. Copie a letra cinco vezes ao lado do modelo.",
+    objective: "Manter tamanho e espaçamento consistentes.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 102,
+    letterPosition: 4,
+    upper: "Г",
+    letter: "г",
+    mode: "print",
+    stageNumber: 6,
+    stageCode: "ritmo",
+    stageTitle: "Criar ritmo",
+    level: "A2",
+    target: "гггг гггг гггг",
+    word: "город",
+    translation: "cidade",
+    sound: "g",
+    prompt: "Criar ritmo: pratique Г г em letra de forma. Escreva uma linha contínua com intervalos regulares.",
+    objective: "Automatizar o movimento sem perder legibilidade.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 103,
+    letterPosition: 4,
+    upper: "Г",
+    letter: "г",
+    mode: "print",
+    stageNumber: 7,
+    stageCode: "ligacao_a",
+    stageTitle: "Ligar com а",
+    level: "A2",
+    target: "га аг",
+    word: "город",
+    translation: "cidade",
+    sound: "g",
+    prompt: "Ligar com а: pratique Г г em letra de forma. Pratique a ligação de entrada e saída com а.",
+    objective: "Aprender uma conexão frequente.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 104,
+    letterPosition: 4,
+    upper: "Г",
+    letter: "г",
+    mode: "print",
+    stageNumber: 8,
+    stageCode: "ligacao_o",
+    stageTitle: "Ligar com о",
+    level: "A2",
+    target: "го ог",
+    word: "город",
+    translation: "cidade",
+    sound: "g",
+    prompt: "Ligar com о: pratique Г г em letra de forma. Pratique a ligação de entrada e saída com о.",
+    objective: "Evitar que as letras se encostem demais.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 105,
+    letterPosition: 4,
+    upper: "Г",
+    letter: "г",
+    mode: "print",
+    stageNumber: 9,
+    stageCode: "ligacao_i",
+    stageTitle: "Ligar com и",
+    level: "A2",
+    target: "ги иг",
+    word: "город",
+    translation: "cidade",
+    sound: "g",
+    prompt: "Ligar com и: pratique Г г em letra de forma. Pratique a ligação de entrada e saída com и.",
+    objective: "Manter o fluxo da cursiva.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 106,
+    letterPosition: 4,
+    upper: "Г",
+    letter: "г",
+    mode: "print",
+    stageNumber: 10,
+    stageCode: "ligacao_m",
+    stageTitle: "Ligar com м",
+    level: "A2",
+    target: "гм мг",
+    word: "город",
+    translation: "cidade",
+    sound: "g",
+    prompt: "Ligar com м: pratique Г г em letra de forma. Pratique a ligação de entrada e saída com м.",
+    objective: "Diferenciar arcos e hastes semelhantes.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 107,
+    letterPosition: 4,
+    upper: "Г",
+    letter: "г",
+    mode: "print",
+    stageNumber: 11,
+    stageCode: "silaba",
+    stageTitle: "Copiar sílabas",
+    level: "A2",
+    target: "га го гу ги",
+    word: "город",
+    translation: "cidade",
+    sound: "g",
+    prompt: "Copiar sílabas: pratique Г г em letra de forma. Copie sílabas curtas e leia em voz alta.",
+    objective: "Unir escrita, leitura e som.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 108,
+    letterPosition: 4,
+    upper: "Г",
+    letter: "г",
+    mode: "print",
+    stageNumber: 12,
+    stageCode: "palavra",
+    stageTitle: "Copiar palavra",
+    level: "B1",
+    target: "город",
+    word: "город",
+    translation: "cidade",
+    sound: "g",
+    prompt: "Copiar palavra: pratique Г г em letra de forma. Copie a palavra-modelo e confira cada ligação.",
+    objective: "Aplicar a letra em vocabulário real.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 109,
+    letterPosition: 4,
+    upper: "Г",
+    letter: "г",
+    mode: "print",
+    stageNumber: 13,
+    stageCode: "frase",
+    stageTitle: "Copiar frase",
+    level: "B1",
+    target: "Я пишу слово «город».",
+    word: "город",
+    translation: "cidade",
+    sound: "g",
+    prompt: "Copiar frase: pratique Г г em letra de forma. Copie uma frase curta sem interromper o ritmo.",
+    objective: "Aplicar a letra em contexto.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 110,
+    letterPosition: 4,
+    upper: "Г",
+    letter: "г",
+    mode: "print",
+    stageNumber: 14,
+    stageCode: "ditado",
+    stageTitle: "Escrever por ditado",
+    level: "B1",
+    target: "город",
+    word: "город",
+    translation: "cidade",
+    sound: "g",
+    prompt: "Escrever por ditado: pratique Г г em letra de forma. Ouça o modelo e escreva sem olhar; depois compare.",
+    objective: "Recuperar a grafia pela memória.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 111,
+    letterPosition: 4,
+    upper: "Г",
+    letter: "г",
+    mode: "print",
+    stageNumber: 15,
+    stageCode: "fluencia",
+    stageTitle: "Treino de fluência",
+    level: "B2",
+    target: "город",
+    word: "город",
+    translation: "cidade",
+    sound: "g",
+    prompt: "Treino de fluência: pratique Г г em letra de forma. Escreva com tempo controlado sem sacrificar clareza.",
+    objective: "Ganhar velocidade com legibilidade.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 112,
+    letterPosition: 4,
+    upper: "Г",
+    letter: "г",
+    mode: "print",
+    stageNumber: 16,
+    stageCode: "producao",
+    stageTitle: "Produção livre",
+    level: "C1",
+    target: "Я пишу слово «город».",
+    word: "город",
+    translation: "cidade",
+    sound: "g",
+    prompt: "Produção livre: pratique Г г em letra de forma. Crie uma frase curta usando a palavra-modelo.",
+    objective: "Usar a escrita de maneira independente.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 113,
+    letterPosition: 4,
+    upper: "Г",
+    letter: "г",
+    mode: "cursive",
+    stageNumber: 1,
+    stageCode: "observacao",
+    stageTitle: "Observar proporções",
+    level: "A1",
+    target: "ггггг",
+    word: "город",
+    translation: "cidade",
+    sound: "g",
+    prompt: "Observar proporções: pratique Г г em letra cursiva. Compare altura, largura, inclinação e posição na linha.",
+    objective: "Reconhecer a forma antes de escrever.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 114,
+    letterPosition: 4,
+    upper: "Г",
+    letter: "г",
+    mode: "cursive",
+    stageNumber: 2,
+    stageCode: "movimento_ar",
+    stageTitle: "Desenhar no ar",
+    level: "A1",
+    target: "ггггг",
+    word: "город",
+    translation: "cidade",
+    sound: "g",
+    prompt: "Desenhar no ar: pratique Г г em letra cursiva. Faça o movimento amplo com o braço antes de usar o lápis.",
+    objective: "Memorizar a direção geral do traço.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 115,
+    letterPosition: 4,
+    upper: "Г",
+    letter: "г",
+    mode: "cursive",
+    stageNumber: 3,
+    stageCode: "maiuscula_guiada",
+    stageTitle: "Traçar maiúscula",
+    level: "A1",
+    target: "ГГГГГ",
+    word: "город",
+    translation: "cidade",
+    sound: "g",
+    prompt: "Traçar maiúscula: pratique Г г em letra cursiva. Passe sobre o modelo maiúsculo sem acelerar.",
+    objective: "Controlar início, direção e encerramento.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 116,
+    letterPosition: 4,
+    upper: "Г",
+    letter: "г",
+    mode: "cursive",
+    stageNumber: 4,
+    stageCode: "minuscula_guiada",
+    stageTitle: "Traçar minúscula",
+    level: "A1",
+    target: "ггггг",
+    word: "город",
+    translation: "cidade",
+    sound: "g",
+    prompt: "Traçar minúscula: pratique Г г em letra cursiva. Passe sobre o modelo minúsculo mantendo a altura.",
+    objective: "Dominar a forma usada dentro das palavras.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 117,
+    letterPosition: 4,
+    upper: "Г",
+    letter: "г",
+    mode: "cursive",
+    stageNumber: 5,
+    stageCode: "copia_isolada",
+    stageTitle: "Copiar isoladamente",
+    level: "A1",
+    target: "ггггг",
+    word: "город",
+    translation: "cidade",
+    sound: "g",
+    prompt: "Copiar isoladamente: pratique Г г em letra cursiva. Copie a letra cinco vezes ao lado do modelo.",
+    objective: "Manter tamanho e espaçamento consistentes.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 118,
+    letterPosition: 4,
+    upper: "Г",
+    letter: "г",
+    mode: "cursive",
+    stageNumber: 6,
+    stageCode: "ritmo",
+    stageTitle: "Criar ritmo",
+    level: "A2",
+    target: "гггг гггг гггг",
+    word: "город",
+    translation: "cidade",
+    sound: "g",
+    prompt: "Criar ritmo: pratique Г г em letra cursiva. Escreva uma linha contínua com intervalos regulares.",
+    objective: "Automatizar o movimento sem perder legibilidade.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 119,
+    letterPosition: 4,
+    upper: "Г",
+    letter: "г",
+    mode: "cursive",
+    stageNumber: 7,
+    stageCode: "ligacao_a",
+    stageTitle: "Ligar com а",
+    level: "A2",
+    target: "га аг",
+    word: "город",
+    translation: "cidade",
+    sound: "g",
+    prompt: "Ligar com а: pratique Г г em letra cursiva. Pratique a ligação de entrada e saída com а.",
+    objective: "Aprender uma conexão frequente.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 120,
+    letterPosition: 4,
+    upper: "Г",
+    letter: "г",
+    mode: "cursive",
+    stageNumber: 8,
+    stageCode: "ligacao_o",
+    stageTitle: "Ligar com о",
+    level: "A2",
+    target: "го ог",
+    word: "город",
+    translation: "cidade",
+    sound: "g",
+    prompt: "Ligar com о: pratique Г г em letra cursiva. Pratique a ligação de entrada e saída com о.",
+    objective: "Evitar que as letras se encostem demais.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 121,
+    letterPosition: 4,
+    upper: "Г",
+    letter: "г",
+    mode: "cursive",
+    stageNumber: 9,
+    stageCode: "ligacao_i",
+    stageTitle: "Ligar com и",
+    level: "A2",
+    target: "ги иг",
+    word: "город",
+    translation: "cidade",
+    sound: "g",
+    prompt: "Ligar com и: pratique Г г em letra cursiva. Pratique a ligação de entrada e saída com и.",
+    objective: "Manter o fluxo da cursiva.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 122,
+    letterPosition: 4,
+    upper: "Г",
+    letter: "г",
+    mode: "cursive",
+    stageNumber: 10,
+    stageCode: "ligacao_m",
+    stageTitle: "Ligar com м",
+    level: "A2",
+    target: "гм мг",
+    word: "город",
+    translation: "cidade",
+    sound: "g",
+    prompt: "Ligar com м: pratique Г г em letra cursiva. Pratique a ligação de entrada e saída com м.",
+    objective: "Diferenciar arcos e hastes semelhantes.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 123,
+    letterPosition: 4,
+    upper: "Г",
+    letter: "г",
+    mode: "cursive",
+    stageNumber: 11,
+    stageCode: "silaba",
+    stageTitle: "Copiar sílabas",
+    level: "A2",
+    target: "га го гу ги",
+    word: "город",
+    translation: "cidade",
+    sound: "g",
+    prompt: "Copiar sílabas: pratique Г г em letra cursiva. Copie sílabas curtas e leia em voz alta.",
+    objective: "Unir escrita, leitura e som.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 124,
+    letterPosition: 4,
+    upper: "Г",
+    letter: "г",
+    mode: "cursive",
+    stageNumber: 12,
+    stageCode: "palavra",
+    stageTitle: "Copiar palavra",
+    level: "B1",
+    target: "город",
+    word: "город",
+    translation: "cidade",
+    sound: "g",
+    prompt: "Copiar palavra: pratique Г г em letra cursiva. Copie a palavra-modelo e confira cada ligação.",
+    objective: "Aplicar a letra em vocabulário real.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 125,
+    letterPosition: 4,
+    upper: "Г",
+    letter: "г",
+    mode: "cursive",
+    stageNumber: 13,
+    stageCode: "frase",
+    stageTitle: "Copiar frase",
+    level: "B1",
+    target: "Я пишу слово «город».",
+    word: "город",
+    translation: "cidade",
+    sound: "g",
+    prompt: "Copiar frase: pratique Г г em letra cursiva. Copie uma frase curta sem interromper o ritmo.",
+    objective: "Aplicar a letra em contexto.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 126,
+    letterPosition: 4,
+    upper: "Г",
+    letter: "г",
+    mode: "cursive",
+    stageNumber: 14,
+    stageCode: "ditado",
+    stageTitle: "Escrever por ditado",
+    level: "B1",
+    target: "город",
+    word: "город",
+    translation: "cidade",
+    sound: "g",
+    prompt: "Escrever por ditado: pratique Г г em letra cursiva. Ouça o modelo e escreva sem olhar; depois compare.",
+    objective: "Recuperar a grafia pela memória.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 127,
+    letterPosition: 4,
+    upper: "Г",
+    letter: "г",
+    mode: "cursive",
+    stageNumber: 15,
+    stageCode: "fluencia",
+    stageTitle: "Treino de fluência",
+    level: "B2",
+    target: "город",
+    word: "город",
+    translation: "cidade",
+    sound: "g",
+    prompt: "Treino de fluência: pratique Г г em letra cursiva. Escreva com tempo controlado sem sacrificar clareza.",
+    objective: "Ganhar velocidade com legibilidade.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 128,
+    letterPosition: 4,
+    upper: "Г",
+    letter: "г",
+    mode: "cursive",
+    stageNumber: 16,
+    stageCode: "producao",
+    stageTitle: "Produção livre",
+    level: "C1",
+    target: "Я пишу слово «город».",
+    word: "город",
+    translation: "cidade",
+    sound: "g",
+    prompt: "Produção livre: pratique Г г em letra cursiva. Crie uma frase curta usando a palavra-modelo.",
+    objective: "Usar a escrita de maneira independente.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 129,
+    letterPosition: 5,
+    upper: "Д",
+    letter: "д",
+    mode: "print",
+    stageNumber: 1,
+    stageCode: "observacao",
+    stageTitle: "Observar proporções",
+    level: "A1",
+    target: "ддддд",
+    word: "дом",
+    translation: "casa",
+    sound: "d",
+    prompt: "Observar proporções: pratique Д д em letra de forma. Compare altura, largura, inclinação e posição na linha.",
+    objective: "Reconhecer a forma antes de escrever.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 130,
+    letterPosition: 5,
+    upper: "Д",
+    letter: "д",
+    mode: "print",
+    stageNumber: 2,
+    stageCode: "movimento_ar",
+    stageTitle: "Desenhar no ar",
+    level: "A1",
+    target: "ддддд",
+    word: "дом",
+    translation: "casa",
+    sound: "d",
+    prompt: "Desenhar no ar: pratique Д д em letra de forma. Faça o movimento amplo com o braço antes de usar o lápis.",
+    objective: "Memorizar a direção geral do traço.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 131,
+    letterPosition: 5,
+    upper: "Д",
+    letter: "д",
+    mode: "print",
+    stageNumber: 3,
+    stageCode: "maiuscula_guiada",
+    stageTitle: "Traçar maiúscula",
+    level: "A1",
+    target: "ДДДДД",
+    word: "дом",
+    translation: "casa",
+    sound: "d",
+    prompt: "Traçar maiúscula: pratique Д д em letra de forma. Passe sobre o modelo maiúsculo sem acelerar.",
+    objective: "Controlar início, direção e encerramento.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 132,
+    letterPosition: 5,
+    upper: "Д",
+    letter: "д",
+    mode: "print",
+    stageNumber: 4,
+    stageCode: "minuscula_guiada",
+    stageTitle: "Traçar minúscula",
+    level: "A1",
+    target: "ддддд",
+    word: "дом",
+    translation: "casa",
+    sound: "d",
+    prompt: "Traçar minúscula: pratique Д д em letra de forma. Passe sobre o modelo minúsculo mantendo a altura.",
+    objective: "Dominar a forma usada dentro das palavras.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 133,
+    letterPosition: 5,
+    upper: "Д",
+    letter: "д",
+    mode: "print",
+    stageNumber: 5,
+    stageCode: "copia_isolada",
+    stageTitle: "Copiar isoladamente",
+    level: "A1",
+    target: "ддддд",
+    word: "дом",
+    translation: "casa",
+    sound: "d",
+    prompt: "Copiar isoladamente: pratique Д д em letra de forma. Copie a letra cinco vezes ao lado do modelo.",
+    objective: "Manter tamanho e espaçamento consistentes.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 134,
+    letterPosition: 5,
+    upper: "Д",
+    letter: "д",
+    mode: "print",
+    stageNumber: 6,
+    stageCode: "ritmo",
+    stageTitle: "Criar ritmo",
+    level: "A2",
+    target: "дддд дддд дддд",
+    word: "дом",
+    translation: "casa",
+    sound: "d",
+    prompt: "Criar ritmo: pratique Д д em letra de forma. Escreva uma linha contínua com intervalos regulares.",
+    objective: "Automatizar o movimento sem perder legibilidade.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 135,
+    letterPosition: 5,
+    upper: "Д",
+    letter: "д",
+    mode: "print",
+    stageNumber: 7,
+    stageCode: "ligacao_a",
+    stageTitle: "Ligar com а",
+    level: "A2",
+    target: "да ад",
+    word: "дом",
+    translation: "casa",
+    sound: "d",
+    prompt: "Ligar com а: pratique Д д em letra de forma. Pratique a ligação de entrada e saída com а.",
+    objective: "Aprender uma conexão frequente.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 136,
+    letterPosition: 5,
+    upper: "Д",
+    letter: "д",
+    mode: "print",
+    stageNumber: 8,
+    stageCode: "ligacao_o",
+    stageTitle: "Ligar com о",
+    level: "A2",
+    target: "до од",
+    word: "дом",
+    translation: "casa",
+    sound: "d",
+    prompt: "Ligar com о: pratique Д д em letra de forma. Pratique a ligação de entrada e saída com о.",
+    objective: "Evitar que as letras se encostem demais.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 137,
+    letterPosition: 5,
+    upper: "Д",
+    letter: "д",
+    mode: "print",
+    stageNumber: 9,
+    stageCode: "ligacao_i",
+    stageTitle: "Ligar com и",
+    level: "A2",
+    target: "ди ид",
+    word: "дом",
+    translation: "casa",
+    sound: "d",
+    prompt: "Ligar com и: pratique Д д em letra de forma. Pratique a ligação de entrada e saída com и.",
+    objective: "Manter o fluxo da cursiva.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 138,
+    letterPosition: 5,
+    upper: "Д",
+    letter: "д",
+    mode: "print",
+    stageNumber: 10,
+    stageCode: "ligacao_m",
+    stageTitle: "Ligar com м",
+    level: "A2",
+    target: "дм мд",
+    word: "дом",
+    translation: "casa",
+    sound: "d",
+    prompt: "Ligar com м: pratique Д д em letra de forma. Pratique a ligação de entrada e saída com м.",
+    objective: "Diferenciar arcos e hastes semelhantes.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 139,
+    letterPosition: 5,
+    upper: "Д",
+    letter: "д",
+    mode: "print",
+    stageNumber: 11,
+    stageCode: "silaba",
+    stageTitle: "Copiar sílabas",
+    level: "A2",
+    target: "да до ду ди",
+    word: "дом",
+    translation: "casa",
+    sound: "d",
+    prompt: "Copiar sílabas: pratique Д д em letra de forma. Copie sílabas curtas e leia em voz alta.",
+    objective: "Unir escrita, leitura e som.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 140,
+    letterPosition: 5,
+    upper: "Д",
+    letter: "д",
+    mode: "print",
+    stageNumber: 12,
+    stageCode: "palavra",
+    stageTitle: "Copiar palavra",
+    level: "B1",
+    target: "дом",
+    word: "дом",
+    translation: "casa",
+    sound: "d",
+    prompt: "Copiar palavra: pratique Д д em letra de forma. Copie a palavra-modelo e confira cada ligação.",
+    objective: "Aplicar a letra em vocabulário real.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 141,
+    letterPosition: 5,
+    upper: "Д",
+    letter: "д",
+    mode: "print",
+    stageNumber: 13,
+    stageCode: "frase",
+    stageTitle: "Copiar frase",
+    level: "B1",
+    target: "Я пишу слово «дом».",
+    word: "дом",
+    translation: "casa",
+    sound: "d",
+    prompt: "Copiar frase: pratique Д д em letra de forma. Copie uma frase curta sem interromper o ritmo.",
+    objective: "Aplicar a letra em contexto.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 142,
+    letterPosition: 5,
+    upper: "Д",
+    letter: "д",
+    mode: "print",
+    stageNumber: 14,
+    stageCode: "ditado",
+    stageTitle: "Escrever por ditado",
+    level: "B1",
+    target: "дом",
+    word: "дом",
+    translation: "casa",
+    sound: "d",
+    prompt: "Escrever por ditado: pratique Д д em letra de forma. Ouça o modelo e escreva sem olhar; depois compare.",
+    objective: "Recuperar a grafia pela memória.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 143,
+    letterPosition: 5,
+    upper: "Д",
+    letter: "д",
+    mode: "print",
+    stageNumber: 15,
+    stageCode: "fluencia",
+    stageTitle: "Treino de fluência",
+    level: "B2",
+    target: "дом",
+    word: "дом",
+    translation: "casa",
+    sound: "d",
+    prompt: "Treino de fluência: pratique Д д em letra de forma. Escreva com tempo controlado sem sacrificar clareza.",
+    objective: "Ganhar velocidade com legibilidade.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 144,
+    letterPosition: 5,
+    upper: "Д",
+    letter: "д",
+    mode: "print",
+    stageNumber: 16,
+    stageCode: "producao",
+    stageTitle: "Produção livre",
+    level: "C1",
+    target: "Я пишу слово «дом».",
+    word: "дом",
+    translation: "casa",
+    sound: "d",
+    prompt: "Produção livre: pratique Д д em letra de forma. Crie uma frase curta usando a palavra-modelo.",
+    objective: "Usar a escrita de maneira independente.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 145,
+    letterPosition: 5,
+    upper: "Д",
+    letter: "д",
+    mode: "cursive",
+    stageNumber: 1,
+    stageCode: "observacao",
+    stageTitle: "Observar proporções",
+    level: "A1",
+    target: "ддддд",
+    word: "дом",
+    translation: "casa",
+    sound: "d",
+    prompt: "Observar proporções: pratique Д д em letra cursiva. Compare altura, largura, inclinação e posição na linha.",
+    objective: "Reconhecer a forma antes de escrever.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 146,
+    letterPosition: 5,
+    upper: "Д",
+    letter: "д",
+    mode: "cursive",
+    stageNumber: 2,
+    stageCode: "movimento_ar",
+    stageTitle: "Desenhar no ar",
+    level: "A1",
+    target: "ддддд",
+    word: "дом",
+    translation: "casa",
+    sound: "d",
+    prompt: "Desenhar no ar: pratique Д д em letra cursiva. Faça o movimento amplo com o braço antes de usar o lápis.",
+    objective: "Memorizar a direção geral do traço.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 147,
+    letterPosition: 5,
+    upper: "Д",
+    letter: "д",
+    mode: "cursive",
+    stageNumber: 3,
+    stageCode: "maiuscula_guiada",
+    stageTitle: "Traçar maiúscula",
+    level: "A1",
+    target: "ДДДДД",
+    word: "дом",
+    translation: "casa",
+    sound: "d",
+    prompt: "Traçar maiúscula: pratique Д д em letra cursiva. Passe sobre o modelo maiúsculo sem acelerar.",
+    objective: "Controlar início, direção e encerramento.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 148,
+    letterPosition: 5,
+    upper: "Д",
+    letter: "д",
+    mode: "cursive",
+    stageNumber: 4,
+    stageCode: "minuscula_guiada",
+    stageTitle: "Traçar minúscula",
+    level: "A1",
+    target: "ддддд",
+    word: "дом",
+    translation: "casa",
+    sound: "d",
+    prompt: "Traçar minúscula: pratique Д д em letra cursiva. Passe sobre o modelo minúsculo mantendo a altura.",
+    objective: "Dominar a forma usada dentro das palavras.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 149,
+    letterPosition: 5,
+    upper: "Д",
+    letter: "д",
+    mode: "cursive",
+    stageNumber: 5,
+    stageCode: "copia_isolada",
+    stageTitle: "Copiar isoladamente",
+    level: "A1",
+    target: "ддддд",
+    word: "дом",
+    translation: "casa",
+    sound: "d",
+    prompt: "Copiar isoladamente: pratique Д д em letra cursiva. Copie a letra cinco vezes ao lado do modelo.",
+    objective: "Manter tamanho e espaçamento consistentes.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 150,
+    letterPosition: 5,
+    upper: "Д",
+    letter: "д",
+    mode: "cursive",
+    stageNumber: 6,
+    stageCode: "ritmo",
+    stageTitle: "Criar ritmo",
+    level: "A2",
+    target: "дддд дддд дддд",
+    word: "дом",
+    translation: "casa",
+    sound: "d",
+    prompt: "Criar ritmo: pratique Д д em letra cursiva. Escreva uma linha contínua com intervalos regulares.",
+    objective: "Automatizar o movimento sem perder legibilidade.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 151,
+    letterPosition: 5,
+    upper: "Д",
+    letter: "д",
+    mode: "cursive",
+    stageNumber: 7,
+    stageCode: "ligacao_a",
+    stageTitle: "Ligar com а",
+    level: "A2",
+    target: "да ад",
+    word: "дом",
+    translation: "casa",
+    sound: "d",
+    prompt: "Ligar com а: pratique Д д em letra cursiva. Pratique a ligação de entrada e saída com а.",
+    objective: "Aprender uma conexão frequente.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 152,
+    letterPosition: 5,
+    upper: "Д",
+    letter: "д",
+    mode: "cursive",
+    stageNumber: 8,
+    stageCode: "ligacao_o",
+    stageTitle: "Ligar com о",
+    level: "A2",
+    target: "до од",
+    word: "дом",
+    translation: "casa",
+    sound: "d",
+    prompt: "Ligar com о: pratique Д д em letra cursiva. Pratique a ligação de entrada e saída com о.",
+    objective: "Evitar que as letras se encostem demais.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 153,
+    letterPosition: 5,
+    upper: "Д",
+    letter: "д",
+    mode: "cursive",
+    stageNumber: 9,
+    stageCode: "ligacao_i",
+    stageTitle: "Ligar com и",
+    level: "A2",
+    target: "ди ид",
+    word: "дом",
+    translation: "casa",
+    sound: "d",
+    prompt: "Ligar com и: pratique Д д em letra cursiva. Pratique a ligação de entrada e saída com и.",
+    objective: "Manter o fluxo da cursiva.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 154,
+    letterPosition: 5,
+    upper: "Д",
+    letter: "д",
+    mode: "cursive",
+    stageNumber: 10,
+    stageCode: "ligacao_m",
+    stageTitle: "Ligar com м",
+    level: "A2",
+    target: "дм мд",
+    word: "дом",
+    translation: "casa",
+    sound: "d",
+    prompt: "Ligar com м: pratique Д д em letra cursiva. Pratique a ligação de entrada e saída com м.",
+    objective: "Diferenciar arcos e hastes semelhantes.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 155,
+    letterPosition: 5,
+    upper: "Д",
+    letter: "д",
+    mode: "cursive",
+    stageNumber: 11,
+    stageCode: "silaba",
+    stageTitle: "Copiar sílabas",
+    level: "A2",
+    target: "да до ду ди",
+    word: "дом",
+    translation: "casa",
+    sound: "d",
+    prompt: "Copiar sílabas: pratique Д д em letra cursiva. Copie sílabas curtas e leia em voz alta.",
+    objective: "Unir escrita, leitura e som.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 156,
+    letterPosition: 5,
+    upper: "Д",
+    letter: "д",
+    mode: "cursive",
+    stageNumber: 12,
+    stageCode: "palavra",
+    stageTitle: "Copiar palavra",
+    level: "B1",
+    target: "дом",
+    word: "дом",
+    translation: "casa",
+    sound: "d",
+    prompt: "Copiar palavra: pratique Д д em letra cursiva. Copie a palavra-modelo e confira cada ligação.",
+    objective: "Aplicar a letra em vocabulário real.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 157,
+    letterPosition: 5,
+    upper: "Д",
+    letter: "д",
+    mode: "cursive",
+    stageNumber: 13,
+    stageCode: "frase",
+    stageTitle: "Copiar frase",
+    level: "B1",
+    target: "Я пишу слово «дом».",
+    word: "дом",
+    translation: "casa",
+    sound: "d",
+    prompt: "Copiar frase: pratique Д д em letra cursiva. Copie uma frase curta sem interromper o ritmo.",
+    objective: "Aplicar a letra em contexto.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 158,
+    letterPosition: 5,
+    upper: "Д",
+    letter: "д",
+    mode: "cursive",
+    stageNumber: 14,
+    stageCode: "ditado",
+    stageTitle: "Escrever por ditado",
+    level: "B1",
+    target: "дом",
+    word: "дом",
+    translation: "casa",
+    sound: "d",
+    prompt: "Escrever por ditado: pratique Д д em letra cursiva. Ouça o modelo e escreva sem olhar; depois compare.",
+    objective: "Recuperar a grafia pela memória.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 159,
+    letterPosition: 5,
+    upper: "Д",
+    letter: "д",
+    mode: "cursive",
+    stageNumber: 15,
+    stageCode: "fluencia",
+    stageTitle: "Treino de fluência",
+    level: "B2",
+    target: "дом",
+    word: "дом",
+    translation: "casa",
+    sound: "d",
+    prompt: "Treino de fluência: pratique Д д em letra cursiva. Escreva com tempo controlado sem sacrificar clareza.",
+    objective: "Ganhar velocidade com legibilidade.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 160,
+    letterPosition: 5,
+    upper: "Д",
+    letter: "д",
+    mode: "cursive",
+    stageNumber: 16,
+    stageCode: "producao",
+    stageTitle: "Produção livre",
+    level: "C1",
+    target: "Я пишу слово «дом».",
+    word: "дом",
+    translation: "casa",
+    sound: "d",
+    prompt: "Produção livre: pratique Д д em letra cursiva. Crie uma frase curta usando a palavra-modelo.",
+    objective: "Usar a escrita de maneira independente.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 161,
+    letterPosition: 6,
+    upper: "Е",
+    letter: "е",
+    mode: "print",
+    stageNumber: 1,
+    stageCode: "observacao",
+    stageTitle: "Observar proporções",
+    level: "A1",
+    target: "еееее",
+    word: "еда",
+    translation: "comida",
+    sound: "iê",
+    prompt: "Observar proporções: pratique Е е em letra de forma. Compare altura, largura, inclinação e posição na linha.",
+    objective: "Reconhecer a forma antes de escrever.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 162,
+    letterPosition: 6,
+    upper: "Е",
+    letter: "е",
+    mode: "print",
+    stageNumber: 2,
+    stageCode: "movimento_ar",
+    stageTitle: "Desenhar no ar",
+    level: "A1",
+    target: "еееее",
+    word: "еда",
+    translation: "comida",
+    sound: "iê",
+    prompt: "Desenhar no ar: pratique Е е em letra de forma. Faça o movimento amplo com o braço antes de usar o lápis.",
+    objective: "Memorizar a direção geral do traço.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 163,
+    letterPosition: 6,
+    upper: "Е",
+    letter: "е",
+    mode: "print",
+    stageNumber: 3,
+    stageCode: "maiuscula_guiada",
+    stageTitle: "Traçar maiúscula",
+    level: "A1",
+    target: "ЕЕЕЕЕ",
+    word: "еда",
+    translation: "comida",
+    sound: "iê",
+    prompt: "Traçar maiúscula: pratique Е е em letra de forma. Passe sobre o modelo maiúsculo sem acelerar.",
+    objective: "Controlar início, direção e encerramento.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 164,
+    letterPosition: 6,
+    upper: "Е",
+    letter: "е",
+    mode: "print",
+    stageNumber: 4,
+    stageCode: "minuscula_guiada",
+    stageTitle: "Traçar minúscula",
+    level: "A1",
+    target: "еееее",
+    word: "еда",
+    translation: "comida",
+    sound: "iê",
+    prompt: "Traçar minúscula: pratique Е е em letra de forma. Passe sobre o modelo minúsculo mantendo a altura.",
+    objective: "Dominar a forma usada dentro das palavras.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 165,
+    letterPosition: 6,
+    upper: "Е",
+    letter: "е",
+    mode: "print",
+    stageNumber: 5,
+    stageCode: "copia_isolada",
+    stageTitle: "Copiar isoladamente",
+    level: "A1",
+    target: "еееее",
+    word: "еда",
+    translation: "comida",
+    sound: "iê",
+    prompt: "Copiar isoladamente: pratique Е е em letra de forma. Copie a letra cinco vezes ao lado do modelo.",
+    objective: "Manter tamanho e espaçamento consistentes.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 166,
+    letterPosition: 6,
+    upper: "Е",
+    letter: "е",
+    mode: "print",
+    stageNumber: 6,
+    stageCode: "ritmo",
+    stageTitle: "Criar ritmo",
+    level: "A2",
+    target: "ееее ееее ееее",
+    word: "еда",
+    translation: "comida",
+    sound: "iê",
+    prompt: "Criar ritmo: pratique Е е em letra de forma. Escreva uma linha contínua com intervalos regulares.",
+    objective: "Automatizar o movimento sem perder legibilidade.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 167,
+    letterPosition: 6,
+    upper: "Е",
+    letter: "е",
+    mode: "print",
+    stageNumber: 7,
+    stageCode: "ligacao_a",
+    stageTitle: "Ligar com а",
+    level: "A2",
+    target: "еа ае",
+    word: "еда",
+    translation: "comida",
+    sound: "iê",
+    prompt: "Ligar com а: pratique Е е em letra de forma. Pratique a ligação de entrada e saída com а.",
+    objective: "Aprender uma conexão frequente.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 168,
+    letterPosition: 6,
+    upper: "Е",
+    letter: "е",
+    mode: "print",
+    stageNumber: 8,
+    stageCode: "ligacao_o",
+    stageTitle: "Ligar com о",
+    level: "A2",
+    target: "ео ое",
+    word: "еда",
+    translation: "comida",
+    sound: "iê",
+    prompt: "Ligar com о: pratique Е е em letra de forma. Pratique a ligação de entrada e saída com о.",
+    objective: "Evitar que as letras se encostem demais.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 169,
+    letterPosition: 6,
+    upper: "Е",
+    letter: "е",
+    mode: "print",
+    stageNumber: 9,
+    stageCode: "ligacao_i",
+    stageTitle: "Ligar com и",
+    level: "A2",
+    target: "еи ие",
+    word: "еда",
+    translation: "comida",
+    sound: "iê",
+    prompt: "Ligar com и: pratique Е е em letra de forma. Pratique a ligação de entrada e saída com и.",
+    objective: "Manter o fluxo da cursiva.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 170,
+    letterPosition: 6,
+    upper: "Е",
+    letter: "е",
+    mode: "print",
+    stageNumber: 10,
+    stageCode: "ligacao_m",
+    stageTitle: "Ligar com м",
+    level: "A2",
+    target: "ем ме",
+    word: "еда",
+    translation: "comida",
+    sound: "iê",
+    prompt: "Ligar com м: pratique Е е em letra de forma. Pratique a ligação de entrada e saída com м.",
+    objective: "Diferenciar arcos e hastes semelhantes.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 171,
+    letterPosition: 6,
+    upper: "Е",
+    letter: "е",
+    mode: "print",
+    stageNumber: 11,
+    stageCode: "silaba",
+    stageTitle: "Copiar sílabas",
+    level: "A2",
+    target: "еа ео еу еи",
+    word: "еда",
+    translation: "comida",
+    sound: "iê",
+    prompt: "Copiar sílabas: pratique Е е em letra de forma. Copie sílabas curtas e leia em voz alta.",
+    objective: "Unir escrita, leitura e som.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 172,
+    letterPosition: 6,
+    upper: "Е",
+    letter: "е",
+    mode: "print",
+    stageNumber: 12,
+    stageCode: "palavra",
+    stageTitle: "Copiar palavra",
+    level: "B1",
+    target: "еда",
+    word: "еда",
+    translation: "comida",
+    sound: "iê",
+    prompt: "Copiar palavra: pratique Е е em letra de forma. Copie a palavra-modelo e confira cada ligação.",
+    objective: "Aplicar a letra em vocabulário real.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 173,
+    letterPosition: 6,
+    upper: "Е",
+    letter: "е",
+    mode: "print",
+    stageNumber: 13,
+    stageCode: "frase",
+    stageTitle: "Copiar frase",
+    level: "B1",
+    target: "Я пишу слово «еда».",
+    word: "еда",
+    translation: "comida",
+    sound: "iê",
+    prompt: "Copiar frase: pratique Е е em letra de forma. Copie uma frase curta sem interromper o ritmo.",
+    objective: "Aplicar a letra em contexto.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 174,
+    letterPosition: 6,
+    upper: "Е",
+    letter: "е",
+    mode: "print",
+    stageNumber: 14,
+    stageCode: "ditado",
+    stageTitle: "Escrever por ditado",
+    level: "B1",
+    target: "еда",
+    word: "еда",
+    translation: "comida",
+    sound: "iê",
+    prompt: "Escrever por ditado: pratique Е е em letra de forma. Ouça o modelo e escreva sem olhar; depois compare.",
+    objective: "Recuperar a grafia pela memória.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 175,
+    letterPosition: 6,
+    upper: "Е",
+    letter: "е",
+    mode: "print",
+    stageNumber: 15,
+    stageCode: "fluencia",
+    stageTitle: "Treino de fluência",
+    level: "B2",
+    target: "еда",
+    word: "еда",
+    translation: "comida",
+    sound: "iê",
+    prompt: "Treino de fluência: pratique Е е em letra de forma. Escreva com tempo controlado sem sacrificar clareza.",
+    objective: "Ganhar velocidade com legibilidade.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 176,
+    letterPosition: 6,
+    upper: "Е",
+    letter: "е",
+    mode: "print",
+    stageNumber: 16,
+    stageCode: "producao",
+    stageTitle: "Produção livre",
+    level: "C1",
+    target: "Я пишу слово «еда».",
+    word: "еда",
+    translation: "comida",
+    sound: "iê",
+    prompt: "Produção livre: pratique Е е em letra de forma. Crie uma frase curta usando a palavra-modelo.",
+    objective: "Usar a escrita de maneira independente.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 177,
+    letterPosition: 6,
+    upper: "Е",
+    letter: "е",
+    mode: "cursive",
+    stageNumber: 1,
+    stageCode: "observacao",
+    stageTitle: "Observar proporções",
+    level: "A1",
+    target: "еееее",
+    word: "еда",
+    translation: "comida",
+    sound: "iê",
+    prompt: "Observar proporções: pratique Е е em letra cursiva. Compare altura, largura, inclinação e posição na linha.",
+    objective: "Reconhecer a forma antes de escrever.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 178,
+    letterPosition: 6,
+    upper: "Е",
+    letter: "е",
+    mode: "cursive",
+    stageNumber: 2,
+    stageCode: "movimento_ar",
+    stageTitle: "Desenhar no ar",
+    level: "A1",
+    target: "еееее",
+    word: "еда",
+    translation: "comida",
+    sound: "iê",
+    prompt: "Desenhar no ar: pratique Е е em letra cursiva. Faça o movimento amplo com o braço antes de usar o lápis.",
+    objective: "Memorizar a direção geral do traço.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 179,
+    letterPosition: 6,
+    upper: "Е",
+    letter: "е",
+    mode: "cursive",
+    stageNumber: 3,
+    stageCode: "maiuscula_guiada",
+    stageTitle: "Traçar maiúscula",
+    level: "A1",
+    target: "ЕЕЕЕЕ",
+    word: "еда",
+    translation: "comida",
+    sound: "iê",
+    prompt: "Traçar maiúscula: pratique Е е em letra cursiva. Passe sobre o modelo maiúsculo sem acelerar.",
+    objective: "Controlar início, direção e encerramento.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 180,
+    letterPosition: 6,
+    upper: "Е",
+    letter: "е",
+    mode: "cursive",
+    stageNumber: 4,
+    stageCode: "minuscula_guiada",
+    stageTitle: "Traçar minúscula",
+    level: "A1",
+    target: "еееее",
+    word: "еда",
+    translation: "comida",
+    sound: "iê",
+    prompt: "Traçar minúscula: pratique Е е em letra cursiva. Passe sobre o modelo minúsculo mantendo a altura.",
+    objective: "Dominar a forma usada dentro das palavras.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 181,
+    letterPosition: 6,
+    upper: "Е",
+    letter: "е",
+    mode: "cursive",
+    stageNumber: 5,
+    stageCode: "copia_isolada",
+    stageTitle: "Copiar isoladamente",
+    level: "A1",
+    target: "еееее",
+    word: "еда",
+    translation: "comida",
+    sound: "iê",
+    prompt: "Copiar isoladamente: pratique Е е em letra cursiva. Copie a letra cinco vezes ao lado do modelo.",
+    objective: "Manter tamanho e espaçamento consistentes.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 182,
+    letterPosition: 6,
+    upper: "Е",
+    letter: "е",
+    mode: "cursive",
+    stageNumber: 6,
+    stageCode: "ritmo",
+    stageTitle: "Criar ritmo",
+    level: "A2",
+    target: "ееее ееее ееее",
+    word: "еда",
+    translation: "comida",
+    sound: "iê",
+    prompt: "Criar ritmo: pratique Е е em letra cursiva. Escreva uma linha contínua com intervalos regulares.",
+    objective: "Automatizar o movimento sem perder legibilidade.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 183,
+    letterPosition: 6,
+    upper: "Е",
+    letter: "е",
+    mode: "cursive",
+    stageNumber: 7,
+    stageCode: "ligacao_a",
+    stageTitle: "Ligar com а",
+    level: "A2",
+    target: "еа ае",
+    word: "еда",
+    translation: "comida",
+    sound: "iê",
+    prompt: "Ligar com а: pratique Е е em letra cursiva. Pratique a ligação de entrada e saída com а.",
+    objective: "Aprender uma conexão frequente.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 184,
+    letterPosition: 6,
+    upper: "Е",
+    letter: "е",
+    mode: "cursive",
+    stageNumber: 8,
+    stageCode: "ligacao_o",
+    stageTitle: "Ligar com о",
+    level: "A2",
+    target: "ео ое",
+    word: "еда",
+    translation: "comida",
+    sound: "iê",
+    prompt: "Ligar com о: pratique Е е em letra cursiva. Pratique a ligação de entrada e saída com о.",
+    objective: "Evitar que as letras se encostem demais.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 185,
+    letterPosition: 6,
+    upper: "Е",
+    letter: "е",
+    mode: "cursive",
+    stageNumber: 9,
+    stageCode: "ligacao_i",
+    stageTitle: "Ligar com и",
+    level: "A2",
+    target: "еи ие",
+    word: "еда",
+    translation: "comida",
+    sound: "iê",
+    prompt: "Ligar com и: pratique Е е em letra cursiva. Pratique a ligação de entrada e saída com и.",
+    objective: "Manter o fluxo da cursiva.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 186,
+    letterPosition: 6,
+    upper: "Е",
+    letter: "е",
+    mode: "cursive",
+    stageNumber: 10,
+    stageCode: "ligacao_m",
+    stageTitle: "Ligar com м",
+    level: "A2",
+    target: "ем ме",
+    word: "еда",
+    translation: "comida",
+    sound: "iê",
+    prompt: "Ligar com м: pratique Е е em letra cursiva. Pratique a ligação de entrada e saída com м.",
+    objective: "Diferenciar arcos e hastes semelhantes.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 187,
+    letterPosition: 6,
+    upper: "Е",
+    letter: "е",
+    mode: "cursive",
+    stageNumber: 11,
+    stageCode: "silaba",
+    stageTitle: "Copiar sílabas",
+    level: "A2",
+    target: "еа ео еу еи",
+    word: "еда",
+    translation: "comida",
+    sound: "iê",
+    prompt: "Copiar sílabas: pratique Е е em letra cursiva. Copie sílabas curtas e leia em voz alta.",
+    objective: "Unir escrita, leitura e som.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 188,
+    letterPosition: 6,
+    upper: "Е",
+    letter: "е",
+    mode: "cursive",
+    stageNumber: 12,
+    stageCode: "palavra",
+    stageTitle: "Copiar palavra",
+    level: "B1",
+    target: "еда",
+    word: "еда",
+    translation: "comida",
+    sound: "iê",
+    prompt: "Copiar palavra: pratique Е е em letra cursiva. Copie a palavra-modelo e confira cada ligação.",
+    objective: "Aplicar a letra em vocabulário real.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 189,
+    letterPosition: 6,
+    upper: "Е",
+    letter: "е",
+    mode: "cursive",
+    stageNumber: 13,
+    stageCode: "frase",
+    stageTitle: "Copiar frase",
+    level: "B1",
+    target: "Я пишу слово «еда».",
+    word: "еда",
+    translation: "comida",
+    sound: "iê",
+    prompt: "Copiar frase: pratique Е е em letra cursiva. Copie uma frase curta sem interromper o ritmo.",
+    objective: "Aplicar a letra em contexto.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 190,
+    letterPosition: 6,
+    upper: "Е",
+    letter: "е",
+    mode: "cursive",
+    stageNumber: 14,
+    stageCode: "ditado",
+    stageTitle: "Escrever por ditado",
+    level: "B1",
+    target: "еда",
+    word: "еда",
+    translation: "comida",
+    sound: "iê",
+    prompt: "Escrever por ditado: pratique Е е em letra cursiva. Ouça o modelo e escreva sem olhar; depois compare.",
+    objective: "Recuperar a grafia pela memória.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 191,
+    letterPosition: 6,
+    upper: "Е",
+    letter: "е",
+    mode: "cursive",
+    stageNumber: 15,
+    stageCode: "fluencia",
+    stageTitle: "Treino de fluência",
+    level: "B2",
+    target: "еда",
+    word: "еда",
+    translation: "comida",
+    sound: "iê",
+    prompt: "Treino de fluência: pratique Е е em letra cursiva. Escreva com tempo controlado sem sacrificar clareza.",
+    objective: "Ganhar velocidade com legibilidade.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 192,
+    letterPosition: 6,
+    upper: "Е",
+    letter: "е",
+    mode: "cursive",
+    stageNumber: 16,
+    stageCode: "producao",
+    stageTitle: "Produção livre",
+    level: "C1",
+    target: "Я пишу слово «еда».",
+    word: "еда",
+    translation: "comida",
+    sound: "iê",
+    prompt: "Produção livre: pratique Е е em letra cursiva. Crie uma frase curta usando a palavra-modelo.",
+    objective: "Usar a escrita de maneira independente.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 193,
+    letterPosition: 7,
+    upper: "Ё",
+    letter: "ё",
+    mode: "print",
+    stageNumber: 1,
+    stageCode: "observacao",
+    stageTitle: "Observar proporções",
+    level: "A1",
+    target: "ёёёёё",
+    word: "ёлка",
+    translation: "árvore de Natal",
+    sound: "iô",
+    prompt: "Observar proporções: pratique Ё ё em letra de forma. Compare altura, largura, inclinação e posição na linha.",
+    objective: "Reconhecer a forma antes de escrever.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 194,
+    letterPosition: 7,
+    upper: "Ё",
+    letter: "ё",
+    mode: "print",
+    stageNumber: 2,
+    stageCode: "movimento_ar",
+    stageTitle: "Desenhar no ar",
+    level: "A1",
+    target: "ёёёёё",
+    word: "ёлка",
+    translation: "árvore de Natal",
+    sound: "iô",
+    prompt: "Desenhar no ar: pratique Ё ё em letra de forma. Faça o movimento amplo com o braço antes de usar o lápis.",
+    objective: "Memorizar a direção geral do traço.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 195,
+    letterPosition: 7,
+    upper: "Ё",
+    letter: "ё",
+    mode: "print",
+    stageNumber: 3,
+    stageCode: "maiuscula_guiada",
+    stageTitle: "Traçar maiúscula",
+    level: "A1",
+    target: "ЁЁЁЁЁ",
+    word: "ёлка",
+    translation: "árvore de Natal",
+    sound: "iô",
+    prompt: "Traçar maiúscula: pratique Ё ё em letra de forma. Passe sobre o modelo maiúsculo sem acelerar.",
+    objective: "Controlar início, direção e encerramento.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 196,
+    letterPosition: 7,
+    upper: "Ё",
+    letter: "ё",
+    mode: "print",
+    stageNumber: 4,
+    stageCode: "minuscula_guiada",
+    stageTitle: "Traçar minúscula",
+    level: "A1",
+    target: "ёёёёё",
+    word: "ёлка",
+    translation: "árvore de Natal",
+    sound: "iô",
+    prompt: "Traçar minúscula: pratique Ё ё em letra de forma. Passe sobre o modelo minúsculo mantendo a altura.",
+    objective: "Dominar a forma usada dentro das palavras.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 197,
+    letterPosition: 7,
+    upper: "Ё",
+    letter: "ё",
+    mode: "print",
+    stageNumber: 5,
+    stageCode: "copia_isolada",
+    stageTitle: "Copiar isoladamente",
+    level: "A1",
+    target: "ёёёёё",
+    word: "ёлка",
+    translation: "árvore de Natal",
+    sound: "iô",
+    prompt: "Copiar isoladamente: pratique Ё ё em letra de forma. Copie a letra cinco vezes ao lado do modelo.",
+    objective: "Manter tamanho e espaçamento consistentes.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 198,
+    letterPosition: 7,
+    upper: "Ё",
+    letter: "ё",
+    mode: "print",
+    stageNumber: 6,
+    stageCode: "ritmo",
+    stageTitle: "Criar ritmo",
+    level: "A2",
+    target: "ёёёё ёёёё ёёёё",
+    word: "ёлка",
+    translation: "árvore de Natal",
+    sound: "iô",
+    prompt: "Criar ritmo: pratique Ё ё em letra de forma. Escreva uma linha contínua com intervalos regulares.",
+    objective: "Automatizar o movimento sem perder legibilidade.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 199,
+    letterPosition: 7,
+    upper: "Ё",
+    letter: "ё",
+    mode: "print",
+    stageNumber: 7,
+    stageCode: "ligacao_a",
+    stageTitle: "Ligar com а",
+    level: "A2",
+    target: "ёа аё",
+    word: "ёлка",
+    translation: "árvore de Natal",
+    sound: "iô",
+    prompt: "Ligar com а: pratique Ё ё em letra de forma. Pratique a ligação de entrada e saída com а.",
+    objective: "Aprender uma conexão frequente.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 200,
+    letterPosition: 7,
+    upper: "Ё",
+    letter: "ё",
+    mode: "print",
+    stageNumber: 8,
+    stageCode: "ligacao_o",
+    stageTitle: "Ligar com о",
+    level: "A2",
+    target: "ёо оё",
+    word: "ёлка",
+    translation: "árvore de Natal",
+    sound: "iô",
+    prompt: "Ligar com о: pratique Ё ё em letra de forma. Pratique a ligação de entrada e saída com о.",
+    objective: "Evitar que as letras se encostem demais.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 201,
+    letterPosition: 7,
+    upper: "Ё",
+    letter: "ё",
+    mode: "print",
+    stageNumber: 9,
+    stageCode: "ligacao_i",
+    stageTitle: "Ligar com и",
+    level: "A2",
+    target: "ёи иё",
+    word: "ёлка",
+    translation: "árvore de Natal",
+    sound: "iô",
+    prompt: "Ligar com и: pratique Ё ё em letra de forma. Pratique a ligação de entrada e saída com и.",
+    objective: "Manter o fluxo da cursiva.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 202,
+    letterPosition: 7,
+    upper: "Ё",
+    letter: "ё",
+    mode: "print",
+    stageNumber: 10,
+    stageCode: "ligacao_m",
+    stageTitle: "Ligar com м",
+    level: "A2",
+    target: "ём мё",
+    word: "ёлка",
+    translation: "árvore de Natal",
+    sound: "iô",
+    prompt: "Ligar com м: pratique Ё ё em letra de forma. Pratique a ligação de entrada e saída com м.",
+    objective: "Diferenciar arcos e hastes semelhantes.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 203,
+    letterPosition: 7,
+    upper: "Ё",
+    letter: "ё",
+    mode: "print",
+    stageNumber: 11,
+    stageCode: "silaba",
+    stageTitle: "Copiar sílabas",
+    level: "A2",
+    target: "ёа ёо ёу ёи",
+    word: "ёлка",
+    translation: "árvore de Natal",
+    sound: "iô",
+    prompt: "Copiar sílabas: pratique Ё ё em letra de forma. Copie sílabas curtas e leia em voz alta.",
+    objective: "Unir escrita, leitura e som.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 204,
+    letterPosition: 7,
+    upper: "Ё",
+    letter: "ё",
+    mode: "print",
+    stageNumber: 12,
+    stageCode: "palavra",
+    stageTitle: "Copiar palavra",
+    level: "B1",
+    target: "ёлка",
+    word: "ёлка",
+    translation: "árvore de Natal",
+    sound: "iô",
+    prompt: "Copiar palavra: pratique Ё ё em letra de forma. Copie a palavra-modelo e confira cada ligação.",
+    objective: "Aplicar a letra em vocabulário real.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 205,
+    letterPosition: 7,
+    upper: "Ё",
+    letter: "ё",
+    mode: "print",
+    stageNumber: 13,
+    stageCode: "frase",
+    stageTitle: "Copiar frase",
+    level: "B1",
+    target: "Я пишу слово «ёлка».",
+    word: "ёлка",
+    translation: "árvore de Natal",
+    sound: "iô",
+    prompt: "Copiar frase: pratique Ё ё em letra de forma. Copie uma frase curta sem interromper o ritmo.",
+    objective: "Aplicar a letra em contexto.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 206,
+    letterPosition: 7,
+    upper: "Ё",
+    letter: "ё",
+    mode: "print",
+    stageNumber: 14,
+    stageCode: "ditado",
+    stageTitle: "Escrever por ditado",
+    level: "B1",
+    target: "ёлка",
+    word: "ёлка",
+    translation: "árvore de Natal",
+    sound: "iô",
+    prompt: "Escrever por ditado: pratique Ё ё em letra de forma. Ouça o modelo e escreva sem olhar; depois compare.",
+    objective: "Recuperar a grafia pela memória.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 207,
+    letterPosition: 7,
+    upper: "Ё",
+    letter: "ё",
+    mode: "print",
+    stageNumber: 15,
+    stageCode: "fluencia",
+    stageTitle: "Treino de fluência",
+    level: "B2",
+    target: "ёлка",
+    word: "ёлка",
+    translation: "árvore de Natal",
+    sound: "iô",
+    prompt: "Treino de fluência: pratique Ё ё em letra de forma. Escreva com tempo controlado sem sacrificar clareza.",
+    objective: "Ganhar velocidade com legibilidade.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 208,
+    letterPosition: 7,
+    upper: "Ё",
+    letter: "ё",
+    mode: "print",
+    stageNumber: 16,
+    stageCode: "producao",
+    stageTitle: "Produção livre",
+    level: "C1",
+    target: "Я пишу слово «ёлка».",
+    word: "ёлка",
+    translation: "árvore de Natal",
+    sound: "iô",
+    prompt: "Produção livre: pratique Ё ё em letra de forma. Crie uma frase curta usando a palavra-modelo.",
+    objective: "Usar a escrita de maneira independente.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 209,
+    letterPosition: 7,
+    upper: "Ё",
+    letter: "ё",
+    mode: "cursive",
+    stageNumber: 1,
+    stageCode: "observacao",
+    stageTitle: "Observar proporções",
+    level: "A1",
+    target: "ёёёёё",
+    word: "ёлка",
+    translation: "árvore de Natal",
+    sound: "iô",
+    prompt: "Observar proporções: pratique Ё ё em letra cursiva. Compare altura, largura, inclinação e posição na linha.",
+    objective: "Reconhecer a forma antes de escrever.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 210,
+    letterPosition: 7,
+    upper: "Ё",
+    letter: "ё",
+    mode: "cursive",
+    stageNumber: 2,
+    stageCode: "movimento_ar",
+    stageTitle: "Desenhar no ar",
+    level: "A1",
+    target: "ёёёёё",
+    word: "ёлка",
+    translation: "árvore de Natal",
+    sound: "iô",
+    prompt: "Desenhar no ar: pratique Ё ё em letra cursiva. Faça o movimento amplo com o braço antes de usar o lápis.",
+    objective: "Memorizar a direção geral do traço.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 211,
+    letterPosition: 7,
+    upper: "Ё",
+    letter: "ё",
+    mode: "cursive",
+    stageNumber: 3,
+    stageCode: "maiuscula_guiada",
+    stageTitle: "Traçar maiúscula",
+    level: "A1",
+    target: "ЁЁЁЁЁ",
+    word: "ёлка",
+    translation: "árvore de Natal",
+    sound: "iô",
+    prompt: "Traçar maiúscula: pratique Ё ё em letra cursiva. Passe sobre o modelo maiúsculo sem acelerar.",
+    objective: "Controlar início, direção e encerramento.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 212,
+    letterPosition: 7,
+    upper: "Ё",
+    letter: "ё",
+    mode: "cursive",
+    stageNumber: 4,
+    stageCode: "minuscula_guiada",
+    stageTitle: "Traçar minúscula",
+    level: "A1",
+    target: "ёёёёё",
+    word: "ёлка",
+    translation: "árvore de Natal",
+    sound: "iô",
+    prompt: "Traçar minúscula: pratique Ё ё em letra cursiva. Passe sobre o modelo minúsculo mantendo a altura.",
+    objective: "Dominar a forma usada dentro das palavras.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 213,
+    letterPosition: 7,
+    upper: "Ё",
+    letter: "ё",
+    mode: "cursive",
+    stageNumber: 5,
+    stageCode: "copia_isolada",
+    stageTitle: "Copiar isoladamente",
+    level: "A1",
+    target: "ёёёёё",
+    word: "ёлка",
+    translation: "árvore de Natal",
+    sound: "iô",
+    prompt: "Copiar isoladamente: pratique Ё ё em letra cursiva. Copie a letra cinco vezes ao lado do modelo.",
+    objective: "Manter tamanho e espaçamento consistentes.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 214,
+    letterPosition: 7,
+    upper: "Ё",
+    letter: "ё",
+    mode: "cursive",
+    stageNumber: 6,
+    stageCode: "ritmo",
+    stageTitle: "Criar ritmo",
+    level: "A2",
+    target: "ёёёё ёёёё ёёёё",
+    word: "ёлка",
+    translation: "árvore de Natal",
+    sound: "iô",
+    prompt: "Criar ritmo: pratique Ё ё em letra cursiva. Escreva uma linha contínua com intervalos regulares.",
+    objective: "Automatizar o movimento sem perder legibilidade.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 215,
+    letterPosition: 7,
+    upper: "Ё",
+    letter: "ё",
+    mode: "cursive",
+    stageNumber: 7,
+    stageCode: "ligacao_a",
+    stageTitle: "Ligar com а",
+    level: "A2",
+    target: "ёа аё",
+    word: "ёлка",
+    translation: "árvore de Natal",
+    sound: "iô",
+    prompt: "Ligar com а: pratique Ё ё em letra cursiva. Pratique a ligação de entrada e saída com а.",
+    objective: "Aprender uma conexão frequente.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 216,
+    letterPosition: 7,
+    upper: "Ё",
+    letter: "ё",
+    mode: "cursive",
+    stageNumber: 8,
+    stageCode: "ligacao_o",
+    stageTitle: "Ligar com о",
+    level: "A2",
+    target: "ёо оё",
+    word: "ёлка",
+    translation: "árvore de Natal",
+    sound: "iô",
+    prompt: "Ligar com о: pratique Ё ё em letra cursiva. Pratique a ligação de entrada e saída com о.",
+    objective: "Evitar que as letras se encostem demais.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 217,
+    letterPosition: 7,
+    upper: "Ё",
+    letter: "ё",
+    mode: "cursive",
+    stageNumber: 9,
+    stageCode: "ligacao_i",
+    stageTitle: "Ligar com и",
+    level: "A2",
+    target: "ёи иё",
+    word: "ёлка",
+    translation: "árvore de Natal",
+    sound: "iô",
+    prompt: "Ligar com и: pratique Ё ё em letra cursiva. Pratique a ligação de entrada e saída com и.",
+    objective: "Manter o fluxo da cursiva.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 218,
+    letterPosition: 7,
+    upper: "Ё",
+    letter: "ё",
+    mode: "cursive",
+    stageNumber: 10,
+    stageCode: "ligacao_m",
+    stageTitle: "Ligar com м",
+    level: "A2",
+    target: "ём мё",
+    word: "ёлка",
+    translation: "árvore de Natal",
+    sound: "iô",
+    prompt: "Ligar com м: pratique Ё ё em letra cursiva. Pratique a ligação de entrada e saída com м.",
+    objective: "Diferenciar arcos e hastes semelhantes.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 219,
+    letterPosition: 7,
+    upper: "Ё",
+    letter: "ё",
+    mode: "cursive",
+    stageNumber: 11,
+    stageCode: "silaba",
+    stageTitle: "Copiar sílabas",
+    level: "A2",
+    target: "ёа ёо ёу ёи",
+    word: "ёлка",
+    translation: "árvore de Natal",
+    sound: "iô",
+    prompt: "Copiar sílabas: pratique Ё ё em letra cursiva. Copie sílabas curtas e leia em voz alta.",
+    objective: "Unir escrita, leitura e som.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 220,
+    letterPosition: 7,
+    upper: "Ё",
+    letter: "ё",
+    mode: "cursive",
+    stageNumber: 12,
+    stageCode: "palavra",
+    stageTitle: "Copiar palavra",
+    level: "B1",
+    target: "ёлка",
+    word: "ёлка",
+    translation: "árvore de Natal",
+    sound: "iô",
+    prompt: "Copiar palavra: pratique Ё ё em letra cursiva. Copie a palavra-modelo e confira cada ligação.",
+    objective: "Aplicar a letra em vocabulário real.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 221,
+    letterPosition: 7,
+    upper: "Ё",
+    letter: "ё",
+    mode: "cursive",
+    stageNumber: 13,
+    stageCode: "frase",
+    stageTitle: "Copiar frase",
+    level: "B1",
+    target: "Я пишу слово «ёлка».",
+    word: "ёлка",
+    translation: "árvore de Natal",
+    sound: "iô",
+    prompt: "Copiar frase: pratique Ё ё em letra cursiva. Copie uma frase curta sem interromper o ritmo.",
+    objective: "Aplicar a letra em contexto.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 222,
+    letterPosition: 7,
+    upper: "Ё",
+    letter: "ё",
+    mode: "cursive",
+    stageNumber: 14,
+    stageCode: "ditado",
+    stageTitle: "Escrever por ditado",
+    level: "B1",
+    target: "ёлка",
+    word: "ёлка",
+    translation: "árvore de Natal",
+    sound: "iô",
+    prompt: "Escrever por ditado: pratique Ё ё em letra cursiva. Ouça o modelo e escreva sem olhar; depois compare.",
+    objective: "Recuperar a grafia pela memória.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 223,
+    letterPosition: 7,
+    upper: "Ё",
+    letter: "ё",
+    mode: "cursive",
+    stageNumber: 15,
+    stageCode: "fluencia",
+    stageTitle: "Treino de fluência",
+    level: "B2",
+    target: "ёлка",
+    word: "ёлка",
+    translation: "árvore de Natal",
+    sound: "iô",
+    prompt: "Treino de fluência: pratique Ё ё em letra cursiva. Escreva com tempo controlado sem sacrificar clareza.",
+    objective: "Ganhar velocidade com legibilidade.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 224,
+    letterPosition: 7,
+    upper: "Ё",
+    letter: "ё",
+    mode: "cursive",
+    stageNumber: 16,
+    stageCode: "producao",
+    stageTitle: "Produção livre",
+    level: "C1",
+    target: "Я пишу слово «ёлка».",
+    word: "ёлка",
+    translation: "árvore de Natal",
+    sound: "iô",
+    prompt: "Produção livre: pratique Ё ё em letra cursiva. Crie uma frase curta usando a palavra-modelo.",
+    objective: "Usar a escrita de maneira independente.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 225,
+    letterPosition: 8,
+    upper: "Ж",
+    letter: "ж",
+    mode: "print",
+    stageNumber: 1,
+    stageCode: "observacao",
+    stageTitle: "Observar proporções",
+    level: "A1",
+    target: "жжжжж",
+    word: "жизнь",
+    translation: "vida",
+    sound: "j sonoro",
+    prompt: "Observar proporções: pratique Ж ж em letra de forma. Compare altura, largura, inclinação e posição na linha.",
+    objective: "Reconhecer a forma antes de escrever.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 226,
+    letterPosition: 8,
+    upper: "Ж",
+    letter: "ж",
+    mode: "print",
+    stageNumber: 2,
+    stageCode: "movimento_ar",
+    stageTitle: "Desenhar no ar",
+    level: "A1",
+    target: "жжжжж",
+    word: "жизнь",
+    translation: "vida",
+    sound: "j sonoro",
+    prompt: "Desenhar no ar: pratique Ж ж em letra de forma. Faça o movimento amplo com o braço antes de usar o lápis.",
+    objective: "Memorizar a direção geral do traço.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 227,
+    letterPosition: 8,
+    upper: "Ж",
+    letter: "ж",
+    mode: "print",
+    stageNumber: 3,
+    stageCode: "maiuscula_guiada",
+    stageTitle: "Traçar maiúscula",
+    level: "A1",
+    target: "ЖЖЖЖЖ",
+    word: "жизнь",
+    translation: "vida",
+    sound: "j sonoro",
+    prompt: "Traçar maiúscula: pratique Ж ж em letra de forma. Passe sobre o modelo maiúsculo sem acelerar.",
+    objective: "Controlar início, direção e encerramento.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 228,
+    letterPosition: 8,
+    upper: "Ж",
+    letter: "ж",
+    mode: "print",
+    stageNumber: 4,
+    stageCode: "minuscula_guiada",
+    stageTitle: "Traçar minúscula",
+    level: "A1",
+    target: "жжжжж",
+    word: "жизнь",
+    translation: "vida",
+    sound: "j sonoro",
+    prompt: "Traçar minúscula: pratique Ж ж em letra de forma. Passe sobre o modelo minúsculo mantendo a altura.",
+    objective: "Dominar a forma usada dentro das palavras.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 229,
+    letterPosition: 8,
+    upper: "Ж",
+    letter: "ж",
+    mode: "print",
+    stageNumber: 5,
+    stageCode: "copia_isolada",
+    stageTitle: "Copiar isoladamente",
+    level: "A1",
+    target: "жжжжж",
+    word: "жизнь",
+    translation: "vida",
+    sound: "j sonoro",
+    prompt: "Copiar isoladamente: pratique Ж ж em letra de forma. Copie a letra cinco vezes ao lado do modelo.",
+    objective: "Manter tamanho e espaçamento consistentes.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 230,
+    letterPosition: 8,
+    upper: "Ж",
+    letter: "ж",
+    mode: "print",
+    stageNumber: 6,
+    stageCode: "ritmo",
+    stageTitle: "Criar ritmo",
+    level: "A2",
+    target: "жжжж жжжж жжжж",
+    word: "жизнь",
+    translation: "vida",
+    sound: "j sonoro",
+    prompt: "Criar ritmo: pratique Ж ж em letra de forma. Escreva uma linha contínua com intervalos regulares.",
+    objective: "Automatizar o movimento sem perder legibilidade.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 231,
+    letterPosition: 8,
+    upper: "Ж",
+    letter: "ж",
+    mode: "print",
+    stageNumber: 7,
+    stageCode: "ligacao_a",
+    stageTitle: "Ligar com а",
+    level: "A2",
+    target: "жа аж",
+    word: "жизнь",
+    translation: "vida",
+    sound: "j sonoro",
+    prompt: "Ligar com а: pratique Ж ж em letra de forma. Pratique a ligação de entrada e saída com а.",
+    objective: "Aprender uma conexão frequente.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 232,
+    letterPosition: 8,
+    upper: "Ж",
+    letter: "ж",
+    mode: "print",
+    stageNumber: 8,
+    stageCode: "ligacao_o",
+    stageTitle: "Ligar com о",
+    level: "A2",
+    target: "жо ож",
+    word: "жизнь",
+    translation: "vida",
+    sound: "j sonoro",
+    prompt: "Ligar com о: pratique Ж ж em letra de forma. Pratique a ligação de entrada e saída com о.",
+    objective: "Evitar que as letras se encostem demais.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 233,
+    letterPosition: 8,
+    upper: "Ж",
+    letter: "ж",
+    mode: "print",
+    stageNumber: 9,
+    stageCode: "ligacao_i",
+    stageTitle: "Ligar com и",
+    level: "A2",
+    target: "жи иж",
+    word: "жизнь",
+    translation: "vida",
+    sound: "j sonoro",
+    prompt: "Ligar com и: pratique Ж ж em letra de forma. Pratique a ligação de entrada e saída com и.",
+    objective: "Manter o fluxo da cursiva.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 234,
+    letterPosition: 8,
+    upper: "Ж",
+    letter: "ж",
+    mode: "print",
+    stageNumber: 10,
+    stageCode: "ligacao_m",
+    stageTitle: "Ligar com м",
+    level: "A2",
+    target: "жм мж",
+    word: "жизнь",
+    translation: "vida",
+    sound: "j sonoro",
+    prompt: "Ligar com м: pratique Ж ж em letra de forma. Pratique a ligação de entrada e saída com м.",
+    objective: "Diferenciar arcos e hastes semelhantes.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 235,
+    letterPosition: 8,
+    upper: "Ж",
+    letter: "ж",
+    mode: "print",
+    stageNumber: 11,
+    stageCode: "silaba",
+    stageTitle: "Copiar sílabas",
+    level: "A2",
+    target: "жа жо жу жи",
+    word: "жизнь",
+    translation: "vida",
+    sound: "j sonoro",
+    prompt: "Copiar sílabas: pratique Ж ж em letra de forma. Copie sílabas curtas e leia em voz alta.",
+    objective: "Unir escrita, leitura e som.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 236,
+    letterPosition: 8,
+    upper: "Ж",
+    letter: "ж",
+    mode: "print",
+    stageNumber: 12,
+    stageCode: "palavra",
+    stageTitle: "Copiar palavra",
+    level: "B1",
+    target: "жизнь",
+    word: "жизнь",
+    translation: "vida",
+    sound: "j sonoro",
+    prompt: "Copiar palavra: pratique Ж ж em letra de forma. Copie a palavra-modelo e confira cada ligação.",
+    objective: "Aplicar a letra em vocabulário real.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 237,
+    letterPosition: 8,
+    upper: "Ж",
+    letter: "ж",
+    mode: "print",
+    stageNumber: 13,
+    stageCode: "frase",
+    stageTitle: "Copiar frase",
+    level: "B1",
+    target: "Я пишу слово «жизнь».",
+    word: "жизнь",
+    translation: "vida",
+    sound: "j sonoro",
+    prompt: "Copiar frase: pratique Ж ж em letra de forma. Copie uma frase curta sem interromper o ritmo.",
+    objective: "Aplicar a letra em contexto.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 238,
+    letterPosition: 8,
+    upper: "Ж",
+    letter: "ж",
+    mode: "print",
+    stageNumber: 14,
+    stageCode: "ditado",
+    stageTitle: "Escrever por ditado",
+    level: "B1",
+    target: "жизнь",
+    word: "жизнь",
+    translation: "vida",
+    sound: "j sonoro",
+    prompt: "Escrever por ditado: pratique Ж ж em letra de forma. Ouça o modelo e escreva sem olhar; depois compare.",
+    objective: "Recuperar a grafia pela memória.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 239,
+    letterPosition: 8,
+    upper: "Ж",
+    letter: "ж",
+    mode: "print",
+    stageNumber: 15,
+    stageCode: "fluencia",
+    stageTitle: "Treino de fluência",
+    level: "B2",
+    target: "жизнь",
+    word: "жизнь",
+    translation: "vida",
+    sound: "j sonoro",
+    prompt: "Treino de fluência: pratique Ж ж em letra de forma. Escreva com tempo controlado sem sacrificar clareza.",
+    objective: "Ganhar velocidade com legibilidade.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 240,
+    letterPosition: 8,
+    upper: "Ж",
+    letter: "ж",
+    mode: "print",
+    stageNumber: 16,
+    stageCode: "producao",
+    stageTitle: "Produção livre",
+    level: "C1",
+    target: "Я пишу слово «жизнь».",
+    word: "жизнь",
+    translation: "vida",
+    sound: "j sonoro",
+    prompt: "Produção livre: pratique Ж ж em letra de forma. Crie uma frase curta usando a palavra-modelo.",
+    objective: "Usar a escrita de maneira independente.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 241,
+    letterPosition: 8,
+    upper: "Ж",
+    letter: "ж",
+    mode: "cursive",
+    stageNumber: 1,
+    stageCode: "observacao",
+    stageTitle: "Observar proporções",
+    level: "A1",
+    target: "жжжжж",
+    word: "жизнь",
+    translation: "vida",
+    sound: "j sonoro",
+    prompt: "Observar proporções: pratique Ж ж em letra cursiva. Compare altura, largura, inclinação e posição na linha.",
+    objective: "Reconhecer a forma antes de escrever.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 242,
+    letterPosition: 8,
+    upper: "Ж",
+    letter: "ж",
+    mode: "cursive",
+    stageNumber: 2,
+    stageCode: "movimento_ar",
+    stageTitle: "Desenhar no ar",
+    level: "A1",
+    target: "жжжжж",
+    word: "жизнь",
+    translation: "vida",
+    sound: "j sonoro",
+    prompt: "Desenhar no ar: pratique Ж ж em letra cursiva. Faça o movimento amplo com o braço antes de usar o lápis.",
+    objective: "Memorizar a direção geral do traço.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 243,
+    letterPosition: 8,
+    upper: "Ж",
+    letter: "ж",
+    mode: "cursive",
+    stageNumber: 3,
+    stageCode: "maiuscula_guiada",
+    stageTitle: "Traçar maiúscula",
+    level: "A1",
+    target: "ЖЖЖЖЖ",
+    word: "жизнь",
+    translation: "vida",
+    sound: "j sonoro",
+    prompt: "Traçar maiúscula: pratique Ж ж em letra cursiva. Passe sobre o modelo maiúsculo sem acelerar.",
+    objective: "Controlar início, direção e encerramento.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 244,
+    letterPosition: 8,
+    upper: "Ж",
+    letter: "ж",
+    mode: "cursive",
+    stageNumber: 4,
+    stageCode: "minuscula_guiada",
+    stageTitle: "Traçar minúscula",
+    level: "A1",
+    target: "жжжжж",
+    word: "жизнь",
+    translation: "vida",
+    sound: "j sonoro",
+    prompt: "Traçar minúscula: pratique Ж ж em letra cursiva. Passe sobre o modelo minúsculo mantendo a altura.",
+    objective: "Dominar a forma usada dentro das palavras.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 245,
+    letterPosition: 8,
+    upper: "Ж",
+    letter: "ж",
+    mode: "cursive",
+    stageNumber: 5,
+    stageCode: "copia_isolada",
+    stageTitle: "Copiar isoladamente",
+    level: "A1",
+    target: "жжжжж",
+    word: "жизнь",
+    translation: "vida",
+    sound: "j sonoro",
+    prompt: "Copiar isoladamente: pratique Ж ж em letra cursiva. Copie a letra cinco vezes ao lado do modelo.",
+    objective: "Manter tamanho e espaçamento consistentes.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 246,
+    letterPosition: 8,
+    upper: "Ж",
+    letter: "ж",
+    mode: "cursive",
+    stageNumber: 6,
+    stageCode: "ritmo",
+    stageTitle: "Criar ritmo",
+    level: "A2",
+    target: "жжжж жжжж жжжж",
+    word: "жизнь",
+    translation: "vida",
+    sound: "j sonoro",
+    prompt: "Criar ritmo: pratique Ж ж em letra cursiva. Escreva uma linha contínua com intervalos regulares.",
+    objective: "Automatizar o movimento sem perder legibilidade.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 247,
+    letterPosition: 8,
+    upper: "Ж",
+    letter: "ж",
+    mode: "cursive",
+    stageNumber: 7,
+    stageCode: "ligacao_a",
+    stageTitle: "Ligar com а",
+    level: "A2",
+    target: "жа аж",
+    word: "жизнь",
+    translation: "vida",
+    sound: "j sonoro",
+    prompt: "Ligar com а: pratique Ж ж em letra cursiva. Pratique a ligação de entrada e saída com а.",
+    objective: "Aprender uma conexão frequente.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 248,
+    letterPosition: 8,
+    upper: "Ж",
+    letter: "ж",
+    mode: "cursive",
+    stageNumber: 8,
+    stageCode: "ligacao_o",
+    stageTitle: "Ligar com о",
+    level: "A2",
+    target: "жо ож",
+    word: "жизнь",
+    translation: "vida",
+    sound: "j sonoro",
+    prompt: "Ligar com о: pratique Ж ж em letra cursiva. Pratique a ligação de entrada e saída com о.",
+    objective: "Evitar que as letras se encostem demais.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 249,
+    letterPosition: 8,
+    upper: "Ж",
+    letter: "ж",
+    mode: "cursive",
+    stageNumber: 9,
+    stageCode: "ligacao_i",
+    stageTitle: "Ligar com и",
+    level: "A2",
+    target: "жи иж",
+    word: "жизнь",
+    translation: "vida",
+    sound: "j sonoro",
+    prompt: "Ligar com и: pratique Ж ж em letra cursiva. Pratique a ligação de entrada e saída com и.",
+    objective: "Manter o fluxo da cursiva.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 250,
+    letterPosition: 8,
+    upper: "Ж",
+    letter: "ж",
+    mode: "cursive",
+    stageNumber: 10,
+    stageCode: "ligacao_m",
+    stageTitle: "Ligar com м",
+    level: "A2",
+    target: "жм мж",
+    word: "жизнь",
+    translation: "vida",
+    sound: "j sonoro",
+    prompt: "Ligar com м: pratique Ж ж em letra cursiva. Pratique a ligação de entrada e saída com м.",
+    objective: "Diferenciar arcos e hastes semelhantes.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 251,
+    letterPosition: 8,
+    upper: "Ж",
+    letter: "ж",
+    mode: "cursive",
+    stageNumber: 11,
+    stageCode: "silaba",
+    stageTitle: "Copiar sílabas",
+    level: "A2",
+    target: "жа жо жу жи",
+    word: "жизнь",
+    translation: "vida",
+    sound: "j sonoro",
+    prompt: "Copiar sílabas: pratique Ж ж em letra cursiva. Copie sílabas curtas e leia em voz alta.",
+    objective: "Unir escrita, leitura e som.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 252,
+    letterPosition: 8,
+    upper: "Ж",
+    letter: "ж",
+    mode: "cursive",
+    stageNumber: 12,
+    stageCode: "palavra",
+    stageTitle: "Copiar palavra",
+    level: "B1",
+    target: "жизнь",
+    word: "жизнь",
+    translation: "vida",
+    sound: "j sonoro",
+    prompt: "Copiar palavra: pratique Ж ж em letra cursiva. Copie a palavra-modelo e confira cada ligação.",
+    objective: "Aplicar a letra em vocabulário real.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 253,
+    letterPosition: 8,
+    upper: "Ж",
+    letter: "ж",
+    mode: "cursive",
+    stageNumber: 13,
+    stageCode: "frase",
+    stageTitle: "Copiar frase",
+    level: "B1",
+    target: "Я пишу слово «жизнь».",
+    word: "жизнь",
+    translation: "vida",
+    sound: "j sonoro",
+    prompt: "Copiar frase: pratique Ж ж em letra cursiva. Copie uma frase curta sem interromper o ritmo.",
+    objective: "Aplicar a letra em contexto.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 254,
+    letterPosition: 8,
+    upper: "Ж",
+    letter: "ж",
+    mode: "cursive",
+    stageNumber: 14,
+    stageCode: "ditado",
+    stageTitle: "Escrever por ditado",
+    level: "B1",
+    target: "жизнь",
+    word: "жизнь",
+    translation: "vida",
+    sound: "j sonoro",
+    prompt: "Escrever por ditado: pratique Ж ж em letra cursiva. Ouça o modelo e escreva sem olhar; depois compare.",
+    objective: "Recuperar a grafia pela memória.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 255,
+    letterPosition: 8,
+    upper: "Ж",
+    letter: "ж",
+    mode: "cursive",
+    stageNumber: 15,
+    stageCode: "fluencia",
+    stageTitle: "Treino de fluência",
+    level: "B2",
+    target: "жизнь",
+    word: "жизнь",
+    translation: "vida",
+    sound: "j sonoro",
+    prompt: "Treino de fluência: pratique Ж ж em letra cursiva. Escreva com tempo controlado sem sacrificar clareza.",
+    objective: "Ganhar velocidade com legibilidade.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 256,
+    letterPosition: 8,
+    upper: "Ж",
+    letter: "ж",
+    mode: "cursive",
+    stageNumber: 16,
+    stageCode: "producao",
+    stageTitle: "Produção livre",
+    level: "C1",
+    target: "Я пишу слово «жизнь».",
+    word: "жизнь",
+    translation: "vida",
+    sound: "j sonoro",
+    prompt: "Produção livre: pratique Ж ж em letra cursiva. Crie uma frase curta usando a palavra-modelo.",
+    objective: "Usar a escrita de maneira independente.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 257,
+    letterPosition: 9,
+    upper: "З",
+    letter: "з",
+    mode: "print",
+    stageNumber: 1,
+    stageCode: "observacao",
+    stageTitle: "Observar proporções",
+    level: "A1",
+    target: "ззззз",
+    word: "зима",
+    translation: "inverno",
+    sound: "z",
+    prompt: "Observar proporções: pratique З з em letra de forma. Compare altura, largura, inclinação e posição na linha.",
+    objective: "Reconhecer a forma antes de escrever.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 258,
+    letterPosition: 9,
+    upper: "З",
+    letter: "з",
+    mode: "print",
+    stageNumber: 2,
+    stageCode: "movimento_ar",
+    stageTitle: "Desenhar no ar",
+    level: "A1",
+    target: "ззззз",
+    word: "зима",
+    translation: "inverno",
+    sound: "z",
+    prompt: "Desenhar no ar: pratique З з em letra de forma. Faça o movimento amplo com o braço antes de usar o lápis.",
+    objective: "Memorizar a direção geral do traço.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 259,
+    letterPosition: 9,
+    upper: "З",
+    letter: "з",
+    mode: "print",
+    stageNumber: 3,
+    stageCode: "maiuscula_guiada",
+    stageTitle: "Traçar maiúscula",
+    level: "A1",
+    target: "ЗЗЗЗЗ",
+    word: "зима",
+    translation: "inverno",
+    sound: "z",
+    prompt: "Traçar maiúscula: pratique З з em letra de forma. Passe sobre o modelo maiúsculo sem acelerar.",
+    objective: "Controlar início, direção e encerramento.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 260,
+    letterPosition: 9,
+    upper: "З",
+    letter: "з",
+    mode: "print",
+    stageNumber: 4,
+    stageCode: "minuscula_guiada",
+    stageTitle: "Traçar minúscula",
+    level: "A1",
+    target: "ззззз",
+    word: "зима",
+    translation: "inverno",
+    sound: "z",
+    prompt: "Traçar minúscula: pratique З з em letra de forma. Passe sobre o modelo minúsculo mantendo a altura.",
+    objective: "Dominar a forma usada dentro das palavras.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 261,
+    letterPosition: 9,
+    upper: "З",
+    letter: "з",
+    mode: "print",
+    stageNumber: 5,
+    stageCode: "copia_isolada",
+    stageTitle: "Copiar isoladamente",
+    level: "A1",
+    target: "ззззз",
+    word: "зима",
+    translation: "inverno",
+    sound: "z",
+    prompt: "Copiar isoladamente: pratique З з em letra de forma. Copie a letra cinco vezes ao lado do modelo.",
+    objective: "Manter tamanho e espaçamento consistentes.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 262,
+    letterPosition: 9,
+    upper: "З",
+    letter: "з",
+    mode: "print",
+    stageNumber: 6,
+    stageCode: "ritmo",
+    stageTitle: "Criar ritmo",
+    level: "A2",
+    target: "зззз зззз зззз",
+    word: "зима",
+    translation: "inverno",
+    sound: "z",
+    prompt: "Criar ritmo: pratique З з em letra de forma. Escreva uma linha contínua com intervalos regulares.",
+    objective: "Automatizar o movimento sem perder legibilidade.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 263,
+    letterPosition: 9,
+    upper: "З",
+    letter: "з",
+    mode: "print",
+    stageNumber: 7,
+    stageCode: "ligacao_a",
+    stageTitle: "Ligar com а",
+    level: "A2",
+    target: "за аз",
+    word: "зима",
+    translation: "inverno",
+    sound: "z",
+    prompt: "Ligar com а: pratique З з em letra de forma. Pratique a ligação de entrada e saída com а.",
+    objective: "Aprender uma conexão frequente.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 264,
+    letterPosition: 9,
+    upper: "З",
+    letter: "з",
+    mode: "print",
+    stageNumber: 8,
+    stageCode: "ligacao_o",
+    stageTitle: "Ligar com о",
+    level: "A2",
+    target: "зо оз",
+    word: "зима",
+    translation: "inverno",
+    sound: "z",
+    prompt: "Ligar com о: pratique З з em letra de forma. Pratique a ligação de entrada e saída com о.",
+    objective: "Evitar que as letras se encostem demais.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 265,
+    letterPosition: 9,
+    upper: "З",
+    letter: "з",
+    mode: "print",
+    stageNumber: 9,
+    stageCode: "ligacao_i",
+    stageTitle: "Ligar com и",
+    level: "A2",
+    target: "зи из",
+    word: "зима",
+    translation: "inverno",
+    sound: "z",
+    prompt: "Ligar com и: pratique З з em letra de forma. Pratique a ligação de entrada e saída com и.",
+    objective: "Manter o fluxo da cursiva.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 266,
+    letterPosition: 9,
+    upper: "З",
+    letter: "з",
+    mode: "print",
+    stageNumber: 10,
+    stageCode: "ligacao_m",
+    stageTitle: "Ligar com м",
+    level: "A2",
+    target: "зм мз",
+    word: "зима",
+    translation: "inverno",
+    sound: "z",
+    prompt: "Ligar com м: pratique З з em letra de forma. Pratique a ligação de entrada e saída com м.",
+    objective: "Diferenciar arcos e hastes semelhantes.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 267,
+    letterPosition: 9,
+    upper: "З",
+    letter: "з",
+    mode: "print",
+    stageNumber: 11,
+    stageCode: "silaba",
+    stageTitle: "Copiar sílabas",
+    level: "A2",
+    target: "за зо зу зи",
+    word: "зима",
+    translation: "inverno",
+    sound: "z",
+    prompt: "Copiar sílabas: pratique З з em letra de forma. Copie sílabas curtas e leia em voz alta.",
+    objective: "Unir escrita, leitura e som.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 268,
+    letterPosition: 9,
+    upper: "З",
+    letter: "з",
+    mode: "print",
+    stageNumber: 12,
+    stageCode: "palavra",
+    stageTitle: "Copiar palavra",
+    level: "B1",
+    target: "зима",
+    word: "зима",
+    translation: "inverno",
+    sound: "z",
+    prompt: "Copiar palavra: pratique З з em letra de forma. Copie a palavra-modelo e confira cada ligação.",
+    objective: "Aplicar a letra em vocabulário real.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 269,
+    letterPosition: 9,
+    upper: "З",
+    letter: "з",
+    mode: "print",
+    stageNumber: 13,
+    stageCode: "frase",
+    stageTitle: "Copiar frase",
+    level: "B1",
+    target: "Я пишу слово «зима».",
+    word: "зима",
+    translation: "inverno",
+    sound: "z",
+    prompt: "Copiar frase: pratique З з em letra de forma. Copie uma frase curta sem interromper o ritmo.",
+    objective: "Aplicar a letra em contexto.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 270,
+    letterPosition: 9,
+    upper: "З",
+    letter: "з",
+    mode: "print",
+    stageNumber: 14,
+    stageCode: "ditado",
+    stageTitle: "Escrever por ditado",
+    level: "B1",
+    target: "зима",
+    word: "зима",
+    translation: "inverno",
+    sound: "z",
+    prompt: "Escrever por ditado: pratique З з em letra de forma. Ouça o modelo e escreva sem olhar; depois compare.",
+    objective: "Recuperar a grafia pela memória.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 271,
+    letterPosition: 9,
+    upper: "З",
+    letter: "з",
+    mode: "print",
+    stageNumber: 15,
+    stageCode: "fluencia",
+    stageTitle: "Treino de fluência",
+    level: "B2",
+    target: "зима",
+    word: "зима",
+    translation: "inverno",
+    sound: "z",
+    prompt: "Treino de fluência: pratique З з em letra de forma. Escreva com tempo controlado sem sacrificar clareza.",
+    objective: "Ganhar velocidade com legibilidade.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 272,
+    letterPosition: 9,
+    upper: "З",
+    letter: "з",
+    mode: "print",
+    stageNumber: 16,
+    stageCode: "producao",
+    stageTitle: "Produção livre",
+    level: "C1",
+    target: "Я пишу слово «зима».",
+    word: "зима",
+    translation: "inverno",
+    sound: "z",
+    prompt: "Produção livre: pratique З з em letra de forma. Crie uma frase curta usando a palavra-modelo.",
+    objective: "Usar a escrita de maneira independente.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 273,
+    letterPosition: 9,
+    upper: "З",
+    letter: "з",
+    mode: "cursive",
+    stageNumber: 1,
+    stageCode: "observacao",
+    stageTitle: "Observar proporções",
+    level: "A1",
+    target: "ззззз",
+    word: "зима",
+    translation: "inverno",
+    sound: "z",
+    prompt: "Observar proporções: pratique З з em letra cursiva. Compare altura, largura, inclinação e posição na linha.",
+    objective: "Reconhecer a forma antes de escrever.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 274,
+    letterPosition: 9,
+    upper: "З",
+    letter: "з",
+    mode: "cursive",
+    stageNumber: 2,
+    stageCode: "movimento_ar",
+    stageTitle: "Desenhar no ar",
+    level: "A1",
+    target: "ззззз",
+    word: "зима",
+    translation: "inverno",
+    sound: "z",
+    prompt: "Desenhar no ar: pratique З з em letra cursiva. Faça o movimento amplo com o braço antes de usar o lápis.",
+    objective: "Memorizar a direção geral do traço.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 275,
+    letterPosition: 9,
+    upper: "З",
+    letter: "з",
+    mode: "cursive",
+    stageNumber: 3,
+    stageCode: "maiuscula_guiada",
+    stageTitle: "Traçar maiúscula",
+    level: "A1",
+    target: "ЗЗЗЗЗ",
+    word: "зима",
+    translation: "inverno",
+    sound: "z",
+    prompt: "Traçar maiúscula: pratique З з em letra cursiva. Passe sobre o modelo maiúsculo sem acelerar.",
+    objective: "Controlar início, direção e encerramento.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 276,
+    letterPosition: 9,
+    upper: "З",
+    letter: "з",
+    mode: "cursive",
+    stageNumber: 4,
+    stageCode: "minuscula_guiada",
+    stageTitle: "Traçar minúscula",
+    level: "A1",
+    target: "ззззз",
+    word: "зима",
+    translation: "inverno",
+    sound: "z",
+    prompt: "Traçar minúscula: pratique З з em letra cursiva. Passe sobre o modelo minúsculo mantendo a altura.",
+    objective: "Dominar a forma usada dentro das palavras.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 277,
+    letterPosition: 9,
+    upper: "З",
+    letter: "з",
+    mode: "cursive",
+    stageNumber: 5,
+    stageCode: "copia_isolada",
+    stageTitle: "Copiar isoladamente",
+    level: "A1",
+    target: "ззззз",
+    word: "зима",
+    translation: "inverno",
+    sound: "z",
+    prompt: "Copiar isoladamente: pratique З з em letra cursiva. Copie a letra cinco vezes ao lado do modelo.",
+    objective: "Manter tamanho e espaçamento consistentes.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 278,
+    letterPosition: 9,
+    upper: "З",
+    letter: "з",
+    mode: "cursive",
+    stageNumber: 6,
+    stageCode: "ritmo",
+    stageTitle: "Criar ritmo",
+    level: "A2",
+    target: "зззз зззз зззз",
+    word: "зима",
+    translation: "inverno",
+    sound: "z",
+    prompt: "Criar ritmo: pratique З з em letra cursiva. Escreva uma linha contínua com intervalos regulares.",
+    objective: "Automatizar o movimento sem perder legibilidade.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 279,
+    letterPosition: 9,
+    upper: "З",
+    letter: "з",
+    mode: "cursive",
+    stageNumber: 7,
+    stageCode: "ligacao_a",
+    stageTitle: "Ligar com а",
+    level: "A2",
+    target: "за аз",
+    word: "зима",
+    translation: "inverno",
+    sound: "z",
+    prompt: "Ligar com а: pratique З з em letra cursiva. Pratique a ligação de entrada e saída com а.",
+    objective: "Aprender uma conexão frequente.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 280,
+    letterPosition: 9,
+    upper: "З",
+    letter: "з",
+    mode: "cursive",
+    stageNumber: 8,
+    stageCode: "ligacao_o",
+    stageTitle: "Ligar com о",
+    level: "A2",
+    target: "зо оз",
+    word: "зима",
+    translation: "inverno",
+    sound: "z",
+    prompt: "Ligar com о: pratique З з em letra cursiva. Pratique a ligação de entrada e saída com о.",
+    objective: "Evitar que as letras se encostem demais.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 281,
+    letterPosition: 9,
+    upper: "З",
+    letter: "з",
+    mode: "cursive",
+    stageNumber: 9,
+    stageCode: "ligacao_i",
+    stageTitle: "Ligar com и",
+    level: "A2",
+    target: "зи из",
+    word: "зима",
+    translation: "inverno",
+    sound: "z",
+    prompt: "Ligar com и: pratique З з em letra cursiva. Pratique a ligação de entrada e saída com и.",
+    objective: "Manter o fluxo da cursiva.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 282,
+    letterPosition: 9,
+    upper: "З",
+    letter: "з",
+    mode: "cursive",
+    stageNumber: 10,
+    stageCode: "ligacao_m",
+    stageTitle: "Ligar com м",
+    level: "A2",
+    target: "зм мз",
+    word: "зима",
+    translation: "inverno",
+    sound: "z",
+    prompt: "Ligar com м: pratique З з em letra cursiva. Pratique a ligação de entrada e saída com м.",
+    objective: "Diferenciar arcos e hastes semelhantes.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 283,
+    letterPosition: 9,
+    upper: "З",
+    letter: "з",
+    mode: "cursive",
+    stageNumber: 11,
+    stageCode: "silaba",
+    stageTitle: "Copiar sílabas",
+    level: "A2",
+    target: "за зо зу зи",
+    word: "зима",
+    translation: "inverno",
+    sound: "z",
+    prompt: "Copiar sílabas: pratique З з em letra cursiva. Copie sílabas curtas e leia em voz alta.",
+    objective: "Unir escrita, leitura e som.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 284,
+    letterPosition: 9,
+    upper: "З",
+    letter: "з",
+    mode: "cursive",
+    stageNumber: 12,
+    stageCode: "palavra",
+    stageTitle: "Copiar palavra",
+    level: "B1",
+    target: "зима",
+    word: "зима",
+    translation: "inverno",
+    sound: "z",
+    prompt: "Copiar palavra: pratique З з em letra cursiva. Copie a palavra-modelo e confira cada ligação.",
+    objective: "Aplicar a letra em vocabulário real.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 285,
+    letterPosition: 9,
+    upper: "З",
+    letter: "з",
+    mode: "cursive",
+    stageNumber: 13,
+    stageCode: "frase",
+    stageTitle: "Copiar frase",
+    level: "B1",
+    target: "Я пишу слово «зима».",
+    word: "зима",
+    translation: "inverno",
+    sound: "z",
+    prompt: "Copiar frase: pratique З з em letra cursiva. Copie uma frase curta sem interromper o ritmo.",
+    objective: "Aplicar a letra em contexto.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 286,
+    letterPosition: 9,
+    upper: "З",
+    letter: "з",
+    mode: "cursive",
+    stageNumber: 14,
+    stageCode: "ditado",
+    stageTitle: "Escrever por ditado",
+    level: "B1",
+    target: "зима",
+    word: "зима",
+    translation: "inverno",
+    sound: "z",
+    prompt: "Escrever por ditado: pratique З з em letra cursiva. Ouça o modelo e escreva sem olhar; depois compare.",
+    objective: "Recuperar a grafia pela memória.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 287,
+    letterPosition: 9,
+    upper: "З",
+    letter: "з",
+    mode: "cursive",
+    stageNumber: 15,
+    stageCode: "fluencia",
+    stageTitle: "Treino de fluência",
+    level: "B2",
+    target: "зима",
+    word: "зима",
+    translation: "inverno",
+    sound: "z",
+    prompt: "Treino de fluência: pratique З з em letra cursiva. Escreva com tempo controlado sem sacrificar clareza.",
+    objective: "Ganhar velocidade com legibilidade.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 288,
+    letterPosition: 9,
+    upper: "З",
+    letter: "з",
+    mode: "cursive",
+    stageNumber: 16,
+    stageCode: "producao",
+    stageTitle: "Produção livre",
+    level: "C1",
+    target: "Я пишу слово «зима».",
+    word: "зима",
+    translation: "inverno",
+    sound: "z",
+    prompt: "Produção livre: pratique З з em letra cursiva. Crie uma frase curta usando a palavra-modelo.",
+    objective: "Usar a escrita de maneira independente.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 289,
+    letterPosition: 10,
+    upper: "И",
+    letter: "и",
+    mode: "print",
+    stageNumber: 1,
+    stageCode: "observacao",
+    stageTitle: "Observar proporções",
+    level: "A1",
+    target: "иииии",
+    word: "имя",
+    translation: "nome",
+    sound: "i",
+    prompt: "Observar proporções: pratique И и em letra de forma. Compare altura, largura, inclinação e posição na linha.",
+    objective: "Reconhecer a forma antes de escrever.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 290,
+    letterPosition: 10,
+    upper: "И",
+    letter: "и",
+    mode: "print",
+    stageNumber: 2,
+    stageCode: "movimento_ar",
+    stageTitle: "Desenhar no ar",
+    level: "A1",
+    target: "иииии",
+    word: "имя",
+    translation: "nome",
+    sound: "i",
+    prompt: "Desenhar no ar: pratique И и em letra de forma. Faça o movimento amplo com o braço antes de usar o lápis.",
+    objective: "Memorizar a direção geral do traço.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 291,
+    letterPosition: 10,
+    upper: "И",
+    letter: "и",
+    mode: "print",
+    stageNumber: 3,
+    stageCode: "maiuscula_guiada",
+    stageTitle: "Traçar maiúscula",
+    level: "A1",
+    target: "ИИИИИ",
+    word: "имя",
+    translation: "nome",
+    sound: "i",
+    prompt: "Traçar maiúscula: pratique И и em letra de forma. Passe sobre o modelo maiúsculo sem acelerar.",
+    objective: "Controlar início, direção e encerramento.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 292,
+    letterPosition: 10,
+    upper: "И",
+    letter: "и",
+    mode: "print",
+    stageNumber: 4,
+    stageCode: "minuscula_guiada",
+    stageTitle: "Traçar minúscula",
+    level: "A1",
+    target: "иииии",
+    word: "имя",
+    translation: "nome",
+    sound: "i",
+    prompt: "Traçar minúscula: pratique И и em letra de forma. Passe sobre o modelo minúsculo mantendo a altura.",
+    objective: "Dominar a forma usada dentro das palavras.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 293,
+    letterPosition: 10,
+    upper: "И",
+    letter: "и",
+    mode: "print",
+    stageNumber: 5,
+    stageCode: "copia_isolada",
+    stageTitle: "Copiar isoladamente",
+    level: "A1",
+    target: "иииии",
+    word: "имя",
+    translation: "nome",
+    sound: "i",
+    prompt: "Copiar isoladamente: pratique И и em letra de forma. Copie a letra cinco vezes ao lado do modelo.",
+    objective: "Manter tamanho e espaçamento consistentes.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 294,
+    letterPosition: 10,
+    upper: "И",
+    letter: "и",
+    mode: "print",
+    stageNumber: 6,
+    stageCode: "ritmo",
+    stageTitle: "Criar ritmo",
+    level: "A2",
+    target: "ииии ииии ииии",
+    word: "имя",
+    translation: "nome",
+    sound: "i",
+    prompt: "Criar ritmo: pratique И и em letra de forma. Escreva uma linha contínua com intervalos regulares.",
+    objective: "Automatizar o movimento sem perder legibilidade.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 295,
+    letterPosition: 10,
+    upper: "И",
+    letter: "и",
+    mode: "print",
+    stageNumber: 7,
+    stageCode: "ligacao_a",
+    stageTitle: "Ligar com а",
+    level: "A2",
+    target: "иа аи",
+    word: "имя",
+    translation: "nome",
+    sound: "i",
+    prompt: "Ligar com а: pratique И и em letra de forma. Pratique a ligação de entrada e saída com а.",
+    objective: "Aprender uma conexão frequente.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 296,
+    letterPosition: 10,
+    upper: "И",
+    letter: "и",
+    mode: "print",
+    stageNumber: 8,
+    stageCode: "ligacao_o",
+    stageTitle: "Ligar com о",
+    level: "A2",
+    target: "ио ои",
+    word: "имя",
+    translation: "nome",
+    sound: "i",
+    prompt: "Ligar com о: pratique И и em letra de forma. Pratique a ligação de entrada e saída com о.",
+    objective: "Evitar que as letras se encostem demais.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 297,
+    letterPosition: 10,
+    upper: "И",
+    letter: "и",
+    mode: "print",
+    stageNumber: 9,
+    stageCode: "ligacao_i",
+    stageTitle: "Ligar com и",
+    level: "A2",
+    target: "ии ии",
+    word: "имя",
+    translation: "nome",
+    sound: "i",
+    prompt: "Ligar com и: pratique И и em letra de forma. Pratique a ligação de entrada e saída com и.",
+    objective: "Manter o fluxo da cursiva.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 298,
+    letterPosition: 10,
+    upper: "И",
+    letter: "и",
+    mode: "print",
+    stageNumber: 10,
+    stageCode: "ligacao_m",
+    stageTitle: "Ligar com м",
+    level: "A2",
+    target: "им ми",
+    word: "имя",
+    translation: "nome",
+    sound: "i",
+    prompt: "Ligar com м: pratique И и em letra de forma. Pratique a ligação de entrada e saída com м.",
+    objective: "Diferenciar arcos e hastes semelhantes.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 299,
+    letterPosition: 10,
+    upper: "И",
+    letter: "и",
+    mode: "print",
+    stageNumber: 11,
+    stageCode: "silaba",
+    stageTitle: "Copiar sílabas",
+    level: "A2",
+    target: "иа ио иу ии",
+    word: "имя",
+    translation: "nome",
+    sound: "i",
+    prompt: "Copiar sílabas: pratique И и em letra de forma. Copie sílabas curtas e leia em voz alta.",
+    objective: "Unir escrita, leitura e som.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 300,
+    letterPosition: 10,
+    upper: "И",
+    letter: "и",
+    mode: "print",
+    stageNumber: 12,
+    stageCode: "palavra",
+    stageTitle: "Copiar palavra",
+    level: "B1",
+    target: "имя",
+    word: "имя",
+    translation: "nome",
+    sound: "i",
+    prompt: "Copiar palavra: pratique И и em letra de forma. Copie a palavra-modelo e confira cada ligação.",
+    objective: "Aplicar a letra em vocabulário real.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 301,
+    letterPosition: 10,
+    upper: "И",
+    letter: "и",
+    mode: "print",
+    stageNumber: 13,
+    stageCode: "frase",
+    stageTitle: "Copiar frase",
+    level: "B1",
+    target: "Я пишу слово «имя».",
+    word: "имя",
+    translation: "nome",
+    sound: "i",
+    prompt: "Copiar frase: pratique И и em letra de forma. Copie uma frase curta sem interromper o ritmo.",
+    objective: "Aplicar a letra em contexto.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 302,
+    letterPosition: 10,
+    upper: "И",
+    letter: "и",
+    mode: "print",
+    stageNumber: 14,
+    stageCode: "ditado",
+    stageTitle: "Escrever por ditado",
+    level: "B1",
+    target: "имя",
+    word: "имя",
+    translation: "nome",
+    sound: "i",
+    prompt: "Escrever por ditado: pratique И и em letra de forma. Ouça o modelo e escreva sem olhar; depois compare.",
+    objective: "Recuperar a grafia pela memória.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 303,
+    letterPosition: 10,
+    upper: "И",
+    letter: "и",
+    mode: "print",
+    stageNumber: 15,
+    stageCode: "fluencia",
+    stageTitle: "Treino de fluência",
+    level: "B2",
+    target: "имя",
+    word: "имя",
+    translation: "nome",
+    sound: "i",
+    prompt: "Treino de fluência: pratique И и em letra de forma. Escreva com tempo controlado sem sacrificar clareza.",
+    objective: "Ganhar velocidade com legibilidade.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 304,
+    letterPosition: 10,
+    upper: "И",
+    letter: "и",
+    mode: "print",
+    stageNumber: 16,
+    stageCode: "producao",
+    stageTitle: "Produção livre",
+    level: "C1",
+    target: "Я пишу слово «имя».",
+    word: "имя",
+    translation: "nome",
+    sound: "i",
+    prompt: "Produção livre: pratique И и em letra de forma. Crie uma frase curta usando a palavra-modelo.",
+    objective: "Usar a escrita de maneira independente.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 305,
+    letterPosition: 10,
+    upper: "И",
+    letter: "и",
+    mode: "cursive",
+    stageNumber: 1,
+    stageCode: "observacao",
+    stageTitle: "Observar proporções",
+    level: "A1",
+    target: "иииии",
+    word: "имя",
+    translation: "nome",
+    sound: "i",
+    prompt: "Observar proporções: pratique И и em letra cursiva. Compare altura, largura, inclinação e posição na linha.",
+    objective: "Reconhecer a forma antes de escrever.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 306,
+    letterPosition: 10,
+    upper: "И",
+    letter: "и",
+    mode: "cursive",
+    stageNumber: 2,
+    stageCode: "movimento_ar",
+    stageTitle: "Desenhar no ar",
+    level: "A1",
+    target: "иииии",
+    word: "имя",
+    translation: "nome",
+    sound: "i",
+    prompt: "Desenhar no ar: pratique И и em letra cursiva. Faça o movimento amplo com o braço antes de usar o lápis.",
+    objective: "Memorizar a direção geral do traço.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 307,
+    letterPosition: 10,
+    upper: "И",
+    letter: "и",
+    mode: "cursive",
+    stageNumber: 3,
+    stageCode: "maiuscula_guiada",
+    stageTitle: "Traçar maiúscula",
+    level: "A1",
+    target: "ИИИИИ",
+    word: "имя",
+    translation: "nome",
+    sound: "i",
+    prompt: "Traçar maiúscula: pratique И и em letra cursiva. Passe sobre o modelo maiúsculo sem acelerar.",
+    objective: "Controlar início, direção e encerramento.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 308,
+    letterPosition: 10,
+    upper: "И",
+    letter: "и",
+    mode: "cursive",
+    stageNumber: 4,
+    stageCode: "minuscula_guiada",
+    stageTitle: "Traçar minúscula",
+    level: "A1",
+    target: "иииии",
+    word: "имя",
+    translation: "nome",
+    sound: "i",
+    prompt: "Traçar minúscula: pratique И и em letra cursiva. Passe sobre o modelo minúsculo mantendo a altura.",
+    objective: "Dominar a forma usada dentro das palavras.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 309,
+    letterPosition: 10,
+    upper: "И",
+    letter: "и",
+    mode: "cursive",
+    stageNumber: 5,
+    stageCode: "copia_isolada",
+    stageTitle: "Copiar isoladamente",
+    level: "A1",
+    target: "иииии",
+    word: "имя",
+    translation: "nome",
+    sound: "i",
+    prompt: "Copiar isoladamente: pratique И и em letra cursiva. Copie a letra cinco vezes ao lado do modelo.",
+    objective: "Manter tamanho e espaçamento consistentes.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 310,
+    letterPosition: 10,
+    upper: "И",
+    letter: "и",
+    mode: "cursive",
+    stageNumber: 6,
+    stageCode: "ritmo",
+    stageTitle: "Criar ritmo",
+    level: "A2",
+    target: "ииии ииии ииии",
+    word: "имя",
+    translation: "nome",
+    sound: "i",
+    prompt: "Criar ritmo: pratique И и em letra cursiva. Escreva uma linha contínua com intervalos regulares.",
+    objective: "Automatizar o movimento sem perder legibilidade.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 311,
+    letterPosition: 10,
+    upper: "И",
+    letter: "и",
+    mode: "cursive",
+    stageNumber: 7,
+    stageCode: "ligacao_a",
+    stageTitle: "Ligar com а",
+    level: "A2",
+    target: "иа аи",
+    word: "имя",
+    translation: "nome",
+    sound: "i",
+    prompt: "Ligar com а: pratique И и em letra cursiva. Pratique a ligação de entrada e saída com а.",
+    objective: "Aprender uma conexão frequente.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 312,
+    letterPosition: 10,
+    upper: "И",
+    letter: "и",
+    mode: "cursive",
+    stageNumber: 8,
+    stageCode: "ligacao_o",
+    stageTitle: "Ligar com о",
+    level: "A2",
+    target: "ио ои",
+    word: "имя",
+    translation: "nome",
+    sound: "i",
+    prompt: "Ligar com о: pratique И и em letra cursiva. Pratique a ligação de entrada e saída com о.",
+    objective: "Evitar que as letras se encostem demais.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 313,
+    letterPosition: 10,
+    upper: "И",
+    letter: "и",
+    mode: "cursive",
+    stageNumber: 9,
+    stageCode: "ligacao_i",
+    stageTitle: "Ligar com и",
+    level: "A2",
+    target: "ии ии",
+    word: "имя",
+    translation: "nome",
+    sound: "i",
+    prompt: "Ligar com и: pratique И и em letra cursiva. Pratique a ligação de entrada e saída com и.",
+    objective: "Manter o fluxo da cursiva.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 314,
+    letterPosition: 10,
+    upper: "И",
+    letter: "и",
+    mode: "cursive",
+    stageNumber: 10,
+    stageCode: "ligacao_m",
+    stageTitle: "Ligar com м",
+    level: "A2",
+    target: "им ми",
+    word: "имя",
+    translation: "nome",
+    sound: "i",
+    prompt: "Ligar com м: pratique И и em letra cursiva. Pratique a ligação de entrada e saída com м.",
+    objective: "Diferenciar arcos e hastes semelhantes.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 315,
+    letterPosition: 10,
+    upper: "И",
+    letter: "и",
+    mode: "cursive",
+    stageNumber: 11,
+    stageCode: "silaba",
+    stageTitle: "Copiar sílabas",
+    level: "A2",
+    target: "иа ио иу ии",
+    word: "имя",
+    translation: "nome",
+    sound: "i",
+    prompt: "Copiar sílabas: pratique И и em letra cursiva. Copie sílabas curtas e leia em voz alta.",
+    objective: "Unir escrita, leitura e som.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 316,
+    letterPosition: 10,
+    upper: "И",
+    letter: "и",
+    mode: "cursive",
+    stageNumber: 12,
+    stageCode: "palavra",
+    stageTitle: "Copiar palavra",
+    level: "B1",
+    target: "имя",
+    word: "имя",
+    translation: "nome",
+    sound: "i",
+    prompt: "Copiar palavra: pratique И и em letra cursiva. Copie a palavra-modelo e confira cada ligação.",
+    objective: "Aplicar a letra em vocabulário real.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 317,
+    letterPosition: 10,
+    upper: "И",
+    letter: "и",
+    mode: "cursive",
+    stageNumber: 13,
+    stageCode: "frase",
+    stageTitle: "Copiar frase",
+    level: "B1",
+    target: "Я пишу слово «имя».",
+    word: "имя",
+    translation: "nome",
+    sound: "i",
+    prompt: "Copiar frase: pratique И и em letra cursiva. Copie uma frase curta sem interromper o ritmo.",
+    objective: "Aplicar a letra em contexto.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 318,
+    letterPosition: 10,
+    upper: "И",
+    letter: "и",
+    mode: "cursive",
+    stageNumber: 14,
+    stageCode: "ditado",
+    stageTitle: "Escrever por ditado",
+    level: "B1",
+    target: "имя",
+    word: "имя",
+    translation: "nome",
+    sound: "i",
+    prompt: "Escrever por ditado: pratique И и em letra cursiva. Ouça o modelo e escreva sem olhar; depois compare.",
+    objective: "Recuperar a grafia pela memória.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 319,
+    letterPosition: 10,
+    upper: "И",
+    letter: "и",
+    mode: "cursive",
+    stageNumber: 15,
+    stageCode: "fluencia",
+    stageTitle: "Treino de fluência",
+    level: "B2",
+    target: "имя",
+    word: "имя",
+    translation: "nome",
+    sound: "i",
+    prompt: "Treino de fluência: pratique И и em letra cursiva. Escreva com tempo controlado sem sacrificar clareza.",
+    objective: "Ganhar velocidade com legibilidade.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 320,
+    letterPosition: 10,
+    upper: "И",
+    letter: "и",
+    mode: "cursive",
+    stageNumber: 16,
+    stageCode: "producao",
+    stageTitle: "Produção livre",
+    level: "C1",
+    target: "Я пишу слово «имя».",
+    word: "имя",
+    translation: "nome",
+    sound: "i",
+    prompt: "Produção livre: pratique И и em letra cursiva. Crie uma frase curta usando a palavra-modelo.",
+    objective: "Usar a escrita de maneira independente.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 321,
+    letterPosition: 11,
+    upper: "Й",
+    letter: "й",
+    mode: "print",
+    stageNumber: 1,
+    stageCode: "observacao",
+    stageTitle: "Observar proporções",
+    level: "A1",
+    target: "ййййй",
+    word: "йога",
+    translation: "ioga",
+    sound: "i breve",
+    prompt: "Observar proporções: pratique Й й em letra de forma. Compare altura, largura, inclinação e posição na linha.",
+    objective: "Reconhecer a forma antes de escrever.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 322,
+    letterPosition: 11,
+    upper: "Й",
+    letter: "й",
+    mode: "print",
+    stageNumber: 2,
+    stageCode: "movimento_ar",
+    stageTitle: "Desenhar no ar",
+    level: "A1",
+    target: "ййййй",
+    word: "йога",
+    translation: "ioga",
+    sound: "i breve",
+    prompt: "Desenhar no ar: pratique Й й em letra de forma. Faça o movimento amplo com o braço antes de usar o lápis.",
+    objective: "Memorizar a direção geral do traço.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 323,
+    letterPosition: 11,
+    upper: "Й",
+    letter: "й",
+    mode: "print",
+    stageNumber: 3,
+    stageCode: "maiuscula_guiada",
+    stageTitle: "Traçar maiúscula",
+    level: "A1",
+    target: "ЙЙЙЙЙ",
+    word: "йога",
+    translation: "ioga",
+    sound: "i breve",
+    prompt: "Traçar maiúscula: pratique Й й em letra de forma. Passe sobre o modelo maiúsculo sem acelerar.",
+    objective: "Controlar início, direção e encerramento.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 324,
+    letterPosition: 11,
+    upper: "Й",
+    letter: "й",
+    mode: "print",
+    stageNumber: 4,
+    stageCode: "minuscula_guiada",
+    stageTitle: "Traçar minúscula",
+    level: "A1",
+    target: "ййййй",
+    word: "йога",
+    translation: "ioga",
+    sound: "i breve",
+    prompt: "Traçar minúscula: pratique Й й em letra de forma. Passe sobre o modelo minúsculo mantendo a altura.",
+    objective: "Dominar a forma usada dentro das palavras.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 325,
+    letterPosition: 11,
+    upper: "Й",
+    letter: "й",
+    mode: "print",
+    stageNumber: 5,
+    stageCode: "copia_isolada",
+    stageTitle: "Copiar isoladamente",
+    level: "A1",
+    target: "ййййй",
+    word: "йога",
+    translation: "ioga",
+    sound: "i breve",
+    prompt: "Copiar isoladamente: pratique Й й em letra de forma. Copie a letra cinco vezes ao lado do modelo.",
+    objective: "Manter tamanho e espaçamento consistentes.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 326,
+    letterPosition: 11,
+    upper: "Й",
+    letter: "й",
+    mode: "print",
+    stageNumber: 6,
+    stageCode: "ritmo",
+    stageTitle: "Criar ritmo",
+    level: "A2",
+    target: "йййй йййй йййй",
+    word: "йога",
+    translation: "ioga",
+    sound: "i breve",
+    prompt: "Criar ritmo: pratique Й й em letra de forma. Escreva uma linha contínua com intervalos regulares.",
+    objective: "Automatizar o movimento sem perder legibilidade.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 327,
+    letterPosition: 11,
+    upper: "Й",
+    letter: "й",
+    mode: "print",
+    stageNumber: 7,
+    stageCode: "ligacao_a",
+    stageTitle: "Ligar com а",
+    level: "A2",
+    target: "йа ай",
+    word: "йога",
+    translation: "ioga",
+    sound: "i breve",
+    prompt: "Ligar com а: pratique Й й em letra de forma. Pratique a ligação de entrada e saída com а.",
+    objective: "Aprender uma conexão frequente.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 328,
+    letterPosition: 11,
+    upper: "Й",
+    letter: "й",
+    mode: "print",
+    stageNumber: 8,
+    stageCode: "ligacao_o",
+    stageTitle: "Ligar com о",
+    level: "A2",
+    target: "йо ой",
+    word: "йога",
+    translation: "ioga",
+    sound: "i breve",
+    prompt: "Ligar com о: pratique Й й em letra de forma. Pratique a ligação de entrada e saída com о.",
+    objective: "Evitar que as letras se encostem demais.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 329,
+    letterPosition: 11,
+    upper: "Й",
+    letter: "й",
+    mode: "print",
+    stageNumber: 9,
+    stageCode: "ligacao_i",
+    stageTitle: "Ligar com и",
+    level: "A2",
+    target: "йи ий",
+    word: "йога",
+    translation: "ioga",
+    sound: "i breve",
+    prompt: "Ligar com и: pratique Й й em letra de forma. Pratique a ligação de entrada e saída com и.",
+    objective: "Manter o fluxo da cursiva.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 330,
+    letterPosition: 11,
+    upper: "Й",
+    letter: "й",
+    mode: "print",
+    stageNumber: 10,
+    stageCode: "ligacao_m",
+    stageTitle: "Ligar com м",
+    level: "A2",
+    target: "йм мй",
+    word: "йога",
+    translation: "ioga",
+    sound: "i breve",
+    prompt: "Ligar com м: pratique Й й em letra de forma. Pratique a ligação de entrada e saída com м.",
+    objective: "Diferenciar arcos e hastes semelhantes.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 331,
+    letterPosition: 11,
+    upper: "Й",
+    letter: "й",
+    mode: "print",
+    stageNumber: 11,
+    stageCode: "silaba",
+    stageTitle: "Copiar sílabas",
+    level: "A2",
+    target: "йа йо йу йи",
+    word: "йога",
+    translation: "ioga",
+    sound: "i breve",
+    prompt: "Copiar sílabas: pratique Й й em letra de forma. Copie sílabas curtas e leia em voz alta.",
+    objective: "Unir escrita, leitura e som.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 332,
+    letterPosition: 11,
+    upper: "Й",
+    letter: "й",
+    mode: "print",
+    stageNumber: 12,
+    stageCode: "palavra",
+    stageTitle: "Copiar palavra",
+    level: "B1",
+    target: "йога",
+    word: "йога",
+    translation: "ioga",
+    sound: "i breve",
+    prompt: "Copiar palavra: pratique Й й em letra de forma. Copie a palavra-modelo e confira cada ligação.",
+    objective: "Aplicar a letra em vocabulário real.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 333,
+    letterPosition: 11,
+    upper: "Й",
+    letter: "й",
+    mode: "print",
+    stageNumber: 13,
+    stageCode: "frase",
+    stageTitle: "Copiar frase",
+    level: "B1",
+    target: "Я пишу слово «йога».",
+    word: "йога",
+    translation: "ioga",
+    sound: "i breve",
+    prompt: "Copiar frase: pratique Й й em letra de forma. Copie uma frase curta sem interromper o ritmo.",
+    objective: "Aplicar a letra em contexto.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 334,
+    letterPosition: 11,
+    upper: "Й",
+    letter: "й",
+    mode: "print",
+    stageNumber: 14,
+    stageCode: "ditado",
+    stageTitle: "Escrever por ditado",
+    level: "B1",
+    target: "йога",
+    word: "йога",
+    translation: "ioga",
+    sound: "i breve",
+    prompt: "Escrever por ditado: pratique Й й em letra de forma. Ouça o modelo e escreva sem olhar; depois compare.",
+    objective: "Recuperar a grafia pela memória.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 335,
+    letterPosition: 11,
+    upper: "Й",
+    letter: "й",
+    mode: "print",
+    stageNumber: 15,
+    stageCode: "fluencia",
+    stageTitle: "Treino de fluência",
+    level: "B2",
+    target: "йога",
+    word: "йога",
+    translation: "ioga",
+    sound: "i breve",
+    prompt: "Treino de fluência: pratique Й й em letra de forma. Escreva com tempo controlado sem sacrificar clareza.",
+    objective: "Ganhar velocidade com legibilidade.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 336,
+    letterPosition: 11,
+    upper: "Й",
+    letter: "й",
+    mode: "print",
+    stageNumber: 16,
+    stageCode: "producao",
+    stageTitle: "Produção livre",
+    level: "C1",
+    target: "Я пишу слово «йога».",
+    word: "йога",
+    translation: "ioga",
+    sound: "i breve",
+    prompt: "Produção livre: pratique Й й em letra de forma. Crie uma frase curta usando a palavra-modelo.",
+    objective: "Usar a escrita de maneira independente.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 337,
+    letterPosition: 11,
+    upper: "Й",
+    letter: "й",
+    mode: "cursive",
+    stageNumber: 1,
+    stageCode: "observacao",
+    stageTitle: "Observar proporções",
+    level: "A1",
+    target: "ййййй",
+    word: "йога",
+    translation: "ioga",
+    sound: "i breve",
+    prompt: "Observar proporções: pratique Й й em letra cursiva. Compare altura, largura, inclinação e posição na linha.",
+    objective: "Reconhecer a forma antes de escrever.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 338,
+    letterPosition: 11,
+    upper: "Й",
+    letter: "й",
+    mode: "cursive",
+    stageNumber: 2,
+    stageCode: "movimento_ar",
+    stageTitle: "Desenhar no ar",
+    level: "A1",
+    target: "ййййй",
+    word: "йога",
+    translation: "ioga",
+    sound: "i breve",
+    prompt: "Desenhar no ar: pratique Й й em letra cursiva. Faça o movimento amplo com o braço antes de usar o lápis.",
+    objective: "Memorizar a direção geral do traço.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 339,
+    letterPosition: 11,
+    upper: "Й",
+    letter: "й",
+    mode: "cursive",
+    stageNumber: 3,
+    stageCode: "maiuscula_guiada",
+    stageTitle: "Traçar maiúscula",
+    level: "A1",
+    target: "ЙЙЙЙЙ",
+    word: "йога",
+    translation: "ioga",
+    sound: "i breve",
+    prompt: "Traçar maiúscula: pratique Й й em letra cursiva. Passe sobre o modelo maiúsculo sem acelerar.",
+    objective: "Controlar início, direção e encerramento.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 340,
+    letterPosition: 11,
+    upper: "Й",
+    letter: "й",
+    mode: "cursive",
+    stageNumber: 4,
+    stageCode: "minuscula_guiada",
+    stageTitle: "Traçar minúscula",
+    level: "A1",
+    target: "ййййй",
+    word: "йога",
+    translation: "ioga",
+    sound: "i breve",
+    prompt: "Traçar minúscula: pratique Й й em letra cursiva. Passe sobre o modelo minúsculo mantendo a altura.",
+    objective: "Dominar a forma usada dentro das palavras.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 341,
+    letterPosition: 11,
+    upper: "Й",
+    letter: "й",
+    mode: "cursive",
+    stageNumber: 5,
+    stageCode: "copia_isolada",
+    stageTitle: "Copiar isoladamente",
+    level: "A1",
+    target: "ййййй",
+    word: "йога",
+    translation: "ioga",
+    sound: "i breve",
+    prompt: "Copiar isoladamente: pratique Й й em letra cursiva. Copie a letra cinco vezes ao lado do modelo.",
+    objective: "Manter tamanho e espaçamento consistentes.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 342,
+    letterPosition: 11,
+    upper: "Й",
+    letter: "й",
+    mode: "cursive",
+    stageNumber: 6,
+    stageCode: "ritmo",
+    stageTitle: "Criar ritmo",
+    level: "A2",
+    target: "йййй йййй йййй",
+    word: "йога",
+    translation: "ioga",
+    sound: "i breve",
+    prompt: "Criar ritmo: pratique Й й em letra cursiva. Escreva uma linha contínua com intervalos regulares.",
+    objective: "Automatizar o movimento sem perder legibilidade.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 343,
+    letterPosition: 11,
+    upper: "Й",
+    letter: "й",
+    mode: "cursive",
+    stageNumber: 7,
+    stageCode: "ligacao_a",
+    stageTitle: "Ligar com а",
+    level: "A2",
+    target: "йа ай",
+    word: "йога",
+    translation: "ioga",
+    sound: "i breve",
+    prompt: "Ligar com а: pratique Й й em letra cursiva. Pratique a ligação de entrada e saída com а.",
+    objective: "Aprender uma conexão frequente.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 344,
+    letterPosition: 11,
+    upper: "Й",
+    letter: "й",
+    mode: "cursive",
+    stageNumber: 8,
+    stageCode: "ligacao_o",
+    stageTitle: "Ligar com о",
+    level: "A2",
+    target: "йо ой",
+    word: "йога",
+    translation: "ioga",
+    sound: "i breve",
+    prompt: "Ligar com о: pratique Й й em letra cursiva. Pratique a ligação de entrada e saída com о.",
+    objective: "Evitar que as letras se encostem demais.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 345,
+    letterPosition: 11,
+    upper: "Й",
+    letter: "й",
+    mode: "cursive",
+    stageNumber: 9,
+    stageCode: "ligacao_i",
+    stageTitle: "Ligar com и",
+    level: "A2",
+    target: "йи ий",
+    word: "йога",
+    translation: "ioga",
+    sound: "i breve",
+    prompt: "Ligar com и: pratique Й й em letra cursiva. Pratique a ligação de entrada e saída com и.",
+    objective: "Manter o fluxo da cursiva.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 346,
+    letterPosition: 11,
+    upper: "Й",
+    letter: "й",
+    mode: "cursive",
+    stageNumber: 10,
+    stageCode: "ligacao_m",
+    stageTitle: "Ligar com м",
+    level: "A2",
+    target: "йм мй",
+    word: "йога",
+    translation: "ioga",
+    sound: "i breve",
+    prompt: "Ligar com м: pratique Й й em letra cursiva. Pratique a ligação de entrada e saída com м.",
+    objective: "Diferenciar arcos e hastes semelhantes.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 347,
+    letterPosition: 11,
+    upper: "Й",
+    letter: "й",
+    mode: "cursive",
+    stageNumber: 11,
+    stageCode: "silaba",
+    stageTitle: "Copiar sílabas",
+    level: "A2",
+    target: "йа йо йу йи",
+    word: "йога",
+    translation: "ioga",
+    sound: "i breve",
+    prompt: "Copiar sílabas: pratique Й й em letra cursiva. Copie sílabas curtas e leia em voz alta.",
+    objective: "Unir escrita, leitura e som.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 348,
+    letterPosition: 11,
+    upper: "Й",
+    letter: "й",
+    mode: "cursive",
+    stageNumber: 12,
+    stageCode: "palavra",
+    stageTitle: "Copiar palavra",
+    level: "B1",
+    target: "йога",
+    word: "йога",
+    translation: "ioga",
+    sound: "i breve",
+    prompt: "Copiar palavra: pratique Й й em letra cursiva. Copie a palavra-modelo e confira cada ligação.",
+    objective: "Aplicar a letra em vocabulário real.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 349,
+    letterPosition: 11,
+    upper: "Й",
+    letter: "й",
+    mode: "cursive",
+    stageNumber: 13,
+    stageCode: "frase",
+    stageTitle: "Copiar frase",
+    level: "B1",
+    target: "Я пишу слово «йога».",
+    word: "йога",
+    translation: "ioga",
+    sound: "i breve",
+    prompt: "Copiar frase: pratique Й й em letra cursiva. Copie uma frase curta sem interromper o ritmo.",
+    objective: "Aplicar a letra em contexto.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 350,
+    letterPosition: 11,
+    upper: "Й",
+    letter: "й",
+    mode: "cursive",
+    stageNumber: 14,
+    stageCode: "ditado",
+    stageTitle: "Escrever por ditado",
+    level: "B1",
+    target: "йога",
+    word: "йога",
+    translation: "ioga",
+    sound: "i breve",
+    prompt: "Escrever por ditado: pratique Й й em letra cursiva. Ouça o modelo e escreva sem olhar; depois compare.",
+    objective: "Recuperar a grafia pela memória.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 351,
+    letterPosition: 11,
+    upper: "Й",
+    letter: "й",
+    mode: "cursive",
+    stageNumber: 15,
+    stageCode: "fluencia",
+    stageTitle: "Treino de fluência",
+    level: "B2",
+    target: "йога",
+    word: "йога",
+    translation: "ioga",
+    sound: "i breve",
+    prompt: "Treino de fluência: pratique Й й em letra cursiva. Escreva com tempo controlado sem sacrificar clareza.",
+    objective: "Ganhar velocidade com legibilidade.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 352,
+    letterPosition: 11,
+    upper: "Й",
+    letter: "й",
+    mode: "cursive",
+    stageNumber: 16,
+    stageCode: "producao",
+    stageTitle: "Produção livre",
+    level: "C1",
+    target: "Я пишу слово «йога».",
+    word: "йога",
+    translation: "ioga",
+    sound: "i breve",
+    prompt: "Produção livre: pratique Й й em letra cursiva. Crie uma frase curta usando a palavra-modelo.",
+    objective: "Usar a escrita de maneira independente.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 353,
+    letterPosition: 12,
+    upper: "К",
+    letter: "к",
+    mode: "print",
+    stageNumber: 1,
+    stageCode: "observacao",
+    stageTitle: "Observar proporções",
+    level: "A1",
+    target: "ккккк",
+    word: "книга",
+    translation: "livro",
+    sound: "k",
+    prompt: "Observar proporções: pratique К к em letra de forma. Compare altura, largura, inclinação e posição na linha.",
+    objective: "Reconhecer a forma antes de escrever.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 354,
+    letterPosition: 12,
+    upper: "К",
+    letter: "к",
+    mode: "print",
+    stageNumber: 2,
+    stageCode: "movimento_ar",
+    stageTitle: "Desenhar no ar",
+    level: "A1",
+    target: "ккккк",
+    word: "книга",
+    translation: "livro",
+    sound: "k",
+    prompt: "Desenhar no ar: pratique К к em letra de forma. Faça o movimento amplo com o braço antes de usar o lápis.",
+    objective: "Memorizar a direção geral do traço.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 355,
+    letterPosition: 12,
+    upper: "К",
+    letter: "к",
+    mode: "print",
+    stageNumber: 3,
+    stageCode: "maiuscula_guiada",
+    stageTitle: "Traçar maiúscula",
+    level: "A1",
+    target: "ККККК",
+    word: "книга",
+    translation: "livro",
+    sound: "k",
+    prompt: "Traçar maiúscula: pratique К к em letra de forma. Passe sobre o modelo maiúsculo sem acelerar.",
+    objective: "Controlar início, direção e encerramento.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 356,
+    letterPosition: 12,
+    upper: "К",
+    letter: "к",
+    mode: "print",
+    stageNumber: 4,
+    stageCode: "minuscula_guiada",
+    stageTitle: "Traçar minúscula",
+    level: "A1",
+    target: "ккккк",
+    word: "книга",
+    translation: "livro",
+    sound: "k",
+    prompt: "Traçar minúscula: pratique К к em letra de forma. Passe sobre o modelo minúsculo mantendo a altura.",
+    objective: "Dominar a forma usada dentro das palavras.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 357,
+    letterPosition: 12,
+    upper: "К",
+    letter: "к",
+    mode: "print",
+    stageNumber: 5,
+    stageCode: "copia_isolada",
+    stageTitle: "Copiar isoladamente",
+    level: "A1",
+    target: "ккккк",
+    word: "книга",
+    translation: "livro",
+    sound: "k",
+    prompt: "Copiar isoladamente: pratique К к em letra de forma. Copie a letra cinco vezes ao lado do modelo.",
+    objective: "Manter tamanho e espaçamento consistentes.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 358,
+    letterPosition: 12,
+    upper: "К",
+    letter: "к",
+    mode: "print",
+    stageNumber: 6,
+    stageCode: "ritmo",
+    stageTitle: "Criar ritmo",
+    level: "A2",
+    target: "кккк кккк кккк",
+    word: "книга",
+    translation: "livro",
+    sound: "k",
+    prompt: "Criar ritmo: pratique К к em letra de forma. Escreva uma linha contínua com intervalos regulares.",
+    objective: "Automatizar o movimento sem perder legibilidade.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 359,
+    letterPosition: 12,
+    upper: "К",
+    letter: "к",
+    mode: "print",
+    stageNumber: 7,
+    stageCode: "ligacao_a",
+    stageTitle: "Ligar com а",
+    level: "A2",
+    target: "ка ак",
+    word: "книга",
+    translation: "livro",
+    sound: "k",
+    prompt: "Ligar com а: pratique К к em letra de forma. Pratique a ligação de entrada e saída com а.",
+    objective: "Aprender uma conexão frequente.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 360,
+    letterPosition: 12,
+    upper: "К",
+    letter: "к",
+    mode: "print",
+    stageNumber: 8,
+    stageCode: "ligacao_o",
+    stageTitle: "Ligar com о",
+    level: "A2",
+    target: "ко ок",
+    word: "книга",
+    translation: "livro",
+    sound: "k",
+    prompt: "Ligar com о: pratique К к em letra de forma. Pratique a ligação de entrada e saída com о.",
+    objective: "Evitar que as letras se encostem demais.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 361,
+    letterPosition: 12,
+    upper: "К",
+    letter: "к",
+    mode: "print",
+    stageNumber: 9,
+    stageCode: "ligacao_i",
+    stageTitle: "Ligar com и",
+    level: "A2",
+    target: "ки ик",
+    word: "книга",
+    translation: "livro",
+    sound: "k",
+    prompt: "Ligar com и: pratique К к em letra de forma. Pratique a ligação de entrada e saída com и.",
+    objective: "Manter o fluxo da cursiva.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 362,
+    letterPosition: 12,
+    upper: "К",
+    letter: "к",
+    mode: "print",
+    stageNumber: 10,
+    stageCode: "ligacao_m",
+    stageTitle: "Ligar com м",
+    level: "A2",
+    target: "км мк",
+    word: "книга",
+    translation: "livro",
+    sound: "k",
+    prompt: "Ligar com м: pratique К к em letra de forma. Pratique a ligação de entrada e saída com м.",
+    objective: "Diferenciar arcos e hastes semelhantes.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 363,
+    letterPosition: 12,
+    upper: "К",
+    letter: "к",
+    mode: "print",
+    stageNumber: 11,
+    stageCode: "silaba",
+    stageTitle: "Copiar sílabas",
+    level: "A2",
+    target: "ка ко ку ки",
+    word: "книга",
+    translation: "livro",
+    sound: "k",
+    prompt: "Copiar sílabas: pratique К к em letra de forma. Copie sílabas curtas e leia em voz alta.",
+    objective: "Unir escrita, leitura e som.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 364,
+    letterPosition: 12,
+    upper: "К",
+    letter: "к",
+    mode: "print",
+    stageNumber: 12,
+    stageCode: "palavra",
+    stageTitle: "Copiar palavra",
+    level: "B1",
+    target: "книга",
+    word: "книга",
+    translation: "livro",
+    sound: "k",
+    prompt: "Copiar palavra: pratique К к em letra de forma. Copie a palavra-modelo e confira cada ligação.",
+    objective: "Aplicar a letra em vocabulário real.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 365,
+    letterPosition: 12,
+    upper: "К",
+    letter: "к",
+    mode: "print",
+    stageNumber: 13,
+    stageCode: "frase",
+    stageTitle: "Copiar frase",
+    level: "B1",
+    target: "Я пишу слово «книга».",
+    word: "книга",
+    translation: "livro",
+    sound: "k",
+    prompt: "Copiar frase: pratique К к em letra de forma. Copie uma frase curta sem interromper o ritmo.",
+    objective: "Aplicar a letra em contexto.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 366,
+    letterPosition: 12,
+    upper: "К",
+    letter: "к",
+    mode: "print",
+    stageNumber: 14,
+    stageCode: "ditado",
+    stageTitle: "Escrever por ditado",
+    level: "B1",
+    target: "книга",
+    word: "книга",
+    translation: "livro",
+    sound: "k",
+    prompt: "Escrever por ditado: pratique К к em letra de forma. Ouça o modelo e escreva sem olhar; depois compare.",
+    objective: "Recuperar a grafia pela memória.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 367,
+    letterPosition: 12,
+    upper: "К",
+    letter: "к",
+    mode: "print",
+    stageNumber: 15,
+    stageCode: "fluencia",
+    stageTitle: "Treino de fluência",
+    level: "B2",
+    target: "книга",
+    word: "книга",
+    translation: "livro",
+    sound: "k",
+    prompt: "Treino de fluência: pratique К к em letra de forma. Escreva com tempo controlado sem sacrificar clareza.",
+    objective: "Ganhar velocidade com legibilidade.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 368,
+    letterPosition: 12,
+    upper: "К",
+    letter: "к",
+    mode: "print",
+    stageNumber: 16,
+    stageCode: "producao",
+    stageTitle: "Produção livre",
+    level: "C1",
+    target: "Я пишу слово «книга».",
+    word: "книга",
+    translation: "livro",
+    sound: "k",
+    prompt: "Produção livre: pratique К к em letra de forma. Crie uma frase curta usando a palavra-modelo.",
+    objective: "Usar a escrita de maneira independente.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 369,
+    letterPosition: 12,
+    upper: "К",
+    letter: "к",
+    mode: "cursive",
+    stageNumber: 1,
+    stageCode: "observacao",
+    stageTitle: "Observar proporções",
+    level: "A1",
+    target: "ккккк",
+    word: "книга",
+    translation: "livro",
+    sound: "k",
+    prompt: "Observar proporções: pratique К к em letra cursiva. Compare altura, largura, inclinação e posição na linha.",
+    objective: "Reconhecer a forma antes de escrever.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 370,
+    letterPosition: 12,
+    upper: "К",
+    letter: "к",
+    mode: "cursive",
+    stageNumber: 2,
+    stageCode: "movimento_ar",
+    stageTitle: "Desenhar no ar",
+    level: "A1",
+    target: "ккккк",
+    word: "книга",
+    translation: "livro",
+    sound: "k",
+    prompt: "Desenhar no ar: pratique К к em letra cursiva. Faça o movimento amplo com o braço antes de usar o lápis.",
+    objective: "Memorizar a direção geral do traço.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 371,
+    letterPosition: 12,
+    upper: "К",
+    letter: "к",
+    mode: "cursive",
+    stageNumber: 3,
+    stageCode: "maiuscula_guiada",
+    stageTitle: "Traçar maiúscula",
+    level: "A1",
+    target: "ККККК",
+    word: "книга",
+    translation: "livro",
+    sound: "k",
+    prompt: "Traçar maiúscula: pratique К к em letra cursiva. Passe sobre o modelo maiúsculo sem acelerar.",
+    objective: "Controlar início, direção e encerramento.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 372,
+    letterPosition: 12,
+    upper: "К",
+    letter: "к",
+    mode: "cursive",
+    stageNumber: 4,
+    stageCode: "minuscula_guiada",
+    stageTitle: "Traçar minúscula",
+    level: "A1",
+    target: "ккккк",
+    word: "книга",
+    translation: "livro",
+    sound: "k",
+    prompt: "Traçar minúscula: pratique К к em letra cursiva. Passe sobre o modelo minúsculo mantendo a altura.",
+    objective: "Dominar a forma usada dentro das palavras.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 373,
+    letterPosition: 12,
+    upper: "К",
+    letter: "к",
+    mode: "cursive",
+    stageNumber: 5,
+    stageCode: "copia_isolada",
+    stageTitle: "Copiar isoladamente",
+    level: "A1",
+    target: "ккккк",
+    word: "книга",
+    translation: "livro",
+    sound: "k",
+    prompt: "Copiar isoladamente: pratique К к em letra cursiva. Copie a letra cinco vezes ao lado do modelo.",
+    objective: "Manter tamanho e espaçamento consistentes.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 374,
+    letterPosition: 12,
+    upper: "К",
+    letter: "к",
+    mode: "cursive",
+    stageNumber: 6,
+    stageCode: "ritmo",
+    stageTitle: "Criar ritmo",
+    level: "A2",
+    target: "кккк кккк кккк",
+    word: "книга",
+    translation: "livro",
+    sound: "k",
+    prompt: "Criar ritmo: pratique К к em letra cursiva. Escreva uma linha contínua com intervalos regulares.",
+    objective: "Automatizar o movimento sem perder legibilidade.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 375,
+    letterPosition: 12,
+    upper: "К",
+    letter: "к",
+    mode: "cursive",
+    stageNumber: 7,
+    stageCode: "ligacao_a",
+    stageTitle: "Ligar com а",
+    level: "A2",
+    target: "ка ак",
+    word: "книга",
+    translation: "livro",
+    sound: "k",
+    prompt: "Ligar com а: pratique К к em letra cursiva. Pratique a ligação de entrada e saída com а.",
+    objective: "Aprender uma conexão frequente.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 376,
+    letterPosition: 12,
+    upper: "К",
+    letter: "к",
+    mode: "cursive",
+    stageNumber: 8,
+    stageCode: "ligacao_o",
+    stageTitle: "Ligar com о",
+    level: "A2",
+    target: "ко ок",
+    word: "книга",
+    translation: "livro",
+    sound: "k",
+    prompt: "Ligar com о: pratique К к em letra cursiva. Pratique a ligação de entrada e saída com о.",
+    objective: "Evitar que as letras se encostem demais.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 377,
+    letterPosition: 12,
+    upper: "К",
+    letter: "к",
+    mode: "cursive",
+    stageNumber: 9,
+    stageCode: "ligacao_i",
+    stageTitle: "Ligar com и",
+    level: "A2",
+    target: "ки ик",
+    word: "книга",
+    translation: "livro",
+    sound: "k",
+    prompt: "Ligar com и: pratique К к em letra cursiva. Pratique a ligação de entrada e saída com и.",
+    objective: "Manter o fluxo da cursiva.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 378,
+    letterPosition: 12,
+    upper: "К",
+    letter: "к",
+    mode: "cursive",
+    stageNumber: 10,
+    stageCode: "ligacao_m",
+    stageTitle: "Ligar com м",
+    level: "A2",
+    target: "км мк",
+    word: "книга",
+    translation: "livro",
+    sound: "k",
+    prompt: "Ligar com м: pratique К к em letra cursiva. Pratique a ligação de entrada e saída com м.",
+    objective: "Diferenciar arcos e hastes semelhantes.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 379,
+    letterPosition: 12,
+    upper: "К",
+    letter: "к",
+    mode: "cursive",
+    stageNumber: 11,
+    stageCode: "silaba",
+    stageTitle: "Copiar sílabas",
+    level: "A2",
+    target: "ка ко ку ки",
+    word: "книга",
+    translation: "livro",
+    sound: "k",
+    prompt: "Copiar sílabas: pratique К к em letra cursiva. Copie sílabas curtas e leia em voz alta.",
+    objective: "Unir escrita, leitura e som.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 380,
+    letterPosition: 12,
+    upper: "К",
+    letter: "к",
+    mode: "cursive",
+    stageNumber: 12,
+    stageCode: "palavra",
+    stageTitle: "Copiar palavra",
+    level: "B1",
+    target: "книга",
+    word: "книга",
+    translation: "livro",
+    sound: "k",
+    prompt: "Copiar palavra: pratique К к em letra cursiva. Copie a palavra-modelo e confira cada ligação.",
+    objective: "Aplicar a letra em vocabulário real.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 381,
+    letterPosition: 12,
+    upper: "К",
+    letter: "к",
+    mode: "cursive",
+    stageNumber: 13,
+    stageCode: "frase",
+    stageTitle: "Copiar frase",
+    level: "B1",
+    target: "Я пишу слово «книга».",
+    word: "книга",
+    translation: "livro",
+    sound: "k",
+    prompt: "Copiar frase: pratique К к em letra cursiva. Copie uma frase curta sem interromper o ritmo.",
+    objective: "Aplicar a letra em contexto.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 382,
+    letterPosition: 12,
+    upper: "К",
+    letter: "к",
+    mode: "cursive",
+    stageNumber: 14,
+    stageCode: "ditado",
+    stageTitle: "Escrever por ditado",
+    level: "B1",
+    target: "книга",
+    word: "книга",
+    translation: "livro",
+    sound: "k",
+    prompt: "Escrever por ditado: pratique К к em letra cursiva. Ouça o modelo e escreva sem olhar; depois compare.",
+    objective: "Recuperar a grafia pela memória.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 383,
+    letterPosition: 12,
+    upper: "К",
+    letter: "к",
+    mode: "cursive",
+    stageNumber: 15,
+    stageCode: "fluencia",
+    stageTitle: "Treino de fluência",
+    level: "B2",
+    target: "книга",
+    word: "книга",
+    translation: "livro",
+    sound: "k",
+    prompt: "Treino de fluência: pratique К к em letra cursiva. Escreva com tempo controlado sem sacrificar clareza.",
+    objective: "Ganhar velocidade com legibilidade.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 384,
+    letterPosition: 12,
+    upper: "К",
+    letter: "к",
+    mode: "cursive",
+    stageNumber: 16,
+    stageCode: "producao",
+    stageTitle: "Produção livre",
+    level: "C1",
+    target: "Я пишу слово «книга».",
+    word: "книга",
+    translation: "livro",
+    sound: "k",
+    prompt: "Produção livre: pratique К к em letra cursiva. Crie uma frase curta usando a palavra-modelo.",
+    objective: "Usar a escrita de maneira independente.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 385,
+    letterPosition: 13,
+    upper: "Л",
+    letter: "л",
+    mode: "print",
+    stageNumber: 1,
+    stageCode: "observacao",
+    stageTitle: "Observar proporções",
+    level: "A1",
+    target: "ллллл",
+    word: "лампа",
+    translation: "lâmpada",
+    sound: "l",
+    prompt: "Observar proporções: pratique Л л em letra de forma. Compare altura, largura, inclinação e posição na linha.",
+    objective: "Reconhecer a forma antes de escrever.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 386,
+    letterPosition: 13,
+    upper: "Л",
+    letter: "л",
+    mode: "print",
+    stageNumber: 2,
+    stageCode: "movimento_ar",
+    stageTitle: "Desenhar no ar",
+    level: "A1",
+    target: "ллллл",
+    word: "лампа",
+    translation: "lâmpada",
+    sound: "l",
+    prompt: "Desenhar no ar: pratique Л л em letra de forma. Faça o movimento amplo com o braço antes de usar o lápis.",
+    objective: "Memorizar a direção geral do traço.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 387,
+    letterPosition: 13,
+    upper: "Л",
+    letter: "л",
+    mode: "print",
+    stageNumber: 3,
+    stageCode: "maiuscula_guiada",
+    stageTitle: "Traçar maiúscula",
+    level: "A1",
+    target: "ЛЛЛЛЛ",
+    word: "лампа",
+    translation: "lâmpada",
+    sound: "l",
+    prompt: "Traçar maiúscula: pratique Л л em letra de forma. Passe sobre o modelo maiúsculo sem acelerar.",
+    objective: "Controlar início, direção e encerramento.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 388,
+    letterPosition: 13,
+    upper: "Л",
+    letter: "л",
+    mode: "print",
+    stageNumber: 4,
+    stageCode: "minuscula_guiada",
+    stageTitle: "Traçar minúscula",
+    level: "A1",
+    target: "ллллл",
+    word: "лампа",
+    translation: "lâmpada",
+    sound: "l",
+    prompt: "Traçar minúscula: pratique Л л em letra de forma. Passe sobre o modelo minúsculo mantendo a altura.",
+    objective: "Dominar a forma usada dentro das palavras.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 389,
+    letterPosition: 13,
+    upper: "Л",
+    letter: "л",
+    mode: "print",
+    stageNumber: 5,
+    stageCode: "copia_isolada",
+    stageTitle: "Copiar isoladamente",
+    level: "A1",
+    target: "ллллл",
+    word: "лампа",
+    translation: "lâmpada",
+    sound: "l",
+    prompt: "Copiar isoladamente: pratique Л л em letra de forma. Copie a letra cinco vezes ao lado do modelo.",
+    objective: "Manter tamanho e espaçamento consistentes.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 390,
+    letterPosition: 13,
+    upper: "Л",
+    letter: "л",
+    mode: "print",
+    stageNumber: 6,
+    stageCode: "ritmo",
+    stageTitle: "Criar ritmo",
+    level: "A2",
+    target: "лллл лллл лллл",
+    word: "лампа",
+    translation: "lâmpada",
+    sound: "l",
+    prompt: "Criar ritmo: pratique Л л em letra de forma. Escreva uma linha contínua com intervalos regulares.",
+    objective: "Automatizar o movimento sem perder legibilidade.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 391,
+    letterPosition: 13,
+    upper: "Л",
+    letter: "л",
+    mode: "print",
+    stageNumber: 7,
+    stageCode: "ligacao_a",
+    stageTitle: "Ligar com а",
+    level: "A2",
+    target: "ла ал",
+    word: "лампа",
+    translation: "lâmpada",
+    sound: "l",
+    prompt: "Ligar com а: pratique Л л em letra de forma. Pratique a ligação de entrada e saída com а.",
+    objective: "Aprender uma conexão frequente.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 392,
+    letterPosition: 13,
+    upper: "Л",
+    letter: "л",
+    mode: "print",
+    stageNumber: 8,
+    stageCode: "ligacao_o",
+    stageTitle: "Ligar com о",
+    level: "A2",
+    target: "ло ол",
+    word: "лампа",
+    translation: "lâmpada",
+    sound: "l",
+    prompt: "Ligar com о: pratique Л л em letra de forma. Pratique a ligação de entrada e saída com о.",
+    objective: "Evitar que as letras se encostem demais.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 393,
+    letterPosition: 13,
+    upper: "Л",
+    letter: "л",
+    mode: "print",
+    stageNumber: 9,
+    stageCode: "ligacao_i",
+    stageTitle: "Ligar com и",
+    level: "A2",
+    target: "ли ил",
+    word: "лампа",
+    translation: "lâmpada",
+    sound: "l",
+    prompt: "Ligar com и: pratique Л л em letra de forma. Pratique a ligação de entrada e saída com и.",
+    objective: "Manter o fluxo da cursiva.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 394,
+    letterPosition: 13,
+    upper: "Л",
+    letter: "л",
+    mode: "print",
+    stageNumber: 10,
+    stageCode: "ligacao_m",
+    stageTitle: "Ligar com м",
+    level: "A2",
+    target: "лм мл",
+    word: "лампа",
+    translation: "lâmpada",
+    sound: "l",
+    prompt: "Ligar com м: pratique Л л em letra de forma. Pratique a ligação de entrada e saída com м.",
+    objective: "Diferenciar arcos e hastes semelhantes.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 395,
+    letterPosition: 13,
+    upper: "Л",
+    letter: "л",
+    mode: "print",
+    stageNumber: 11,
+    stageCode: "silaba",
+    stageTitle: "Copiar sílabas",
+    level: "A2",
+    target: "ла ло лу ли",
+    word: "лампа",
+    translation: "lâmpada",
+    sound: "l",
+    prompt: "Copiar sílabas: pratique Л л em letra de forma. Copie sílabas curtas e leia em voz alta.",
+    objective: "Unir escrita, leitura e som.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 396,
+    letterPosition: 13,
+    upper: "Л",
+    letter: "л",
+    mode: "print",
+    stageNumber: 12,
+    stageCode: "palavra",
+    stageTitle: "Copiar palavra",
+    level: "B1",
+    target: "лампа",
+    word: "лампа",
+    translation: "lâmpada",
+    sound: "l",
+    prompt: "Copiar palavra: pratique Л л em letra de forma. Copie a palavra-modelo e confira cada ligação.",
+    objective: "Aplicar a letra em vocabulário real.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 397,
+    letterPosition: 13,
+    upper: "Л",
+    letter: "л",
+    mode: "print",
+    stageNumber: 13,
+    stageCode: "frase",
+    stageTitle: "Copiar frase",
+    level: "B1",
+    target: "Я пишу слово «лампа».",
+    word: "лампа",
+    translation: "lâmpada",
+    sound: "l",
+    prompt: "Copiar frase: pratique Л л em letra de forma. Copie uma frase curta sem interromper o ritmo.",
+    objective: "Aplicar a letra em contexto.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 398,
+    letterPosition: 13,
+    upper: "Л",
+    letter: "л",
+    mode: "print",
+    stageNumber: 14,
+    stageCode: "ditado",
+    stageTitle: "Escrever por ditado",
+    level: "B1",
+    target: "лампа",
+    word: "лампа",
+    translation: "lâmpada",
+    sound: "l",
+    prompt: "Escrever por ditado: pratique Л л em letra de forma. Ouça o modelo e escreva sem olhar; depois compare.",
+    objective: "Recuperar a grafia pela memória.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 399,
+    letterPosition: 13,
+    upper: "Л",
+    letter: "л",
+    mode: "print",
+    stageNumber: 15,
+    stageCode: "fluencia",
+    stageTitle: "Treino de fluência",
+    level: "B2",
+    target: "лампа",
+    word: "лампа",
+    translation: "lâmpada",
+    sound: "l",
+    prompt: "Treino de fluência: pratique Л л em letra de forma. Escreva com tempo controlado sem sacrificar clareza.",
+    objective: "Ganhar velocidade com legibilidade.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 400,
+    letterPosition: 13,
+    upper: "Л",
+    letter: "л",
+    mode: "print",
+    stageNumber: 16,
+    stageCode: "producao",
+    stageTitle: "Produção livre",
+    level: "C1",
+    target: "Я пишу слово «лампа».",
+    word: "лампа",
+    translation: "lâmpada",
+    sound: "l",
+    prompt: "Produção livre: pratique Л л em letra de forma. Crie uma frase curta usando a palavra-modelo.",
+    objective: "Usar a escrita de maneira independente.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 401,
+    letterPosition: 13,
+    upper: "Л",
+    letter: "л",
+    mode: "cursive",
+    stageNumber: 1,
+    stageCode: "observacao",
+    stageTitle: "Observar proporções",
+    level: "A1",
+    target: "ллллл",
+    word: "лампа",
+    translation: "lâmpada",
+    sound: "l",
+    prompt: "Observar proporções: pratique Л л em letra cursiva. Compare altura, largura, inclinação e posição na linha.",
+    objective: "Reconhecer a forma antes de escrever.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 402,
+    letterPosition: 13,
+    upper: "Л",
+    letter: "л",
+    mode: "cursive",
+    stageNumber: 2,
+    stageCode: "movimento_ar",
+    stageTitle: "Desenhar no ar",
+    level: "A1",
+    target: "ллллл",
+    word: "лампа",
+    translation: "lâmpada",
+    sound: "l",
+    prompt: "Desenhar no ar: pratique Л л em letra cursiva. Faça o movimento amplo com o braço antes de usar o lápis.",
+    objective: "Memorizar a direção geral do traço.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 403,
+    letterPosition: 13,
+    upper: "Л",
+    letter: "л",
+    mode: "cursive",
+    stageNumber: 3,
+    stageCode: "maiuscula_guiada",
+    stageTitle: "Traçar maiúscula",
+    level: "A1",
+    target: "ЛЛЛЛЛ",
+    word: "лампа",
+    translation: "lâmpada",
+    sound: "l",
+    prompt: "Traçar maiúscula: pratique Л л em letra cursiva. Passe sobre o modelo maiúsculo sem acelerar.",
+    objective: "Controlar início, direção e encerramento.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 404,
+    letterPosition: 13,
+    upper: "Л",
+    letter: "л",
+    mode: "cursive",
+    stageNumber: 4,
+    stageCode: "minuscula_guiada",
+    stageTitle: "Traçar minúscula",
+    level: "A1",
+    target: "ллллл",
+    word: "лампа",
+    translation: "lâmpada",
+    sound: "l",
+    prompt: "Traçar minúscula: pratique Л л em letra cursiva. Passe sobre o modelo minúsculo mantendo a altura.",
+    objective: "Dominar a forma usada dentro das palavras.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 405,
+    letterPosition: 13,
+    upper: "Л",
+    letter: "л",
+    mode: "cursive",
+    stageNumber: 5,
+    stageCode: "copia_isolada",
+    stageTitle: "Copiar isoladamente",
+    level: "A1",
+    target: "ллллл",
+    word: "лампа",
+    translation: "lâmpada",
+    sound: "l",
+    prompt: "Copiar isoladamente: pratique Л л em letra cursiva. Copie a letra cinco vezes ao lado do modelo.",
+    objective: "Manter tamanho e espaçamento consistentes.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 406,
+    letterPosition: 13,
+    upper: "Л",
+    letter: "л",
+    mode: "cursive",
+    stageNumber: 6,
+    stageCode: "ritmo",
+    stageTitle: "Criar ritmo",
+    level: "A2",
+    target: "лллл лллл лллл",
+    word: "лампа",
+    translation: "lâmpada",
+    sound: "l",
+    prompt: "Criar ritmo: pratique Л л em letra cursiva. Escreva uma linha contínua com intervalos regulares.",
+    objective: "Automatizar o movimento sem perder legibilidade.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 407,
+    letterPosition: 13,
+    upper: "Л",
+    letter: "л",
+    mode: "cursive",
+    stageNumber: 7,
+    stageCode: "ligacao_a",
+    stageTitle: "Ligar com а",
+    level: "A2",
+    target: "ла ал",
+    word: "лампа",
+    translation: "lâmpada",
+    sound: "l",
+    prompt: "Ligar com а: pratique Л л em letra cursiva. Pratique a ligação de entrada e saída com а.",
+    objective: "Aprender uma conexão frequente.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 408,
+    letterPosition: 13,
+    upper: "Л",
+    letter: "л",
+    mode: "cursive",
+    stageNumber: 8,
+    stageCode: "ligacao_o",
+    stageTitle: "Ligar com о",
+    level: "A2",
+    target: "ло ол",
+    word: "лампа",
+    translation: "lâmpada",
+    sound: "l",
+    prompt: "Ligar com о: pratique Л л em letra cursiva. Pratique a ligação de entrada e saída com о.",
+    objective: "Evitar que as letras se encostem demais.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 409,
+    letterPosition: 13,
+    upper: "Л",
+    letter: "л",
+    mode: "cursive",
+    stageNumber: 9,
+    stageCode: "ligacao_i",
+    stageTitle: "Ligar com и",
+    level: "A2",
+    target: "ли ил",
+    word: "лампа",
+    translation: "lâmpada",
+    sound: "l",
+    prompt: "Ligar com и: pratique Л л em letra cursiva. Pratique a ligação de entrada e saída com и.",
+    objective: "Manter o fluxo da cursiva.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 410,
+    letterPosition: 13,
+    upper: "Л",
+    letter: "л",
+    mode: "cursive",
+    stageNumber: 10,
+    stageCode: "ligacao_m",
+    stageTitle: "Ligar com м",
+    level: "A2",
+    target: "лм мл",
+    word: "лампа",
+    translation: "lâmpada",
+    sound: "l",
+    prompt: "Ligar com м: pratique Л л em letra cursiva. Pratique a ligação de entrada e saída com м.",
+    objective: "Diferenciar arcos e hastes semelhantes.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 411,
+    letterPosition: 13,
+    upper: "Л",
+    letter: "л",
+    mode: "cursive",
+    stageNumber: 11,
+    stageCode: "silaba",
+    stageTitle: "Copiar sílabas",
+    level: "A2",
+    target: "ла ло лу ли",
+    word: "лампа",
+    translation: "lâmpada",
+    sound: "l",
+    prompt: "Copiar sílabas: pratique Л л em letra cursiva. Copie sílabas curtas e leia em voz alta.",
+    objective: "Unir escrita, leitura e som.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 412,
+    letterPosition: 13,
+    upper: "Л",
+    letter: "л",
+    mode: "cursive",
+    stageNumber: 12,
+    stageCode: "palavra",
+    stageTitle: "Copiar palavra",
+    level: "B1",
+    target: "лампа",
+    word: "лампа",
+    translation: "lâmpada",
+    sound: "l",
+    prompt: "Copiar palavra: pratique Л л em letra cursiva. Copie a palavra-modelo e confira cada ligação.",
+    objective: "Aplicar a letra em vocabulário real.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 413,
+    letterPosition: 13,
+    upper: "Л",
+    letter: "л",
+    mode: "cursive",
+    stageNumber: 13,
+    stageCode: "frase",
+    stageTitle: "Copiar frase",
+    level: "B1",
+    target: "Я пишу слово «лампа».",
+    word: "лампа",
+    translation: "lâmpada",
+    sound: "l",
+    prompt: "Copiar frase: pratique Л л em letra cursiva. Copie uma frase curta sem interromper o ritmo.",
+    objective: "Aplicar a letra em contexto.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 414,
+    letterPosition: 13,
+    upper: "Л",
+    letter: "л",
+    mode: "cursive",
+    stageNumber: 14,
+    stageCode: "ditado",
+    stageTitle: "Escrever por ditado",
+    level: "B1",
+    target: "лампа",
+    word: "лампа",
+    translation: "lâmpada",
+    sound: "l",
+    prompt: "Escrever por ditado: pratique Л л em letra cursiva. Ouça o modelo e escreva sem olhar; depois compare.",
+    objective: "Recuperar a grafia pela memória.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 415,
+    letterPosition: 13,
+    upper: "Л",
+    letter: "л",
+    mode: "cursive",
+    stageNumber: 15,
+    stageCode: "fluencia",
+    stageTitle: "Treino de fluência",
+    level: "B2",
+    target: "лампа",
+    word: "лампа",
+    translation: "lâmpada",
+    sound: "l",
+    prompt: "Treino de fluência: pratique Л л em letra cursiva. Escreva com tempo controlado sem sacrificar clareza.",
+    objective: "Ganhar velocidade com legibilidade.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 416,
+    letterPosition: 13,
+    upper: "Л",
+    letter: "л",
+    mode: "cursive",
+    stageNumber: 16,
+    stageCode: "producao",
+    stageTitle: "Produção livre",
+    level: "C1",
+    target: "Я пишу слово «лампа».",
+    word: "лампа",
+    translation: "lâmpada",
+    sound: "l",
+    prompt: "Produção livre: pratique Л л em letra cursiva. Crie uma frase curta usando a palavra-modelo.",
+    objective: "Usar a escrita de maneira independente.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 417,
+    letterPosition: 14,
+    upper: "М",
+    letter: "м",
+    mode: "print",
+    stageNumber: 1,
+    stageCode: "observacao",
+    stageTitle: "Observar proporções",
+    level: "A1",
+    target: "ммммм",
+    word: "мама",
+    translation: "mamãe",
+    sound: "m",
+    prompt: "Observar proporções: pratique М м em letra de forma. Compare altura, largura, inclinação e posição na linha.",
+    objective: "Reconhecer a forma antes de escrever.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 418,
+    letterPosition: 14,
+    upper: "М",
+    letter: "м",
+    mode: "print",
+    stageNumber: 2,
+    stageCode: "movimento_ar",
+    stageTitle: "Desenhar no ar",
+    level: "A1",
+    target: "ммммм",
+    word: "мама",
+    translation: "mamãe",
+    sound: "m",
+    prompt: "Desenhar no ar: pratique М м em letra de forma. Faça o movimento amplo com o braço antes de usar o lápis.",
+    objective: "Memorizar a direção geral do traço.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 419,
+    letterPosition: 14,
+    upper: "М",
+    letter: "м",
+    mode: "print",
+    stageNumber: 3,
+    stageCode: "maiuscula_guiada",
+    stageTitle: "Traçar maiúscula",
+    level: "A1",
+    target: "МММММ",
+    word: "мама",
+    translation: "mamãe",
+    sound: "m",
+    prompt: "Traçar maiúscula: pratique М м em letra de forma. Passe sobre o modelo maiúsculo sem acelerar.",
+    objective: "Controlar início, direção e encerramento.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 420,
+    letterPosition: 14,
+    upper: "М",
+    letter: "м",
+    mode: "print",
+    stageNumber: 4,
+    stageCode: "minuscula_guiada",
+    stageTitle: "Traçar minúscula",
+    level: "A1",
+    target: "ммммм",
+    word: "мама",
+    translation: "mamãe",
+    sound: "m",
+    prompt: "Traçar minúscula: pratique М м em letra de forma. Passe sobre o modelo minúsculo mantendo a altura.",
+    objective: "Dominar a forma usada dentro das palavras.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 421,
+    letterPosition: 14,
+    upper: "М",
+    letter: "м",
+    mode: "print",
+    stageNumber: 5,
+    stageCode: "copia_isolada",
+    stageTitle: "Copiar isoladamente",
+    level: "A1",
+    target: "ммммм",
+    word: "мама",
+    translation: "mamãe",
+    sound: "m",
+    prompt: "Copiar isoladamente: pratique М м em letra de forma. Copie a letra cinco vezes ao lado do modelo.",
+    objective: "Manter tamanho e espaçamento consistentes.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 422,
+    letterPosition: 14,
+    upper: "М",
+    letter: "м",
+    mode: "print",
+    stageNumber: 6,
+    stageCode: "ritmo",
+    stageTitle: "Criar ritmo",
+    level: "A2",
+    target: "мммм мммм мммм",
+    word: "мама",
+    translation: "mamãe",
+    sound: "m",
+    prompt: "Criar ritmo: pratique М м em letra de forma. Escreva uma linha contínua com intervalos regulares.",
+    objective: "Automatizar o movimento sem perder legibilidade.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 423,
+    letterPosition: 14,
+    upper: "М",
+    letter: "м",
+    mode: "print",
+    stageNumber: 7,
+    stageCode: "ligacao_a",
+    stageTitle: "Ligar com а",
+    level: "A2",
+    target: "ма ам",
+    word: "мама",
+    translation: "mamãe",
+    sound: "m",
+    prompt: "Ligar com а: pratique М м em letra de forma. Pratique a ligação de entrada e saída com а.",
+    objective: "Aprender uma conexão frequente.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 424,
+    letterPosition: 14,
+    upper: "М",
+    letter: "м",
+    mode: "print",
+    stageNumber: 8,
+    stageCode: "ligacao_o",
+    stageTitle: "Ligar com о",
+    level: "A2",
+    target: "мо ом",
+    word: "мама",
+    translation: "mamãe",
+    sound: "m",
+    prompt: "Ligar com о: pratique М м em letra de forma. Pratique a ligação de entrada e saída com о.",
+    objective: "Evitar que as letras se encostem demais.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 425,
+    letterPosition: 14,
+    upper: "М",
+    letter: "м",
+    mode: "print",
+    stageNumber: 9,
+    stageCode: "ligacao_i",
+    stageTitle: "Ligar com и",
+    level: "A2",
+    target: "ми им",
+    word: "мама",
+    translation: "mamãe",
+    sound: "m",
+    prompt: "Ligar com и: pratique М м em letra de forma. Pratique a ligação de entrada e saída com и.",
+    objective: "Manter o fluxo da cursiva.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 426,
+    letterPosition: 14,
+    upper: "М",
+    letter: "м",
+    mode: "print",
+    stageNumber: 10,
+    stageCode: "ligacao_m",
+    stageTitle: "Ligar com м",
+    level: "A2",
+    target: "мм мм",
+    word: "мама",
+    translation: "mamãe",
+    sound: "m",
+    prompt: "Ligar com м: pratique М м em letra de forma. Pratique a ligação de entrada e saída com м.",
+    objective: "Diferenciar arcos e hastes semelhantes.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 427,
+    letterPosition: 14,
+    upper: "М",
+    letter: "м",
+    mode: "print",
+    stageNumber: 11,
+    stageCode: "silaba",
+    stageTitle: "Copiar sílabas",
+    level: "A2",
+    target: "ма мо му ми",
+    word: "мама",
+    translation: "mamãe",
+    sound: "m",
+    prompt: "Copiar sílabas: pratique М м em letra de forma. Copie sílabas curtas e leia em voz alta.",
+    objective: "Unir escrita, leitura e som.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 428,
+    letterPosition: 14,
+    upper: "М",
+    letter: "м",
+    mode: "print",
+    stageNumber: 12,
+    stageCode: "palavra",
+    stageTitle: "Copiar palavra",
+    level: "B1",
+    target: "мама",
+    word: "мама",
+    translation: "mamãe",
+    sound: "m",
+    prompt: "Copiar palavra: pratique М м em letra de forma. Copie a palavra-modelo e confira cada ligação.",
+    objective: "Aplicar a letra em vocabulário real.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 429,
+    letterPosition: 14,
+    upper: "М",
+    letter: "м",
+    mode: "print",
+    stageNumber: 13,
+    stageCode: "frase",
+    stageTitle: "Copiar frase",
+    level: "B1",
+    target: "Я пишу слово «мама».",
+    word: "мама",
+    translation: "mamãe",
+    sound: "m",
+    prompt: "Copiar frase: pratique М м em letra de forma. Copie uma frase curta sem interromper o ritmo.",
+    objective: "Aplicar a letra em contexto.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 430,
+    letterPosition: 14,
+    upper: "М",
+    letter: "м",
+    mode: "print",
+    stageNumber: 14,
+    stageCode: "ditado",
+    stageTitle: "Escrever por ditado",
+    level: "B1",
+    target: "мама",
+    word: "мама",
+    translation: "mamãe",
+    sound: "m",
+    prompt: "Escrever por ditado: pratique М м em letra de forma. Ouça o modelo e escreva sem olhar; depois compare.",
+    objective: "Recuperar a grafia pela memória.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 431,
+    letterPosition: 14,
+    upper: "М",
+    letter: "м",
+    mode: "print",
+    stageNumber: 15,
+    stageCode: "fluencia",
+    stageTitle: "Treino de fluência",
+    level: "B2",
+    target: "мама",
+    word: "мама",
+    translation: "mamãe",
+    sound: "m",
+    prompt: "Treino de fluência: pratique М м em letra de forma. Escreva com tempo controlado sem sacrificar clareza.",
+    objective: "Ganhar velocidade com legibilidade.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 432,
+    letterPosition: 14,
+    upper: "М",
+    letter: "м",
+    mode: "print",
+    stageNumber: 16,
+    stageCode: "producao",
+    stageTitle: "Produção livre",
+    level: "C1",
+    target: "Я пишу слово «мама».",
+    word: "мама",
+    translation: "mamãe",
+    sound: "m",
+    prompt: "Produção livre: pratique М м em letra de forma. Crie uma frase curta usando a palavra-modelo.",
+    objective: "Usar a escrita de maneira independente.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 433,
+    letterPosition: 14,
+    upper: "М",
+    letter: "м",
+    mode: "cursive",
+    stageNumber: 1,
+    stageCode: "observacao",
+    stageTitle: "Observar proporções",
+    level: "A1",
+    target: "ммммм",
+    word: "мама",
+    translation: "mamãe",
+    sound: "m",
+    prompt: "Observar proporções: pratique М м em letra cursiva. Compare altura, largura, inclinação e posição na linha.",
+    objective: "Reconhecer a forma antes de escrever.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 434,
+    letterPosition: 14,
+    upper: "М",
+    letter: "м",
+    mode: "cursive",
+    stageNumber: 2,
+    stageCode: "movimento_ar",
+    stageTitle: "Desenhar no ar",
+    level: "A1",
+    target: "ммммм",
+    word: "мама",
+    translation: "mamãe",
+    sound: "m",
+    prompt: "Desenhar no ar: pratique М м em letra cursiva. Faça o movimento amplo com o braço antes de usar o lápis.",
+    objective: "Memorizar a direção geral do traço.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 435,
+    letterPosition: 14,
+    upper: "М",
+    letter: "м",
+    mode: "cursive",
+    stageNumber: 3,
+    stageCode: "maiuscula_guiada",
+    stageTitle: "Traçar maiúscula",
+    level: "A1",
+    target: "МММММ",
+    word: "мама",
+    translation: "mamãe",
+    sound: "m",
+    prompt: "Traçar maiúscula: pratique М м em letra cursiva. Passe sobre o modelo maiúsculo sem acelerar.",
+    objective: "Controlar início, direção e encerramento.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 436,
+    letterPosition: 14,
+    upper: "М",
+    letter: "м",
+    mode: "cursive",
+    stageNumber: 4,
+    stageCode: "minuscula_guiada",
+    stageTitle: "Traçar minúscula",
+    level: "A1",
+    target: "ммммм",
+    word: "мама",
+    translation: "mamãe",
+    sound: "m",
+    prompt: "Traçar minúscula: pratique М м em letra cursiva. Passe sobre o modelo minúsculo mantendo a altura.",
+    objective: "Dominar a forma usada dentro das palavras.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 437,
+    letterPosition: 14,
+    upper: "М",
+    letter: "м",
+    mode: "cursive",
+    stageNumber: 5,
+    stageCode: "copia_isolada",
+    stageTitle: "Copiar isoladamente",
+    level: "A1",
+    target: "ммммм",
+    word: "мама",
+    translation: "mamãe",
+    sound: "m",
+    prompt: "Copiar isoladamente: pratique М м em letra cursiva. Copie a letra cinco vezes ao lado do modelo.",
+    objective: "Manter tamanho e espaçamento consistentes.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 438,
+    letterPosition: 14,
+    upper: "М",
+    letter: "м",
+    mode: "cursive",
+    stageNumber: 6,
+    stageCode: "ritmo",
+    stageTitle: "Criar ritmo",
+    level: "A2",
+    target: "мммм мммм мммм",
+    word: "мама",
+    translation: "mamãe",
+    sound: "m",
+    prompt: "Criar ritmo: pratique М м em letra cursiva. Escreva uma linha contínua com intervalos regulares.",
+    objective: "Automatizar o movimento sem perder legibilidade.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 439,
+    letterPosition: 14,
+    upper: "М",
+    letter: "м",
+    mode: "cursive",
+    stageNumber: 7,
+    stageCode: "ligacao_a",
+    stageTitle: "Ligar com а",
+    level: "A2",
+    target: "ма ам",
+    word: "мама",
+    translation: "mamãe",
+    sound: "m",
+    prompt: "Ligar com а: pratique М м em letra cursiva. Pratique a ligação de entrada e saída com а.",
+    objective: "Aprender uma conexão frequente.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 440,
+    letterPosition: 14,
+    upper: "М",
+    letter: "м",
+    mode: "cursive",
+    stageNumber: 8,
+    stageCode: "ligacao_o",
+    stageTitle: "Ligar com о",
+    level: "A2",
+    target: "мо ом",
+    word: "мама",
+    translation: "mamãe",
+    sound: "m",
+    prompt: "Ligar com о: pratique М м em letra cursiva. Pratique a ligação de entrada e saída com о.",
+    objective: "Evitar que as letras se encostem demais.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 441,
+    letterPosition: 14,
+    upper: "М",
+    letter: "м",
+    mode: "cursive",
+    stageNumber: 9,
+    stageCode: "ligacao_i",
+    stageTitle: "Ligar com и",
+    level: "A2",
+    target: "ми им",
+    word: "мама",
+    translation: "mamãe",
+    sound: "m",
+    prompt: "Ligar com и: pratique М м em letra cursiva. Pratique a ligação de entrada e saída com и.",
+    objective: "Manter o fluxo da cursiva.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 442,
+    letterPosition: 14,
+    upper: "М",
+    letter: "м",
+    mode: "cursive",
+    stageNumber: 10,
+    stageCode: "ligacao_m",
+    stageTitle: "Ligar com м",
+    level: "A2",
+    target: "мм мм",
+    word: "мама",
+    translation: "mamãe",
+    sound: "m",
+    prompt: "Ligar com м: pratique М м em letra cursiva. Pratique a ligação de entrada e saída com м.",
+    objective: "Diferenciar arcos e hastes semelhantes.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 443,
+    letterPosition: 14,
+    upper: "М",
+    letter: "м",
+    mode: "cursive",
+    stageNumber: 11,
+    stageCode: "silaba",
+    stageTitle: "Copiar sílabas",
+    level: "A2",
+    target: "ма мо му ми",
+    word: "мама",
+    translation: "mamãe",
+    sound: "m",
+    prompt: "Copiar sílabas: pratique М м em letra cursiva. Copie sílabas curtas e leia em voz alta.",
+    objective: "Unir escrita, leitura e som.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 444,
+    letterPosition: 14,
+    upper: "М",
+    letter: "м",
+    mode: "cursive",
+    stageNumber: 12,
+    stageCode: "palavra",
+    stageTitle: "Copiar palavra",
+    level: "B1",
+    target: "мама",
+    word: "мама",
+    translation: "mamãe",
+    sound: "m",
+    prompt: "Copiar palavra: pratique М м em letra cursiva. Copie a palavra-modelo e confira cada ligação.",
+    objective: "Aplicar a letra em vocabulário real.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 445,
+    letterPosition: 14,
+    upper: "М",
+    letter: "м",
+    mode: "cursive",
+    stageNumber: 13,
+    stageCode: "frase",
+    stageTitle: "Copiar frase",
+    level: "B1",
+    target: "Я пишу слово «мама».",
+    word: "мама",
+    translation: "mamãe",
+    sound: "m",
+    prompt: "Copiar frase: pratique М м em letra cursiva. Copie uma frase curta sem interromper o ritmo.",
+    objective: "Aplicar a letra em contexto.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 446,
+    letterPosition: 14,
+    upper: "М",
+    letter: "м",
+    mode: "cursive",
+    stageNumber: 14,
+    stageCode: "ditado",
+    stageTitle: "Escrever por ditado",
+    level: "B1",
+    target: "мама",
+    word: "мама",
+    translation: "mamãe",
+    sound: "m",
+    prompt: "Escrever por ditado: pratique М м em letra cursiva. Ouça o modelo e escreva sem olhar; depois compare.",
+    objective: "Recuperar a grafia pela memória.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 447,
+    letterPosition: 14,
+    upper: "М",
+    letter: "м",
+    mode: "cursive",
+    stageNumber: 15,
+    stageCode: "fluencia",
+    stageTitle: "Treino de fluência",
+    level: "B2",
+    target: "мама",
+    word: "мама",
+    translation: "mamãe",
+    sound: "m",
+    prompt: "Treino de fluência: pratique М м em letra cursiva. Escreva com tempo controlado sem sacrificar clareza.",
+    objective: "Ganhar velocidade com legibilidade.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 448,
+    letterPosition: 14,
+    upper: "М",
+    letter: "м",
+    mode: "cursive",
+    stageNumber: 16,
+    stageCode: "producao",
+    stageTitle: "Produção livre",
+    level: "C1",
+    target: "Я пишу слово «мама».",
+    word: "мама",
+    translation: "mamãe",
+    sound: "m",
+    prompt: "Produção livre: pratique М м em letra cursiva. Crie uma frase curta usando a palavra-modelo.",
+    objective: "Usar a escrita de maneira independente.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 449,
+    letterPosition: 15,
+    upper: "Н",
+    letter: "н",
+    mode: "print",
+    stageNumber: 1,
+    stageCode: "observacao",
+    stageTitle: "Observar proporções",
+    level: "A1",
+    target: "ннннн",
+    word: "ночь",
+    translation: "noite",
+    sound: "n",
+    prompt: "Observar proporções: pratique Н н em letra de forma. Compare altura, largura, inclinação e posição na linha.",
+    objective: "Reconhecer a forma antes de escrever.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 450,
+    letterPosition: 15,
+    upper: "Н",
+    letter: "н",
+    mode: "print",
+    stageNumber: 2,
+    stageCode: "movimento_ar",
+    stageTitle: "Desenhar no ar",
+    level: "A1",
+    target: "ннннн",
+    word: "ночь",
+    translation: "noite",
+    sound: "n",
+    prompt: "Desenhar no ar: pratique Н н em letra de forma. Faça o movimento amplo com o braço antes de usar o lápis.",
+    objective: "Memorizar a direção geral do traço.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 451,
+    letterPosition: 15,
+    upper: "Н",
+    letter: "н",
+    mode: "print",
+    stageNumber: 3,
+    stageCode: "maiuscula_guiada",
+    stageTitle: "Traçar maiúscula",
+    level: "A1",
+    target: "ННННН",
+    word: "ночь",
+    translation: "noite",
+    sound: "n",
+    prompt: "Traçar maiúscula: pratique Н н em letra de forma. Passe sobre o modelo maiúsculo sem acelerar.",
+    objective: "Controlar início, direção e encerramento.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 452,
+    letterPosition: 15,
+    upper: "Н",
+    letter: "н",
+    mode: "print",
+    stageNumber: 4,
+    stageCode: "minuscula_guiada",
+    stageTitle: "Traçar minúscula",
+    level: "A1",
+    target: "ннннн",
+    word: "ночь",
+    translation: "noite",
+    sound: "n",
+    prompt: "Traçar minúscula: pratique Н н em letra de forma. Passe sobre o modelo minúsculo mantendo a altura.",
+    objective: "Dominar a forma usada dentro das palavras.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 453,
+    letterPosition: 15,
+    upper: "Н",
+    letter: "н",
+    mode: "print",
+    stageNumber: 5,
+    stageCode: "copia_isolada",
+    stageTitle: "Copiar isoladamente",
+    level: "A1",
+    target: "ннннн",
+    word: "ночь",
+    translation: "noite",
+    sound: "n",
+    prompt: "Copiar isoladamente: pratique Н н em letra de forma. Copie a letra cinco vezes ao lado do modelo.",
+    objective: "Manter tamanho e espaçamento consistentes.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 454,
+    letterPosition: 15,
+    upper: "Н",
+    letter: "н",
+    mode: "print",
+    stageNumber: 6,
+    stageCode: "ritmo",
+    stageTitle: "Criar ritmo",
+    level: "A2",
+    target: "нннн нннн нннн",
+    word: "ночь",
+    translation: "noite",
+    sound: "n",
+    prompt: "Criar ritmo: pratique Н н em letra de forma. Escreva uma linha contínua com intervalos regulares.",
+    objective: "Automatizar o movimento sem perder legibilidade.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 455,
+    letterPosition: 15,
+    upper: "Н",
+    letter: "н",
+    mode: "print",
+    stageNumber: 7,
+    stageCode: "ligacao_a",
+    stageTitle: "Ligar com а",
+    level: "A2",
+    target: "на ан",
+    word: "ночь",
+    translation: "noite",
+    sound: "n",
+    prompt: "Ligar com а: pratique Н н em letra de forma. Pratique a ligação de entrada e saída com а.",
+    objective: "Aprender uma conexão frequente.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 456,
+    letterPosition: 15,
+    upper: "Н",
+    letter: "н",
+    mode: "print",
+    stageNumber: 8,
+    stageCode: "ligacao_o",
+    stageTitle: "Ligar com о",
+    level: "A2",
+    target: "но он",
+    word: "ночь",
+    translation: "noite",
+    sound: "n",
+    prompt: "Ligar com о: pratique Н н em letra de forma. Pratique a ligação de entrada e saída com о.",
+    objective: "Evitar que as letras se encostem demais.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 457,
+    letterPosition: 15,
+    upper: "Н",
+    letter: "н",
+    mode: "print",
+    stageNumber: 9,
+    stageCode: "ligacao_i",
+    stageTitle: "Ligar com и",
+    level: "A2",
+    target: "ни ин",
+    word: "ночь",
+    translation: "noite",
+    sound: "n",
+    prompt: "Ligar com и: pratique Н н em letra de forma. Pratique a ligação de entrada e saída com и.",
+    objective: "Manter o fluxo da cursiva.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 458,
+    letterPosition: 15,
+    upper: "Н",
+    letter: "н",
+    mode: "print",
+    stageNumber: 10,
+    stageCode: "ligacao_m",
+    stageTitle: "Ligar com м",
+    level: "A2",
+    target: "нм мн",
+    word: "ночь",
+    translation: "noite",
+    sound: "n",
+    prompt: "Ligar com м: pratique Н н em letra de forma. Pratique a ligação de entrada e saída com м.",
+    objective: "Diferenciar arcos e hastes semelhantes.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 459,
+    letterPosition: 15,
+    upper: "Н",
+    letter: "н",
+    mode: "print",
+    stageNumber: 11,
+    stageCode: "silaba",
+    stageTitle: "Copiar sílabas",
+    level: "A2",
+    target: "на но ну ни",
+    word: "ночь",
+    translation: "noite",
+    sound: "n",
+    prompt: "Copiar sílabas: pratique Н н em letra de forma. Copie sílabas curtas e leia em voz alta.",
+    objective: "Unir escrita, leitura e som.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 460,
+    letterPosition: 15,
+    upper: "Н",
+    letter: "н",
+    mode: "print",
+    stageNumber: 12,
+    stageCode: "palavra",
+    stageTitle: "Copiar palavra",
+    level: "B1",
+    target: "ночь",
+    word: "ночь",
+    translation: "noite",
+    sound: "n",
+    prompt: "Copiar palavra: pratique Н н em letra de forma. Copie a palavra-modelo e confira cada ligação.",
+    objective: "Aplicar a letra em vocabulário real.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 461,
+    letterPosition: 15,
+    upper: "Н",
+    letter: "н",
+    mode: "print",
+    stageNumber: 13,
+    stageCode: "frase",
+    stageTitle: "Copiar frase",
+    level: "B1",
+    target: "Я пишу слово «ночь».",
+    word: "ночь",
+    translation: "noite",
+    sound: "n",
+    prompt: "Copiar frase: pratique Н н em letra de forma. Copie uma frase curta sem interromper o ritmo.",
+    objective: "Aplicar a letra em contexto.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 462,
+    letterPosition: 15,
+    upper: "Н",
+    letter: "н",
+    mode: "print",
+    stageNumber: 14,
+    stageCode: "ditado",
+    stageTitle: "Escrever por ditado",
+    level: "B1",
+    target: "ночь",
+    word: "ночь",
+    translation: "noite",
+    sound: "n",
+    prompt: "Escrever por ditado: pratique Н н em letra de forma. Ouça o modelo e escreva sem olhar; depois compare.",
+    objective: "Recuperar a grafia pela memória.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 463,
+    letterPosition: 15,
+    upper: "Н",
+    letter: "н",
+    mode: "print",
+    stageNumber: 15,
+    stageCode: "fluencia",
+    stageTitle: "Treino de fluência",
+    level: "B2",
+    target: "ночь",
+    word: "ночь",
+    translation: "noite",
+    sound: "n",
+    prompt: "Treino de fluência: pratique Н н em letra de forma. Escreva com tempo controlado sem sacrificar clareza.",
+    objective: "Ganhar velocidade com legibilidade.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 464,
+    letterPosition: 15,
+    upper: "Н",
+    letter: "н",
+    mode: "print",
+    stageNumber: 16,
+    stageCode: "producao",
+    stageTitle: "Produção livre",
+    level: "C1",
+    target: "Я пишу слово «ночь».",
+    word: "ночь",
+    translation: "noite",
+    sound: "n",
+    prompt: "Produção livre: pratique Н н em letra de forma. Crie uma frase curta usando a palavra-modelo.",
+    objective: "Usar a escrita de maneira independente.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 465,
+    letterPosition: 15,
+    upper: "Н",
+    letter: "н",
+    mode: "cursive",
+    stageNumber: 1,
+    stageCode: "observacao",
+    stageTitle: "Observar proporções",
+    level: "A1",
+    target: "ннннн",
+    word: "ночь",
+    translation: "noite",
+    sound: "n",
+    prompt: "Observar proporções: pratique Н н em letra cursiva. Compare altura, largura, inclinação e posição na linha.",
+    objective: "Reconhecer a forma antes de escrever.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 466,
+    letterPosition: 15,
+    upper: "Н",
+    letter: "н",
+    mode: "cursive",
+    stageNumber: 2,
+    stageCode: "movimento_ar",
+    stageTitle: "Desenhar no ar",
+    level: "A1",
+    target: "ннннн",
+    word: "ночь",
+    translation: "noite",
+    sound: "n",
+    prompt: "Desenhar no ar: pratique Н н em letra cursiva. Faça o movimento amplo com o braço antes de usar o lápis.",
+    objective: "Memorizar a direção geral do traço.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 467,
+    letterPosition: 15,
+    upper: "Н",
+    letter: "н",
+    mode: "cursive",
+    stageNumber: 3,
+    stageCode: "maiuscula_guiada",
+    stageTitle: "Traçar maiúscula",
+    level: "A1",
+    target: "ННННН",
+    word: "ночь",
+    translation: "noite",
+    sound: "n",
+    prompt: "Traçar maiúscula: pratique Н н em letra cursiva. Passe sobre o modelo maiúsculo sem acelerar.",
+    objective: "Controlar início, direção e encerramento.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 468,
+    letterPosition: 15,
+    upper: "Н",
+    letter: "н",
+    mode: "cursive",
+    stageNumber: 4,
+    stageCode: "minuscula_guiada",
+    stageTitle: "Traçar minúscula",
+    level: "A1",
+    target: "ннннн",
+    word: "ночь",
+    translation: "noite",
+    sound: "n",
+    prompt: "Traçar minúscula: pratique Н н em letra cursiva. Passe sobre o modelo minúsculo mantendo a altura.",
+    objective: "Dominar a forma usada dentro das palavras.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 469,
+    letterPosition: 15,
+    upper: "Н",
+    letter: "н",
+    mode: "cursive",
+    stageNumber: 5,
+    stageCode: "copia_isolada",
+    stageTitle: "Copiar isoladamente",
+    level: "A1",
+    target: "ннннн",
+    word: "ночь",
+    translation: "noite",
+    sound: "n",
+    prompt: "Copiar isoladamente: pratique Н н em letra cursiva. Copie a letra cinco vezes ao lado do modelo.",
+    objective: "Manter tamanho e espaçamento consistentes.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 470,
+    letterPosition: 15,
+    upper: "Н",
+    letter: "н",
+    mode: "cursive",
+    stageNumber: 6,
+    stageCode: "ritmo",
+    stageTitle: "Criar ritmo",
+    level: "A2",
+    target: "нннн нннн нннн",
+    word: "ночь",
+    translation: "noite",
+    sound: "n",
+    prompt: "Criar ritmo: pratique Н н em letra cursiva. Escreva uma linha contínua com intervalos regulares.",
+    objective: "Automatizar o movimento sem perder legibilidade.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 471,
+    letterPosition: 15,
+    upper: "Н",
+    letter: "н",
+    mode: "cursive",
+    stageNumber: 7,
+    stageCode: "ligacao_a",
+    stageTitle: "Ligar com а",
+    level: "A2",
+    target: "на ан",
+    word: "ночь",
+    translation: "noite",
+    sound: "n",
+    prompt: "Ligar com а: pratique Н н em letra cursiva. Pratique a ligação de entrada e saída com а.",
+    objective: "Aprender uma conexão frequente.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 472,
+    letterPosition: 15,
+    upper: "Н",
+    letter: "н",
+    mode: "cursive",
+    stageNumber: 8,
+    stageCode: "ligacao_o",
+    stageTitle: "Ligar com о",
+    level: "A2",
+    target: "но он",
+    word: "ночь",
+    translation: "noite",
+    sound: "n",
+    prompt: "Ligar com о: pratique Н н em letra cursiva. Pratique a ligação de entrada e saída com о.",
+    objective: "Evitar que as letras se encostem demais.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 473,
+    letterPosition: 15,
+    upper: "Н",
+    letter: "н",
+    mode: "cursive",
+    stageNumber: 9,
+    stageCode: "ligacao_i",
+    stageTitle: "Ligar com и",
+    level: "A2",
+    target: "ни ин",
+    word: "ночь",
+    translation: "noite",
+    sound: "n",
+    prompt: "Ligar com и: pratique Н н em letra cursiva. Pratique a ligação de entrada e saída com и.",
+    objective: "Manter o fluxo da cursiva.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 474,
+    letterPosition: 15,
+    upper: "Н",
+    letter: "н",
+    mode: "cursive",
+    stageNumber: 10,
+    stageCode: "ligacao_m",
+    stageTitle: "Ligar com м",
+    level: "A2",
+    target: "нм мн",
+    word: "ночь",
+    translation: "noite",
+    sound: "n",
+    prompt: "Ligar com м: pratique Н н em letra cursiva. Pratique a ligação de entrada e saída com м.",
+    objective: "Diferenciar arcos e hastes semelhantes.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 475,
+    letterPosition: 15,
+    upper: "Н",
+    letter: "н",
+    mode: "cursive",
+    stageNumber: 11,
+    stageCode: "silaba",
+    stageTitle: "Copiar sílabas",
+    level: "A2",
+    target: "на но ну ни",
+    word: "ночь",
+    translation: "noite",
+    sound: "n",
+    prompt: "Copiar sílabas: pratique Н н em letra cursiva. Copie sílabas curtas e leia em voz alta.",
+    objective: "Unir escrita, leitura e som.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 476,
+    letterPosition: 15,
+    upper: "Н",
+    letter: "н",
+    mode: "cursive",
+    stageNumber: 12,
+    stageCode: "palavra",
+    stageTitle: "Copiar palavra",
+    level: "B1",
+    target: "ночь",
+    word: "ночь",
+    translation: "noite",
+    sound: "n",
+    prompt: "Copiar palavra: pratique Н н em letra cursiva. Copie a palavra-modelo e confira cada ligação.",
+    objective: "Aplicar a letra em vocabulário real.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 477,
+    letterPosition: 15,
+    upper: "Н",
+    letter: "н",
+    mode: "cursive",
+    stageNumber: 13,
+    stageCode: "frase",
+    stageTitle: "Copiar frase",
+    level: "B1",
+    target: "Я пишу слово «ночь».",
+    word: "ночь",
+    translation: "noite",
+    sound: "n",
+    prompt: "Copiar frase: pratique Н н em letra cursiva. Copie uma frase curta sem interromper o ritmo.",
+    objective: "Aplicar a letra em contexto.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 478,
+    letterPosition: 15,
+    upper: "Н",
+    letter: "н",
+    mode: "cursive",
+    stageNumber: 14,
+    stageCode: "ditado",
+    stageTitle: "Escrever por ditado",
+    level: "B1",
+    target: "ночь",
+    word: "ночь",
+    translation: "noite",
+    sound: "n",
+    prompt: "Escrever por ditado: pratique Н н em letra cursiva. Ouça o modelo e escreva sem olhar; depois compare.",
+    objective: "Recuperar a grafia pela memória.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 479,
+    letterPosition: 15,
+    upper: "Н",
+    letter: "н",
+    mode: "cursive",
+    stageNumber: 15,
+    stageCode: "fluencia",
+    stageTitle: "Treino de fluência",
+    level: "B2",
+    target: "ночь",
+    word: "ночь",
+    translation: "noite",
+    sound: "n",
+    prompt: "Treino de fluência: pratique Н н em letra cursiva. Escreva com tempo controlado sem sacrificar clareza.",
+    objective: "Ganhar velocidade com legibilidade.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 480,
+    letterPosition: 15,
+    upper: "Н",
+    letter: "н",
+    mode: "cursive",
+    stageNumber: 16,
+    stageCode: "producao",
+    stageTitle: "Produção livre",
+    level: "C1",
+    target: "Я пишу слово «ночь».",
+    word: "ночь",
+    translation: "noite",
+    sound: "n",
+    prompt: "Produção livre: pratique Н н em letra cursiva. Crie uma frase curta usando a palavra-modelo.",
+    objective: "Usar a escrita de maneira independente.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 481,
+    letterPosition: 16,
+    upper: "О",
+    letter: "о",
+    mode: "print",
+    stageNumber: 1,
+    stageCode: "observacao",
+    stageTitle: "Observar proporções",
+    level: "A1",
+    target: "ооооо",
+    word: "окно",
+    translation: "janela",
+    sound: "o",
+    prompt: "Observar proporções: pratique О о em letra de forma. Compare altura, largura, inclinação e posição na linha.",
+    objective: "Reconhecer a forma antes de escrever.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 482,
+    letterPosition: 16,
+    upper: "О",
+    letter: "о",
+    mode: "print",
+    stageNumber: 2,
+    stageCode: "movimento_ar",
+    stageTitle: "Desenhar no ar",
+    level: "A1",
+    target: "ооооо",
+    word: "окно",
+    translation: "janela",
+    sound: "o",
+    prompt: "Desenhar no ar: pratique О о em letra de forma. Faça o movimento amplo com o braço antes de usar o lápis.",
+    objective: "Memorizar a direção geral do traço.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 483,
+    letterPosition: 16,
+    upper: "О",
+    letter: "о",
+    mode: "print",
+    stageNumber: 3,
+    stageCode: "maiuscula_guiada",
+    stageTitle: "Traçar maiúscula",
+    level: "A1",
+    target: "ООООО",
+    word: "окно",
+    translation: "janela",
+    sound: "o",
+    prompt: "Traçar maiúscula: pratique О о em letra de forma. Passe sobre o modelo maiúsculo sem acelerar.",
+    objective: "Controlar início, direção e encerramento.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 484,
+    letterPosition: 16,
+    upper: "О",
+    letter: "о",
+    mode: "print",
+    stageNumber: 4,
+    stageCode: "minuscula_guiada",
+    stageTitle: "Traçar minúscula",
+    level: "A1",
+    target: "ооооо",
+    word: "окно",
+    translation: "janela",
+    sound: "o",
+    prompt: "Traçar minúscula: pratique О о em letra de forma. Passe sobre o modelo minúsculo mantendo a altura.",
+    objective: "Dominar a forma usada dentro das palavras.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 485,
+    letterPosition: 16,
+    upper: "О",
+    letter: "о",
+    mode: "print",
+    stageNumber: 5,
+    stageCode: "copia_isolada",
+    stageTitle: "Copiar isoladamente",
+    level: "A1",
+    target: "ооооо",
+    word: "окно",
+    translation: "janela",
+    sound: "o",
+    prompt: "Copiar isoladamente: pratique О о em letra de forma. Copie a letra cinco vezes ao lado do modelo.",
+    objective: "Manter tamanho e espaçamento consistentes.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 486,
+    letterPosition: 16,
+    upper: "О",
+    letter: "о",
+    mode: "print",
+    stageNumber: 6,
+    stageCode: "ritmo",
+    stageTitle: "Criar ritmo",
+    level: "A2",
+    target: "оооо оооо оооо",
+    word: "окно",
+    translation: "janela",
+    sound: "o",
+    prompt: "Criar ritmo: pratique О о em letra de forma. Escreva uma linha contínua com intervalos regulares.",
+    objective: "Automatizar o movimento sem perder legibilidade.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 487,
+    letterPosition: 16,
+    upper: "О",
+    letter: "о",
+    mode: "print",
+    stageNumber: 7,
+    stageCode: "ligacao_a",
+    stageTitle: "Ligar com а",
+    level: "A2",
+    target: "оа ао",
+    word: "окно",
+    translation: "janela",
+    sound: "o",
+    prompt: "Ligar com а: pratique О о em letra de forma. Pratique a ligação de entrada e saída com а.",
+    objective: "Aprender uma conexão frequente.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 488,
+    letterPosition: 16,
+    upper: "О",
+    letter: "о",
+    mode: "print",
+    stageNumber: 8,
+    stageCode: "ligacao_o",
+    stageTitle: "Ligar com о",
+    level: "A2",
+    target: "оо оо",
+    word: "окно",
+    translation: "janela",
+    sound: "o",
+    prompt: "Ligar com о: pratique О о em letra de forma. Pratique a ligação de entrada e saída com о.",
+    objective: "Evitar que as letras se encostem demais.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 489,
+    letterPosition: 16,
+    upper: "О",
+    letter: "о",
+    mode: "print",
+    stageNumber: 9,
+    stageCode: "ligacao_i",
+    stageTitle: "Ligar com и",
+    level: "A2",
+    target: "ои ио",
+    word: "окно",
+    translation: "janela",
+    sound: "o",
+    prompt: "Ligar com и: pratique О о em letra de forma. Pratique a ligação de entrada e saída com и.",
+    objective: "Manter o fluxo da cursiva.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 490,
+    letterPosition: 16,
+    upper: "О",
+    letter: "о",
+    mode: "print",
+    stageNumber: 10,
+    stageCode: "ligacao_m",
+    stageTitle: "Ligar com м",
+    level: "A2",
+    target: "ом мо",
+    word: "окно",
+    translation: "janela",
+    sound: "o",
+    prompt: "Ligar com м: pratique О о em letra de forma. Pratique a ligação de entrada e saída com м.",
+    objective: "Diferenciar arcos e hastes semelhantes.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 491,
+    letterPosition: 16,
+    upper: "О",
+    letter: "о",
+    mode: "print",
+    stageNumber: 11,
+    stageCode: "silaba",
+    stageTitle: "Copiar sílabas",
+    level: "A2",
+    target: "оа оо оу ои",
+    word: "окно",
+    translation: "janela",
+    sound: "o",
+    prompt: "Copiar sílabas: pratique О о em letra de forma. Copie sílabas curtas e leia em voz alta.",
+    objective: "Unir escrita, leitura e som.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 492,
+    letterPosition: 16,
+    upper: "О",
+    letter: "о",
+    mode: "print",
+    stageNumber: 12,
+    stageCode: "palavra",
+    stageTitle: "Copiar palavra",
+    level: "B1",
+    target: "окно",
+    word: "окно",
+    translation: "janela",
+    sound: "o",
+    prompt: "Copiar palavra: pratique О о em letra de forma. Copie a palavra-modelo e confira cada ligação.",
+    objective: "Aplicar a letra em vocabulário real.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 493,
+    letterPosition: 16,
+    upper: "О",
+    letter: "о",
+    mode: "print",
+    stageNumber: 13,
+    stageCode: "frase",
+    stageTitle: "Copiar frase",
+    level: "B1",
+    target: "Я пишу слово «окно».",
+    word: "окно",
+    translation: "janela",
+    sound: "o",
+    prompt: "Copiar frase: pratique О о em letra de forma. Copie uma frase curta sem interromper o ritmo.",
+    objective: "Aplicar a letra em contexto.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 494,
+    letterPosition: 16,
+    upper: "О",
+    letter: "о",
+    mode: "print",
+    stageNumber: 14,
+    stageCode: "ditado",
+    stageTitle: "Escrever por ditado",
+    level: "B1",
+    target: "окно",
+    word: "окно",
+    translation: "janela",
+    sound: "o",
+    prompt: "Escrever por ditado: pratique О о em letra de forma. Ouça o modelo e escreva sem olhar; depois compare.",
+    objective: "Recuperar a grafia pela memória.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 495,
+    letterPosition: 16,
+    upper: "О",
+    letter: "о",
+    mode: "print",
+    stageNumber: 15,
+    stageCode: "fluencia",
+    stageTitle: "Treino de fluência",
+    level: "B2",
+    target: "окно",
+    word: "окно",
+    translation: "janela",
+    sound: "o",
+    prompt: "Treino de fluência: pratique О о em letra de forma. Escreva com tempo controlado sem sacrificar clareza.",
+    objective: "Ganhar velocidade com legibilidade.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 496,
+    letterPosition: 16,
+    upper: "О",
+    letter: "о",
+    mode: "print",
+    stageNumber: 16,
+    stageCode: "producao",
+    stageTitle: "Produção livre",
+    level: "C1",
+    target: "Я пишу слово «окно».",
+    word: "окно",
+    translation: "janela",
+    sound: "o",
+    prompt: "Produção livre: pratique О о em letra de forma. Crie uma frase curta usando a palavra-modelo.",
+    objective: "Usar a escrita de maneira independente.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 497,
+    letterPosition: 16,
+    upper: "О",
+    letter: "о",
+    mode: "cursive",
+    stageNumber: 1,
+    stageCode: "observacao",
+    stageTitle: "Observar proporções",
+    level: "A1",
+    target: "ооооо",
+    word: "окно",
+    translation: "janela",
+    sound: "o",
+    prompt: "Observar proporções: pratique О о em letra cursiva. Compare altura, largura, inclinação e posição na linha.",
+    objective: "Reconhecer a forma antes de escrever.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 498,
+    letterPosition: 16,
+    upper: "О",
+    letter: "о",
+    mode: "cursive",
+    stageNumber: 2,
+    stageCode: "movimento_ar",
+    stageTitle: "Desenhar no ar",
+    level: "A1",
+    target: "ооооо",
+    word: "окно",
+    translation: "janela",
+    sound: "o",
+    prompt: "Desenhar no ar: pratique О о em letra cursiva. Faça o movimento amplo com o braço antes de usar o lápis.",
+    objective: "Memorizar a direção geral do traço.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 499,
+    letterPosition: 16,
+    upper: "О",
+    letter: "о",
+    mode: "cursive",
+    stageNumber: 3,
+    stageCode: "maiuscula_guiada",
+    stageTitle: "Traçar maiúscula",
+    level: "A1",
+    target: "ООООО",
+    word: "окно",
+    translation: "janela",
+    sound: "o",
+    prompt: "Traçar maiúscula: pratique О о em letra cursiva. Passe sobre o modelo maiúsculo sem acelerar.",
+    objective: "Controlar início, direção e encerramento.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 500,
+    letterPosition: 16,
+    upper: "О",
+    letter: "о",
+    mode: "cursive",
+    stageNumber: 4,
+    stageCode: "minuscula_guiada",
+    stageTitle: "Traçar minúscula",
+    level: "A1",
+    target: "ооооо",
+    word: "окно",
+    translation: "janela",
+    sound: "o",
+    prompt: "Traçar minúscula: pratique О о em letra cursiva. Passe sobre o modelo minúsculo mantendo a altura.",
+    objective: "Dominar a forma usada dentro das palavras.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 501,
+    letterPosition: 16,
+    upper: "О",
+    letter: "о",
+    mode: "cursive",
+    stageNumber: 5,
+    stageCode: "copia_isolada",
+    stageTitle: "Copiar isoladamente",
+    level: "A1",
+    target: "ооооо",
+    word: "окно",
+    translation: "janela",
+    sound: "o",
+    prompt: "Copiar isoladamente: pratique О о em letra cursiva. Copie a letra cinco vezes ao lado do modelo.",
+    objective: "Manter tamanho e espaçamento consistentes.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 502,
+    letterPosition: 16,
+    upper: "О",
+    letter: "о",
+    mode: "cursive",
+    stageNumber: 6,
+    stageCode: "ritmo",
+    stageTitle: "Criar ritmo",
+    level: "A2",
+    target: "оооо оооо оооо",
+    word: "окно",
+    translation: "janela",
+    sound: "o",
+    prompt: "Criar ritmo: pratique О о em letra cursiva. Escreva uma linha contínua com intervalos regulares.",
+    objective: "Automatizar o movimento sem perder legibilidade.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 503,
+    letterPosition: 16,
+    upper: "О",
+    letter: "о",
+    mode: "cursive",
+    stageNumber: 7,
+    stageCode: "ligacao_a",
+    stageTitle: "Ligar com а",
+    level: "A2",
+    target: "оа ао",
+    word: "окно",
+    translation: "janela",
+    sound: "o",
+    prompt: "Ligar com а: pratique О о em letra cursiva. Pratique a ligação de entrada e saída com а.",
+    objective: "Aprender uma conexão frequente.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 504,
+    letterPosition: 16,
+    upper: "О",
+    letter: "о",
+    mode: "cursive",
+    stageNumber: 8,
+    stageCode: "ligacao_o",
+    stageTitle: "Ligar com о",
+    level: "A2",
+    target: "оо оо",
+    word: "окно",
+    translation: "janela",
+    sound: "o",
+    prompt: "Ligar com о: pratique О о em letra cursiva. Pratique a ligação de entrada e saída com о.",
+    objective: "Evitar que as letras se encostem demais.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 505,
+    letterPosition: 16,
+    upper: "О",
+    letter: "о",
+    mode: "cursive",
+    stageNumber: 9,
+    stageCode: "ligacao_i",
+    stageTitle: "Ligar com и",
+    level: "A2",
+    target: "ои ио",
+    word: "окно",
+    translation: "janela",
+    sound: "o",
+    prompt: "Ligar com и: pratique О о em letra cursiva. Pratique a ligação de entrada e saída com и.",
+    objective: "Manter o fluxo da cursiva.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 506,
+    letterPosition: 16,
+    upper: "О",
+    letter: "о",
+    mode: "cursive",
+    stageNumber: 10,
+    stageCode: "ligacao_m",
+    stageTitle: "Ligar com м",
+    level: "A2",
+    target: "ом мо",
+    word: "окно",
+    translation: "janela",
+    sound: "o",
+    prompt: "Ligar com м: pratique О о em letra cursiva. Pratique a ligação de entrada e saída com м.",
+    objective: "Diferenciar arcos e hastes semelhantes.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 507,
+    letterPosition: 16,
+    upper: "О",
+    letter: "о",
+    mode: "cursive",
+    stageNumber: 11,
+    stageCode: "silaba",
+    stageTitle: "Copiar sílabas",
+    level: "A2",
+    target: "оа оо оу ои",
+    word: "окно",
+    translation: "janela",
+    sound: "o",
+    prompt: "Copiar sílabas: pratique О о em letra cursiva. Copie sílabas curtas e leia em voz alta.",
+    objective: "Unir escrita, leitura e som.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 508,
+    letterPosition: 16,
+    upper: "О",
+    letter: "о",
+    mode: "cursive",
+    stageNumber: 12,
+    stageCode: "palavra",
+    stageTitle: "Copiar palavra",
+    level: "B1",
+    target: "окно",
+    word: "окно",
+    translation: "janela",
+    sound: "o",
+    prompt: "Copiar palavra: pratique О о em letra cursiva. Copie a palavra-modelo e confira cada ligação.",
+    objective: "Aplicar a letra em vocabulário real.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 509,
+    letterPosition: 16,
+    upper: "О",
+    letter: "о",
+    mode: "cursive",
+    stageNumber: 13,
+    stageCode: "frase",
+    stageTitle: "Copiar frase",
+    level: "B1",
+    target: "Я пишу слово «окно».",
+    word: "окно",
+    translation: "janela",
+    sound: "o",
+    prompt: "Copiar frase: pratique О о em letra cursiva. Copie uma frase curta sem interromper o ritmo.",
+    objective: "Aplicar a letra em contexto.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 510,
+    letterPosition: 16,
+    upper: "О",
+    letter: "о",
+    mode: "cursive",
+    stageNumber: 14,
+    stageCode: "ditado",
+    stageTitle: "Escrever por ditado",
+    level: "B1",
+    target: "окно",
+    word: "окно",
+    translation: "janela",
+    sound: "o",
+    prompt: "Escrever por ditado: pratique О о em letra cursiva. Ouça o modelo e escreva sem olhar; depois compare.",
+    objective: "Recuperar a grafia pela memória.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 511,
+    letterPosition: 16,
+    upper: "О",
+    letter: "о",
+    mode: "cursive",
+    stageNumber: 15,
+    stageCode: "fluencia",
+    stageTitle: "Treino de fluência",
+    level: "B2",
+    target: "окно",
+    word: "окно",
+    translation: "janela",
+    sound: "o",
+    prompt: "Treino de fluência: pratique О о em letra cursiva. Escreva com tempo controlado sem sacrificar clareza.",
+    objective: "Ganhar velocidade com legibilidade.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 512,
+    letterPosition: 16,
+    upper: "О",
+    letter: "о",
+    mode: "cursive",
+    stageNumber: 16,
+    stageCode: "producao",
+    stageTitle: "Produção livre",
+    level: "C1",
+    target: "Я пишу слово «окно».",
+    word: "окно",
+    translation: "janela",
+    sound: "o",
+    prompt: "Produção livre: pratique О о em letra cursiva. Crie uma frase curta usando a palavra-modelo.",
+    objective: "Usar a escrita de maneira independente.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 513,
+    letterPosition: 17,
+    upper: "П",
+    letter: "п",
+    mode: "print",
+    stageNumber: 1,
+    stageCode: "observacao",
+    stageTitle: "Observar proporções",
+    level: "A1",
+    target: "ппппп",
+    word: "папа",
+    translation: "papai",
+    sound: "p",
+    prompt: "Observar proporções: pratique П п em letra de forma. Compare altura, largura, inclinação e posição na linha.",
+    objective: "Reconhecer a forma antes de escrever.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 514,
+    letterPosition: 17,
+    upper: "П",
+    letter: "п",
+    mode: "print",
+    stageNumber: 2,
+    stageCode: "movimento_ar",
+    stageTitle: "Desenhar no ar",
+    level: "A1",
+    target: "ппппп",
+    word: "папа",
+    translation: "papai",
+    sound: "p",
+    prompt: "Desenhar no ar: pratique П п em letra de forma. Faça o movimento amplo com o braço antes de usar o lápis.",
+    objective: "Memorizar a direção geral do traço.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 515,
+    letterPosition: 17,
+    upper: "П",
+    letter: "п",
+    mode: "print",
+    stageNumber: 3,
+    stageCode: "maiuscula_guiada",
+    stageTitle: "Traçar maiúscula",
+    level: "A1",
+    target: "ППППП",
+    word: "папа",
+    translation: "papai",
+    sound: "p",
+    prompt: "Traçar maiúscula: pratique П п em letra de forma. Passe sobre o modelo maiúsculo sem acelerar.",
+    objective: "Controlar início, direção e encerramento.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 516,
+    letterPosition: 17,
+    upper: "П",
+    letter: "п",
+    mode: "print",
+    stageNumber: 4,
+    stageCode: "minuscula_guiada",
+    stageTitle: "Traçar minúscula",
+    level: "A1",
+    target: "ппппп",
+    word: "папа",
+    translation: "papai",
+    sound: "p",
+    prompt: "Traçar minúscula: pratique П п em letra de forma. Passe sobre o modelo minúsculo mantendo a altura.",
+    objective: "Dominar a forma usada dentro das palavras.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 517,
+    letterPosition: 17,
+    upper: "П",
+    letter: "п",
+    mode: "print",
+    stageNumber: 5,
+    stageCode: "copia_isolada",
+    stageTitle: "Copiar isoladamente",
+    level: "A1",
+    target: "ппппп",
+    word: "папа",
+    translation: "papai",
+    sound: "p",
+    prompt: "Copiar isoladamente: pratique П п em letra de forma. Copie a letra cinco vezes ao lado do modelo.",
+    objective: "Manter tamanho e espaçamento consistentes.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 518,
+    letterPosition: 17,
+    upper: "П",
+    letter: "п",
+    mode: "print",
+    stageNumber: 6,
+    stageCode: "ritmo",
+    stageTitle: "Criar ritmo",
+    level: "A2",
+    target: "пппп пппп пппп",
+    word: "папа",
+    translation: "papai",
+    sound: "p",
+    prompt: "Criar ritmo: pratique П п em letra de forma. Escreva uma linha contínua com intervalos regulares.",
+    objective: "Automatizar o movimento sem perder legibilidade.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 519,
+    letterPosition: 17,
+    upper: "П",
+    letter: "п",
+    mode: "print",
+    stageNumber: 7,
+    stageCode: "ligacao_a",
+    stageTitle: "Ligar com а",
+    level: "A2",
+    target: "па ап",
+    word: "папа",
+    translation: "papai",
+    sound: "p",
+    prompt: "Ligar com а: pratique П п em letra de forma. Pratique a ligação de entrada e saída com а.",
+    objective: "Aprender uma conexão frequente.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 520,
+    letterPosition: 17,
+    upper: "П",
+    letter: "п",
+    mode: "print",
+    stageNumber: 8,
+    stageCode: "ligacao_o",
+    stageTitle: "Ligar com о",
+    level: "A2",
+    target: "по оп",
+    word: "папа",
+    translation: "papai",
+    sound: "p",
+    prompt: "Ligar com о: pratique П п em letra de forma. Pratique a ligação de entrada e saída com о.",
+    objective: "Evitar que as letras se encostem demais.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 521,
+    letterPosition: 17,
+    upper: "П",
+    letter: "п",
+    mode: "print",
+    stageNumber: 9,
+    stageCode: "ligacao_i",
+    stageTitle: "Ligar com и",
+    level: "A2",
+    target: "пи ип",
+    word: "папа",
+    translation: "papai",
+    sound: "p",
+    prompt: "Ligar com и: pratique П п em letra de forma. Pratique a ligação de entrada e saída com и.",
+    objective: "Manter o fluxo da cursiva.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 522,
+    letterPosition: 17,
+    upper: "П",
+    letter: "п",
+    mode: "print",
+    stageNumber: 10,
+    stageCode: "ligacao_m",
+    stageTitle: "Ligar com м",
+    level: "A2",
+    target: "пм мп",
+    word: "папа",
+    translation: "papai",
+    sound: "p",
+    prompt: "Ligar com м: pratique П п em letra de forma. Pratique a ligação de entrada e saída com м.",
+    objective: "Diferenciar arcos e hastes semelhantes.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 523,
+    letterPosition: 17,
+    upper: "П",
+    letter: "п",
+    mode: "print",
+    stageNumber: 11,
+    stageCode: "silaba",
+    stageTitle: "Copiar sílabas",
+    level: "A2",
+    target: "па по пу пи",
+    word: "папа",
+    translation: "papai",
+    sound: "p",
+    prompt: "Copiar sílabas: pratique П п em letra de forma. Copie sílabas curtas e leia em voz alta.",
+    objective: "Unir escrita, leitura e som.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 524,
+    letterPosition: 17,
+    upper: "П",
+    letter: "п",
+    mode: "print",
+    stageNumber: 12,
+    stageCode: "palavra",
+    stageTitle: "Copiar palavra",
+    level: "B1",
+    target: "папа",
+    word: "папа",
+    translation: "papai",
+    sound: "p",
+    prompt: "Copiar palavra: pratique П п em letra de forma. Copie a palavra-modelo e confira cada ligação.",
+    objective: "Aplicar a letra em vocabulário real.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 525,
+    letterPosition: 17,
+    upper: "П",
+    letter: "п",
+    mode: "print",
+    stageNumber: 13,
+    stageCode: "frase",
+    stageTitle: "Copiar frase",
+    level: "B1",
+    target: "Я пишу слово «папа».",
+    word: "папа",
+    translation: "papai",
+    sound: "p",
+    prompt: "Copiar frase: pratique П п em letra de forma. Copie uma frase curta sem interromper o ritmo.",
+    objective: "Aplicar a letra em contexto.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 526,
+    letterPosition: 17,
+    upper: "П",
+    letter: "п",
+    mode: "print",
+    stageNumber: 14,
+    stageCode: "ditado",
+    stageTitle: "Escrever por ditado",
+    level: "B1",
+    target: "папа",
+    word: "папа",
+    translation: "papai",
+    sound: "p",
+    prompt: "Escrever por ditado: pratique П п em letra de forma. Ouça o modelo e escreva sem olhar; depois compare.",
+    objective: "Recuperar a grafia pela memória.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 527,
+    letterPosition: 17,
+    upper: "П",
+    letter: "п",
+    mode: "print",
+    stageNumber: 15,
+    stageCode: "fluencia",
+    stageTitle: "Treino de fluência",
+    level: "B2",
+    target: "папа",
+    word: "папа",
+    translation: "papai",
+    sound: "p",
+    prompt: "Treino de fluência: pratique П п em letra de forma. Escreva com tempo controlado sem sacrificar clareza.",
+    objective: "Ganhar velocidade com legibilidade.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 528,
+    letterPosition: 17,
+    upper: "П",
+    letter: "п",
+    mode: "print",
+    stageNumber: 16,
+    stageCode: "producao",
+    stageTitle: "Produção livre",
+    level: "C1",
+    target: "Я пишу слово «папа».",
+    word: "папа",
+    translation: "papai",
+    sound: "p",
+    prompt: "Produção livre: pratique П п em letra de forma. Crie uma frase curta usando a palavra-modelo.",
+    objective: "Usar a escrita de maneira independente.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 529,
+    letterPosition: 17,
+    upper: "П",
+    letter: "п",
+    mode: "cursive",
+    stageNumber: 1,
+    stageCode: "observacao",
+    stageTitle: "Observar proporções",
+    level: "A1",
+    target: "ппппп",
+    word: "папа",
+    translation: "papai",
+    sound: "p",
+    prompt: "Observar proporções: pratique П п em letra cursiva. Compare altura, largura, inclinação e posição na linha.",
+    objective: "Reconhecer a forma antes de escrever.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 530,
+    letterPosition: 17,
+    upper: "П",
+    letter: "п",
+    mode: "cursive",
+    stageNumber: 2,
+    stageCode: "movimento_ar",
+    stageTitle: "Desenhar no ar",
+    level: "A1",
+    target: "ппппп",
+    word: "папа",
+    translation: "papai",
+    sound: "p",
+    prompt: "Desenhar no ar: pratique П п em letra cursiva. Faça o movimento amplo com o braço antes de usar o lápis.",
+    objective: "Memorizar a direção geral do traço.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 531,
+    letterPosition: 17,
+    upper: "П",
+    letter: "п",
+    mode: "cursive",
+    stageNumber: 3,
+    stageCode: "maiuscula_guiada",
+    stageTitle: "Traçar maiúscula",
+    level: "A1",
+    target: "ППППП",
+    word: "папа",
+    translation: "papai",
+    sound: "p",
+    prompt: "Traçar maiúscula: pratique П п em letra cursiva. Passe sobre o modelo maiúsculo sem acelerar.",
+    objective: "Controlar início, direção e encerramento.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 532,
+    letterPosition: 17,
+    upper: "П",
+    letter: "п",
+    mode: "cursive",
+    stageNumber: 4,
+    stageCode: "minuscula_guiada",
+    stageTitle: "Traçar minúscula",
+    level: "A1",
+    target: "ппппп",
+    word: "папа",
+    translation: "papai",
+    sound: "p",
+    prompt: "Traçar minúscula: pratique П п em letra cursiva. Passe sobre o modelo minúsculo mantendo a altura.",
+    objective: "Dominar a forma usada dentro das palavras.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 533,
+    letterPosition: 17,
+    upper: "П",
+    letter: "п",
+    mode: "cursive",
+    stageNumber: 5,
+    stageCode: "copia_isolada",
+    stageTitle: "Copiar isoladamente",
+    level: "A1",
+    target: "ппппп",
+    word: "папа",
+    translation: "papai",
+    sound: "p",
+    prompt: "Copiar isoladamente: pratique П п em letra cursiva. Copie a letra cinco vezes ao lado do modelo.",
+    objective: "Manter tamanho e espaçamento consistentes.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 534,
+    letterPosition: 17,
+    upper: "П",
+    letter: "п",
+    mode: "cursive",
+    stageNumber: 6,
+    stageCode: "ritmo",
+    stageTitle: "Criar ritmo",
+    level: "A2",
+    target: "пппп пппп пппп",
+    word: "папа",
+    translation: "papai",
+    sound: "p",
+    prompt: "Criar ritmo: pratique П п em letra cursiva. Escreva uma linha contínua com intervalos regulares.",
+    objective: "Automatizar o movimento sem perder legibilidade.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 535,
+    letterPosition: 17,
+    upper: "П",
+    letter: "п",
+    mode: "cursive",
+    stageNumber: 7,
+    stageCode: "ligacao_a",
+    stageTitle: "Ligar com а",
+    level: "A2",
+    target: "па ап",
+    word: "папа",
+    translation: "papai",
+    sound: "p",
+    prompt: "Ligar com а: pratique П п em letra cursiva. Pratique a ligação de entrada e saída com а.",
+    objective: "Aprender uma conexão frequente.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 536,
+    letterPosition: 17,
+    upper: "П",
+    letter: "п",
+    mode: "cursive",
+    stageNumber: 8,
+    stageCode: "ligacao_o",
+    stageTitle: "Ligar com о",
+    level: "A2",
+    target: "по оп",
+    word: "папа",
+    translation: "papai",
+    sound: "p",
+    prompt: "Ligar com о: pratique П п em letra cursiva. Pratique a ligação de entrada e saída com о.",
+    objective: "Evitar que as letras se encostem demais.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 537,
+    letterPosition: 17,
+    upper: "П",
+    letter: "п",
+    mode: "cursive",
+    stageNumber: 9,
+    stageCode: "ligacao_i",
+    stageTitle: "Ligar com и",
+    level: "A2",
+    target: "пи ип",
+    word: "папа",
+    translation: "papai",
+    sound: "p",
+    prompt: "Ligar com и: pratique П п em letra cursiva. Pratique a ligação de entrada e saída com и.",
+    objective: "Manter o fluxo da cursiva.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 538,
+    letterPosition: 17,
+    upper: "П",
+    letter: "п",
+    mode: "cursive",
+    stageNumber: 10,
+    stageCode: "ligacao_m",
+    stageTitle: "Ligar com м",
+    level: "A2",
+    target: "пм мп",
+    word: "папа",
+    translation: "papai",
+    sound: "p",
+    prompt: "Ligar com м: pratique П п em letra cursiva. Pratique a ligação de entrada e saída com м.",
+    objective: "Diferenciar arcos e hastes semelhantes.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 539,
+    letterPosition: 17,
+    upper: "П",
+    letter: "п",
+    mode: "cursive",
+    stageNumber: 11,
+    stageCode: "silaba",
+    stageTitle: "Copiar sílabas",
+    level: "A2",
+    target: "па по пу пи",
+    word: "папа",
+    translation: "papai",
+    sound: "p",
+    prompt: "Copiar sílabas: pratique П п em letra cursiva. Copie sílabas curtas e leia em voz alta.",
+    objective: "Unir escrita, leitura e som.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 540,
+    letterPosition: 17,
+    upper: "П",
+    letter: "п",
+    mode: "cursive",
+    stageNumber: 12,
+    stageCode: "palavra",
+    stageTitle: "Copiar palavra",
+    level: "B1",
+    target: "папа",
+    word: "папа",
+    translation: "papai",
+    sound: "p",
+    prompt: "Copiar palavra: pratique П п em letra cursiva. Copie a palavra-modelo e confira cada ligação.",
+    objective: "Aplicar a letra em vocabulário real.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 541,
+    letterPosition: 17,
+    upper: "П",
+    letter: "п",
+    mode: "cursive",
+    stageNumber: 13,
+    stageCode: "frase",
+    stageTitle: "Copiar frase",
+    level: "B1",
+    target: "Я пишу слово «папа».",
+    word: "папа",
+    translation: "papai",
+    sound: "p",
+    prompt: "Copiar frase: pratique П п em letra cursiva. Copie uma frase curta sem interromper o ritmo.",
+    objective: "Aplicar a letra em contexto.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 542,
+    letterPosition: 17,
+    upper: "П",
+    letter: "п",
+    mode: "cursive",
+    stageNumber: 14,
+    stageCode: "ditado",
+    stageTitle: "Escrever por ditado",
+    level: "B1",
+    target: "папа",
+    word: "папа",
+    translation: "papai",
+    sound: "p",
+    prompt: "Escrever por ditado: pratique П п em letra cursiva. Ouça o modelo e escreva sem olhar; depois compare.",
+    objective: "Recuperar a grafia pela memória.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 543,
+    letterPosition: 17,
+    upper: "П",
+    letter: "п",
+    mode: "cursive",
+    stageNumber: 15,
+    stageCode: "fluencia",
+    stageTitle: "Treino de fluência",
+    level: "B2",
+    target: "папа",
+    word: "папа",
+    translation: "papai",
+    sound: "p",
+    prompt: "Treino de fluência: pratique П п em letra cursiva. Escreva com tempo controlado sem sacrificar clareza.",
+    objective: "Ganhar velocidade com legibilidade.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 544,
+    letterPosition: 17,
+    upper: "П",
+    letter: "п",
+    mode: "cursive",
+    stageNumber: 16,
+    stageCode: "producao",
+    stageTitle: "Produção livre",
+    level: "C1",
+    target: "Я пишу слово «папа».",
+    word: "папа",
+    translation: "papai",
+    sound: "p",
+    prompt: "Produção livre: pratique П п em letra cursiva. Crie uma frase curta usando a palavra-modelo.",
+    objective: "Usar a escrita de maneira independente.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 545,
+    letterPosition: 18,
+    upper: "Р",
+    letter: "р",
+    mode: "print",
+    stageNumber: 1,
+    stageCode: "observacao",
+    stageTitle: "Observar proporções",
+    level: "A1",
+    target: "ррррр",
+    word: "Россия",
+    translation: "Rússia",
+    sound: "r vibrante",
+    prompt: "Observar proporções: pratique Р р em letra de forma. Compare altura, largura, inclinação e posição na linha.",
+    objective: "Reconhecer a forma antes de escrever.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 546,
+    letterPosition: 18,
+    upper: "Р",
+    letter: "р",
+    mode: "print",
+    stageNumber: 2,
+    stageCode: "movimento_ar",
+    stageTitle: "Desenhar no ar",
+    level: "A1",
+    target: "ррррр",
+    word: "Россия",
+    translation: "Rússia",
+    sound: "r vibrante",
+    prompt: "Desenhar no ar: pratique Р р em letra de forma. Faça o movimento amplo com o braço antes de usar o lápis.",
+    objective: "Memorizar a direção geral do traço.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 547,
+    letterPosition: 18,
+    upper: "Р",
+    letter: "р",
+    mode: "print",
+    stageNumber: 3,
+    stageCode: "maiuscula_guiada",
+    stageTitle: "Traçar maiúscula",
+    level: "A1",
+    target: "РРРРР",
+    word: "Россия",
+    translation: "Rússia",
+    sound: "r vibrante",
+    prompt: "Traçar maiúscula: pratique Р р em letra de forma. Passe sobre o modelo maiúsculo sem acelerar.",
+    objective: "Controlar início, direção e encerramento.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 548,
+    letterPosition: 18,
+    upper: "Р",
+    letter: "р",
+    mode: "print",
+    stageNumber: 4,
+    stageCode: "minuscula_guiada",
+    stageTitle: "Traçar minúscula",
+    level: "A1",
+    target: "ррррр",
+    word: "Россия",
+    translation: "Rússia",
+    sound: "r vibrante",
+    prompt: "Traçar minúscula: pratique Р р em letra de forma. Passe sobre o modelo minúsculo mantendo a altura.",
+    objective: "Dominar a forma usada dentro das palavras.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 549,
+    letterPosition: 18,
+    upper: "Р",
+    letter: "р",
+    mode: "print",
+    stageNumber: 5,
+    stageCode: "copia_isolada",
+    stageTitle: "Copiar isoladamente",
+    level: "A1",
+    target: "ррррр",
+    word: "Россия",
+    translation: "Rússia",
+    sound: "r vibrante",
+    prompt: "Copiar isoladamente: pratique Р р em letra de forma. Copie a letra cinco vezes ao lado do modelo.",
+    objective: "Manter tamanho e espaçamento consistentes.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 550,
+    letterPosition: 18,
+    upper: "Р",
+    letter: "р",
+    mode: "print",
+    stageNumber: 6,
+    stageCode: "ritmo",
+    stageTitle: "Criar ritmo",
+    level: "A2",
+    target: "рррр рррр рррр",
+    word: "Россия",
+    translation: "Rússia",
+    sound: "r vibrante",
+    prompt: "Criar ritmo: pratique Р р em letra de forma. Escreva uma linha contínua com intervalos regulares.",
+    objective: "Automatizar o movimento sem perder legibilidade.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 551,
+    letterPosition: 18,
+    upper: "Р",
+    letter: "р",
+    mode: "print",
+    stageNumber: 7,
+    stageCode: "ligacao_a",
+    stageTitle: "Ligar com а",
+    level: "A2",
+    target: "ра ар",
+    word: "Россия",
+    translation: "Rússia",
+    sound: "r vibrante",
+    prompt: "Ligar com а: pratique Р р em letra de forma. Pratique a ligação de entrada e saída com а.",
+    objective: "Aprender uma conexão frequente.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 552,
+    letterPosition: 18,
+    upper: "Р",
+    letter: "р",
+    mode: "print",
+    stageNumber: 8,
+    stageCode: "ligacao_o",
+    stageTitle: "Ligar com о",
+    level: "A2",
+    target: "ро ор",
+    word: "Россия",
+    translation: "Rússia",
+    sound: "r vibrante",
+    prompt: "Ligar com о: pratique Р р em letra de forma. Pratique a ligação de entrada e saída com о.",
+    objective: "Evitar que as letras se encostem demais.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 553,
+    letterPosition: 18,
+    upper: "Р",
+    letter: "р",
+    mode: "print",
+    stageNumber: 9,
+    stageCode: "ligacao_i",
+    stageTitle: "Ligar com и",
+    level: "A2",
+    target: "ри ир",
+    word: "Россия",
+    translation: "Rússia",
+    sound: "r vibrante",
+    prompt: "Ligar com и: pratique Р р em letra de forma. Pratique a ligação de entrada e saída com и.",
+    objective: "Manter o fluxo da cursiva.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 554,
+    letterPosition: 18,
+    upper: "Р",
+    letter: "р",
+    mode: "print",
+    stageNumber: 10,
+    stageCode: "ligacao_m",
+    stageTitle: "Ligar com м",
+    level: "A2",
+    target: "рм мр",
+    word: "Россия",
+    translation: "Rússia",
+    sound: "r vibrante",
+    prompt: "Ligar com м: pratique Р р em letra de forma. Pratique a ligação de entrada e saída com м.",
+    objective: "Diferenciar arcos e hastes semelhantes.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 555,
+    letterPosition: 18,
+    upper: "Р",
+    letter: "р",
+    mode: "print",
+    stageNumber: 11,
+    stageCode: "silaba",
+    stageTitle: "Copiar sílabas",
+    level: "A2",
+    target: "ра ро ру ри",
+    word: "Россия",
+    translation: "Rússia",
+    sound: "r vibrante",
+    prompt: "Copiar sílabas: pratique Р р em letra de forma. Copie sílabas curtas e leia em voz alta.",
+    objective: "Unir escrita, leitura e som.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 556,
+    letterPosition: 18,
+    upper: "Р",
+    letter: "р",
+    mode: "print",
+    stageNumber: 12,
+    stageCode: "palavra",
+    stageTitle: "Copiar palavra",
+    level: "B1",
+    target: "Россия",
+    word: "Россия",
+    translation: "Rússia",
+    sound: "r vibrante",
+    prompt: "Copiar palavra: pratique Р р em letra de forma. Copie a palavra-modelo e confira cada ligação.",
+    objective: "Aplicar a letra em vocabulário real.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 557,
+    letterPosition: 18,
+    upper: "Р",
+    letter: "р",
+    mode: "print",
+    stageNumber: 13,
+    stageCode: "frase",
+    stageTitle: "Copiar frase",
+    level: "B1",
+    target: "Я пишу слово «Россия».",
+    word: "Россия",
+    translation: "Rússia",
+    sound: "r vibrante",
+    prompt: "Copiar frase: pratique Р р em letra de forma. Copie uma frase curta sem interromper o ritmo.",
+    objective: "Aplicar a letra em contexto.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 558,
+    letterPosition: 18,
+    upper: "Р",
+    letter: "р",
+    mode: "print",
+    stageNumber: 14,
+    stageCode: "ditado",
+    stageTitle: "Escrever por ditado",
+    level: "B1",
+    target: "Россия",
+    word: "Россия",
+    translation: "Rússia",
+    sound: "r vibrante",
+    prompt: "Escrever por ditado: pratique Р р em letra de forma. Ouça o modelo e escreva sem olhar; depois compare.",
+    objective: "Recuperar a grafia pela memória.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 559,
+    letterPosition: 18,
+    upper: "Р",
+    letter: "р",
+    mode: "print",
+    stageNumber: 15,
+    stageCode: "fluencia",
+    stageTitle: "Treino de fluência",
+    level: "B2",
+    target: "Россия",
+    word: "Россия",
+    translation: "Rússia",
+    sound: "r vibrante",
+    prompt: "Treino de fluência: pratique Р р em letra de forma. Escreva com tempo controlado sem sacrificar clareza.",
+    objective: "Ganhar velocidade com legibilidade.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 560,
+    letterPosition: 18,
+    upper: "Р",
+    letter: "р",
+    mode: "print",
+    stageNumber: 16,
+    stageCode: "producao",
+    stageTitle: "Produção livre",
+    level: "C1",
+    target: "Я пишу слово «Россия».",
+    word: "Россия",
+    translation: "Rússia",
+    sound: "r vibrante",
+    prompt: "Produção livre: pratique Р р em letra de forma. Crie uma frase curta usando a palavra-modelo.",
+    objective: "Usar a escrita de maneira independente.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 561,
+    letterPosition: 18,
+    upper: "Р",
+    letter: "р",
+    mode: "cursive",
+    stageNumber: 1,
+    stageCode: "observacao",
+    stageTitle: "Observar proporções",
+    level: "A1",
+    target: "ррррр",
+    word: "Россия",
+    translation: "Rússia",
+    sound: "r vibrante",
+    prompt: "Observar proporções: pratique Р р em letra cursiva. Compare altura, largura, inclinação e posição na linha.",
+    objective: "Reconhecer a forma antes de escrever.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 562,
+    letterPosition: 18,
+    upper: "Р",
+    letter: "р",
+    mode: "cursive",
+    stageNumber: 2,
+    stageCode: "movimento_ar",
+    stageTitle: "Desenhar no ar",
+    level: "A1",
+    target: "ррррр",
+    word: "Россия",
+    translation: "Rússia",
+    sound: "r vibrante",
+    prompt: "Desenhar no ar: pratique Р р em letra cursiva. Faça o movimento amplo com o braço antes de usar o lápis.",
+    objective: "Memorizar a direção geral do traço.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 563,
+    letterPosition: 18,
+    upper: "Р",
+    letter: "р",
+    mode: "cursive",
+    stageNumber: 3,
+    stageCode: "maiuscula_guiada",
+    stageTitle: "Traçar maiúscula",
+    level: "A1",
+    target: "РРРРР",
+    word: "Россия",
+    translation: "Rússia",
+    sound: "r vibrante",
+    prompt: "Traçar maiúscula: pratique Р р em letra cursiva. Passe sobre o modelo maiúsculo sem acelerar.",
+    objective: "Controlar início, direção e encerramento.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 564,
+    letterPosition: 18,
+    upper: "Р",
+    letter: "р",
+    mode: "cursive",
+    stageNumber: 4,
+    stageCode: "minuscula_guiada",
+    stageTitle: "Traçar minúscula",
+    level: "A1",
+    target: "ррррр",
+    word: "Россия",
+    translation: "Rússia",
+    sound: "r vibrante",
+    prompt: "Traçar minúscula: pratique Р р em letra cursiva. Passe sobre o modelo minúsculo mantendo a altura.",
+    objective: "Dominar a forma usada dentro das palavras.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 565,
+    letterPosition: 18,
+    upper: "Р",
+    letter: "р",
+    mode: "cursive",
+    stageNumber: 5,
+    stageCode: "copia_isolada",
+    stageTitle: "Copiar isoladamente",
+    level: "A1",
+    target: "ррррр",
+    word: "Россия",
+    translation: "Rússia",
+    sound: "r vibrante",
+    prompt: "Copiar isoladamente: pratique Р р em letra cursiva. Copie a letra cinco vezes ao lado do modelo.",
+    objective: "Manter tamanho e espaçamento consistentes.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 566,
+    letterPosition: 18,
+    upper: "Р",
+    letter: "р",
+    mode: "cursive",
+    stageNumber: 6,
+    stageCode: "ritmo",
+    stageTitle: "Criar ritmo",
+    level: "A2",
+    target: "рррр рррр рррр",
+    word: "Россия",
+    translation: "Rússia",
+    sound: "r vibrante",
+    prompt: "Criar ritmo: pratique Р р em letra cursiva. Escreva uma linha contínua com intervalos regulares.",
+    objective: "Automatizar o movimento sem perder legibilidade.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 567,
+    letterPosition: 18,
+    upper: "Р",
+    letter: "р",
+    mode: "cursive",
+    stageNumber: 7,
+    stageCode: "ligacao_a",
+    stageTitle: "Ligar com а",
+    level: "A2",
+    target: "ра ар",
+    word: "Россия",
+    translation: "Rússia",
+    sound: "r vibrante",
+    prompt: "Ligar com а: pratique Р р em letra cursiva. Pratique a ligação de entrada e saída com а.",
+    objective: "Aprender uma conexão frequente.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 568,
+    letterPosition: 18,
+    upper: "Р",
+    letter: "р",
+    mode: "cursive",
+    stageNumber: 8,
+    stageCode: "ligacao_o",
+    stageTitle: "Ligar com о",
+    level: "A2",
+    target: "ро ор",
+    word: "Россия",
+    translation: "Rússia",
+    sound: "r vibrante",
+    prompt: "Ligar com о: pratique Р р em letra cursiva. Pratique a ligação de entrada e saída com о.",
+    objective: "Evitar que as letras se encostem demais.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 569,
+    letterPosition: 18,
+    upper: "Р",
+    letter: "р",
+    mode: "cursive",
+    stageNumber: 9,
+    stageCode: "ligacao_i",
+    stageTitle: "Ligar com и",
+    level: "A2",
+    target: "ри ир",
+    word: "Россия",
+    translation: "Rússia",
+    sound: "r vibrante",
+    prompt: "Ligar com и: pratique Р р em letra cursiva. Pratique a ligação de entrada e saída com и.",
+    objective: "Manter o fluxo da cursiva.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 570,
+    letterPosition: 18,
+    upper: "Р",
+    letter: "р",
+    mode: "cursive",
+    stageNumber: 10,
+    stageCode: "ligacao_m",
+    stageTitle: "Ligar com м",
+    level: "A2",
+    target: "рм мр",
+    word: "Россия",
+    translation: "Rússia",
+    sound: "r vibrante",
+    prompt: "Ligar com м: pratique Р р em letra cursiva. Pratique a ligação de entrada e saída com м.",
+    objective: "Diferenciar arcos e hastes semelhantes.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 571,
+    letterPosition: 18,
+    upper: "Р",
+    letter: "р",
+    mode: "cursive",
+    stageNumber: 11,
+    stageCode: "silaba",
+    stageTitle: "Copiar sílabas",
+    level: "A2",
+    target: "ра ро ру ри",
+    word: "Россия",
+    translation: "Rússia",
+    sound: "r vibrante",
+    prompt: "Copiar sílabas: pratique Р р em letra cursiva. Copie sílabas curtas e leia em voz alta.",
+    objective: "Unir escrita, leitura e som.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 572,
+    letterPosition: 18,
+    upper: "Р",
+    letter: "р",
+    mode: "cursive",
+    stageNumber: 12,
+    stageCode: "palavra",
+    stageTitle: "Copiar palavra",
+    level: "B1",
+    target: "Россия",
+    word: "Россия",
+    translation: "Rússia",
+    sound: "r vibrante",
+    prompt: "Copiar palavra: pratique Р р em letra cursiva. Copie a palavra-modelo e confira cada ligação.",
+    objective: "Aplicar a letra em vocabulário real.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 573,
+    letterPosition: 18,
+    upper: "Р",
+    letter: "р",
+    mode: "cursive",
+    stageNumber: 13,
+    stageCode: "frase",
+    stageTitle: "Copiar frase",
+    level: "B1",
+    target: "Я пишу слово «Россия».",
+    word: "Россия",
+    translation: "Rússia",
+    sound: "r vibrante",
+    prompt: "Copiar frase: pratique Р р em letra cursiva. Copie uma frase curta sem interromper o ritmo.",
+    objective: "Aplicar a letra em contexto.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 574,
+    letterPosition: 18,
+    upper: "Р",
+    letter: "р",
+    mode: "cursive",
+    stageNumber: 14,
+    stageCode: "ditado",
+    stageTitle: "Escrever por ditado",
+    level: "B1",
+    target: "Россия",
+    word: "Россия",
+    translation: "Rússia",
+    sound: "r vibrante",
+    prompt: "Escrever por ditado: pratique Р р em letra cursiva. Ouça o modelo e escreva sem olhar; depois compare.",
+    objective: "Recuperar a grafia pela memória.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 575,
+    letterPosition: 18,
+    upper: "Р",
+    letter: "р",
+    mode: "cursive",
+    stageNumber: 15,
+    stageCode: "fluencia",
+    stageTitle: "Treino de fluência",
+    level: "B2",
+    target: "Россия",
+    word: "Россия",
+    translation: "Rússia",
+    sound: "r vibrante",
+    prompt: "Treino de fluência: pratique Р р em letra cursiva. Escreva com tempo controlado sem sacrificar clareza.",
+    objective: "Ganhar velocidade com legibilidade.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 576,
+    letterPosition: 18,
+    upper: "Р",
+    letter: "р",
+    mode: "cursive",
+    stageNumber: 16,
+    stageCode: "producao",
+    stageTitle: "Produção livre",
+    level: "C1",
+    target: "Я пишу слово «Россия».",
+    word: "Россия",
+    translation: "Rússia",
+    sound: "r vibrante",
+    prompt: "Produção livre: pratique Р р em letra cursiva. Crie uma frase curta usando a palavra-modelo.",
+    objective: "Usar a escrita de maneira independente.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 577,
+    letterPosition: 19,
+    upper: "С",
+    letter: "с",
+    mode: "print",
+    stageNumber: 1,
+    stageCode: "observacao",
+    stageTitle: "Observar proporções",
+    level: "A1",
+    target: "ссссс",
+    word: "собака",
+    translation: "cachorro",
+    sound: "s",
+    prompt: "Observar proporções: pratique С с em letra de forma. Compare altura, largura, inclinação e posição na linha.",
+    objective: "Reconhecer a forma antes de escrever.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 578,
+    letterPosition: 19,
+    upper: "С",
+    letter: "с",
+    mode: "print",
+    stageNumber: 2,
+    stageCode: "movimento_ar",
+    stageTitle: "Desenhar no ar",
+    level: "A1",
+    target: "ссссс",
+    word: "собака",
+    translation: "cachorro",
+    sound: "s",
+    prompt: "Desenhar no ar: pratique С с em letra de forma. Faça o movimento amplo com o braço antes de usar o lápis.",
+    objective: "Memorizar a direção geral do traço.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 579,
+    letterPosition: 19,
+    upper: "С",
+    letter: "с",
+    mode: "print",
+    stageNumber: 3,
+    stageCode: "maiuscula_guiada",
+    stageTitle: "Traçar maiúscula",
+    level: "A1",
+    target: "ССССС",
+    word: "собака",
+    translation: "cachorro",
+    sound: "s",
+    prompt: "Traçar maiúscula: pratique С с em letra de forma. Passe sobre o modelo maiúsculo sem acelerar.",
+    objective: "Controlar início, direção e encerramento.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 580,
+    letterPosition: 19,
+    upper: "С",
+    letter: "с",
+    mode: "print",
+    stageNumber: 4,
+    stageCode: "minuscula_guiada",
+    stageTitle: "Traçar minúscula",
+    level: "A1",
+    target: "ссссс",
+    word: "собака",
+    translation: "cachorro",
+    sound: "s",
+    prompt: "Traçar minúscula: pratique С с em letra de forma. Passe sobre o modelo minúsculo mantendo a altura.",
+    objective: "Dominar a forma usada dentro das palavras.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 581,
+    letterPosition: 19,
+    upper: "С",
+    letter: "с",
+    mode: "print",
+    stageNumber: 5,
+    stageCode: "copia_isolada",
+    stageTitle: "Copiar isoladamente",
+    level: "A1",
+    target: "ссссс",
+    word: "собака",
+    translation: "cachorro",
+    sound: "s",
+    prompt: "Copiar isoladamente: pratique С с em letra de forma. Copie a letra cinco vezes ao lado do modelo.",
+    objective: "Manter tamanho e espaçamento consistentes.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 582,
+    letterPosition: 19,
+    upper: "С",
+    letter: "с",
+    mode: "print",
+    stageNumber: 6,
+    stageCode: "ritmo",
+    stageTitle: "Criar ritmo",
+    level: "A2",
+    target: "сссс сссс сссс",
+    word: "собака",
+    translation: "cachorro",
+    sound: "s",
+    prompt: "Criar ritmo: pratique С с em letra de forma. Escreva uma linha contínua com intervalos regulares.",
+    objective: "Automatizar o movimento sem perder legibilidade.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 583,
+    letterPosition: 19,
+    upper: "С",
+    letter: "с",
+    mode: "print",
+    stageNumber: 7,
+    stageCode: "ligacao_a",
+    stageTitle: "Ligar com а",
+    level: "A2",
+    target: "са ас",
+    word: "собака",
+    translation: "cachorro",
+    sound: "s",
+    prompt: "Ligar com а: pratique С с em letra de forma. Pratique a ligação de entrada e saída com а.",
+    objective: "Aprender uma conexão frequente.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 584,
+    letterPosition: 19,
+    upper: "С",
+    letter: "с",
+    mode: "print",
+    stageNumber: 8,
+    stageCode: "ligacao_o",
+    stageTitle: "Ligar com о",
+    level: "A2",
+    target: "со ос",
+    word: "собака",
+    translation: "cachorro",
+    sound: "s",
+    prompt: "Ligar com о: pratique С с em letra de forma. Pratique a ligação de entrada e saída com о.",
+    objective: "Evitar que as letras se encostem demais.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 585,
+    letterPosition: 19,
+    upper: "С",
+    letter: "с",
+    mode: "print",
+    stageNumber: 9,
+    stageCode: "ligacao_i",
+    stageTitle: "Ligar com и",
+    level: "A2",
+    target: "си ис",
+    word: "собака",
+    translation: "cachorro",
+    sound: "s",
+    prompt: "Ligar com и: pratique С с em letra de forma. Pratique a ligação de entrada e saída com и.",
+    objective: "Manter o fluxo da cursiva.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 586,
+    letterPosition: 19,
+    upper: "С",
+    letter: "с",
+    mode: "print",
+    stageNumber: 10,
+    stageCode: "ligacao_m",
+    stageTitle: "Ligar com м",
+    level: "A2",
+    target: "см мс",
+    word: "собака",
+    translation: "cachorro",
+    sound: "s",
+    prompt: "Ligar com м: pratique С с em letra de forma. Pratique a ligação de entrada e saída com м.",
+    objective: "Diferenciar arcos e hastes semelhantes.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 587,
+    letterPosition: 19,
+    upper: "С",
+    letter: "с",
+    mode: "print",
+    stageNumber: 11,
+    stageCode: "silaba",
+    stageTitle: "Copiar sílabas",
+    level: "A2",
+    target: "са со су си",
+    word: "собака",
+    translation: "cachorro",
+    sound: "s",
+    prompt: "Copiar sílabas: pratique С с em letra de forma. Copie sílabas curtas e leia em voz alta.",
+    objective: "Unir escrita, leitura e som.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 588,
+    letterPosition: 19,
+    upper: "С",
+    letter: "с",
+    mode: "print",
+    stageNumber: 12,
+    stageCode: "palavra",
+    stageTitle: "Copiar palavra",
+    level: "B1",
+    target: "собака",
+    word: "собака",
+    translation: "cachorro",
+    sound: "s",
+    prompt: "Copiar palavra: pratique С с em letra de forma. Copie a palavra-modelo e confira cada ligação.",
+    objective: "Aplicar a letra em vocabulário real.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 589,
+    letterPosition: 19,
+    upper: "С",
+    letter: "с",
+    mode: "print",
+    stageNumber: 13,
+    stageCode: "frase",
+    stageTitle: "Copiar frase",
+    level: "B1",
+    target: "Я пишу слово «собака».",
+    word: "собака",
+    translation: "cachorro",
+    sound: "s",
+    prompt: "Copiar frase: pratique С с em letra de forma. Copie uma frase curta sem interromper o ritmo.",
+    objective: "Aplicar a letra em contexto.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 590,
+    letterPosition: 19,
+    upper: "С",
+    letter: "с",
+    mode: "print",
+    stageNumber: 14,
+    stageCode: "ditado",
+    stageTitle: "Escrever por ditado",
+    level: "B1",
+    target: "собака",
+    word: "собака",
+    translation: "cachorro",
+    sound: "s",
+    prompt: "Escrever por ditado: pratique С с em letra de forma. Ouça o modelo e escreva sem olhar; depois compare.",
+    objective: "Recuperar a grafia pela memória.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 591,
+    letterPosition: 19,
+    upper: "С",
+    letter: "с",
+    mode: "print",
+    stageNumber: 15,
+    stageCode: "fluencia",
+    stageTitle: "Treino de fluência",
+    level: "B2",
+    target: "собака",
+    word: "собака",
+    translation: "cachorro",
+    sound: "s",
+    prompt: "Treino de fluência: pratique С с em letra de forma. Escreva com tempo controlado sem sacrificar clareza.",
+    objective: "Ganhar velocidade com legibilidade.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 592,
+    letterPosition: 19,
+    upper: "С",
+    letter: "с",
+    mode: "print",
+    stageNumber: 16,
+    stageCode: "producao",
+    stageTitle: "Produção livre",
+    level: "C1",
+    target: "Я пишу слово «собака».",
+    word: "собака",
+    translation: "cachorro",
+    sound: "s",
+    prompt: "Produção livre: pratique С с em letra de forma. Crie uma frase curta usando a palavra-modelo.",
+    objective: "Usar a escrita de maneira independente.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 593,
+    letterPosition: 19,
+    upper: "С",
+    letter: "с",
+    mode: "cursive",
+    stageNumber: 1,
+    stageCode: "observacao",
+    stageTitle: "Observar proporções",
+    level: "A1",
+    target: "ссссс",
+    word: "собака",
+    translation: "cachorro",
+    sound: "s",
+    prompt: "Observar proporções: pratique С с em letra cursiva. Compare altura, largura, inclinação e posição na linha.",
+    objective: "Reconhecer a forma antes de escrever.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 594,
+    letterPosition: 19,
+    upper: "С",
+    letter: "с",
+    mode: "cursive",
+    stageNumber: 2,
+    stageCode: "movimento_ar",
+    stageTitle: "Desenhar no ar",
+    level: "A1",
+    target: "ссссс",
+    word: "собака",
+    translation: "cachorro",
+    sound: "s",
+    prompt: "Desenhar no ar: pratique С с em letra cursiva. Faça o movimento amplo com o braço antes de usar o lápis.",
+    objective: "Memorizar a direção geral do traço.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 595,
+    letterPosition: 19,
+    upper: "С",
+    letter: "с",
+    mode: "cursive",
+    stageNumber: 3,
+    stageCode: "maiuscula_guiada",
+    stageTitle: "Traçar maiúscula",
+    level: "A1",
+    target: "ССССС",
+    word: "собака",
+    translation: "cachorro",
+    sound: "s",
+    prompt: "Traçar maiúscula: pratique С с em letra cursiva. Passe sobre o modelo maiúsculo sem acelerar.",
+    objective: "Controlar início, direção e encerramento.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 596,
+    letterPosition: 19,
+    upper: "С",
+    letter: "с",
+    mode: "cursive",
+    stageNumber: 4,
+    stageCode: "minuscula_guiada",
+    stageTitle: "Traçar minúscula",
+    level: "A1",
+    target: "ссссс",
+    word: "собака",
+    translation: "cachorro",
+    sound: "s",
+    prompt: "Traçar minúscula: pratique С с em letra cursiva. Passe sobre o modelo minúsculo mantendo a altura.",
+    objective: "Dominar a forma usada dentro das palavras.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 597,
+    letterPosition: 19,
+    upper: "С",
+    letter: "с",
+    mode: "cursive",
+    stageNumber: 5,
+    stageCode: "copia_isolada",
+    stageTitle: "Copiar isoladamente",
+    level: "A1",
+    target: "ссссс",
+    word: "собака",
+    translation: "cachorro",
+    sound: "s",
+    prompt: "Copiar isoladamente: pratique С с em letra cursiva. Copie a letra cinco vezes ao lado do modelo.",
+    objective: "Manter tamanho e espaçamento consistentes.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 598,
+    letterPosition: 19,
+    upper: "С",
+    letter: "с",
+    mode: "cursive",
+    stageNumber: 6,
+    stageCode: "ritmo",
+    stageTitle: "Criar ritmo",
+    level: "A2",
+    target: "сссс сссс сссс",
+    word: "собака",
+    translation: "cachorro",
+    sound: "s",
+    prompt: "Criar ritmo: pratique С с em letra cursiva. Escreva uma linha contínua com intervalos regulares.",
+    objective: "Automatizar o movimento sem perder legibilidade.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 599,
+    letterPosition: 19,
+    upper: "С",
+    letter: "с",
+    mode: "cursive",
+    stageNumber: 7,
+    stageCode: "ligacao_a",
+    stageTitle: "Ligar com а",
+    level: "A2",
+    target: "са ас",
+    word: "собака",
+    translation: "cachorro",
+    sound: "s",
+    prompt: "Ligar com а: pratique С с em letra cursiva. Pratique a ligação de entrada e saída com а.",
+    objective: "Aprender uma conexão frequente.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 600,
+    letterPosition: 19,
+    upper: "С",
+    letter: "с",
+    mode: "cursive",
+    stageNumber: 8,
+    stageCode: "ligacao_o",
+    stageTitle: "Ligar com о",
+    level: "A2",
+    target: "со ос",
+    word: "собака",
+    translation: "cachorro",
+    sound: "s",
+    prompt: "Ligar com о: pratique С с em letra cursiva. Pratique a ligação de entrada e saída com о.",
+    objective: "Evitar que as letras se encostem demais.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 601,
+    letterPosition: 19,
+    upper: "С",
+    letter: "с",
+    mode: "cursive",
+    stageNumber: 9,
+    stageCode: "ligacao_i",
+    stageTitle: "Ligar com и",
+    level: "A2",
+    target: "си ис",
+    word: "собака",
+    translation: "cachorro",
+    sound: "s",
+    prompt: "Ligar com и: pratique С с em letra cursiva. Pratique a ligação de entrada e saída com и.",
+    objective: "Manter o fluxo da cursiva.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 602,
+    letterPosition: 19,
+    upper: "С",
+    letter: "с",
+    mode: "cursive",
+    stageNumber: 10,
+    stageCode: "ligacao_m",
+    stageTitle: "Ligar com м",
+    level: "A2",
+    target: "см мс",
+    word: "собака",
+    translation: "cachorro",
+    sound: "s",
+    prompt: "Ligar com м: pratique С с em letra cursiva. Pratique a ligação de entrada e saída com м.",
+    objective: "Diferenciar arcos e hastes semelhantes.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 603,
+    letterPosition: 19,
+    upper: "С",
+    letter: "с",
+    mode: "cursive",
+    stageNumber: 11,
+    stageCode: "silaba",
+    stageTitle: "Copiar sílabas",
+    level: "A2",
+    target: "са со су си",
+    word: "собака",
+    translation: "cachorro",
+    sound: "s",
+    prompt: "Copiar sílabas: pratique С с em letra cursiva. Copie sílabas curtas e leia em voz alta.",
+    objective: "Unir escrita, leitura e som.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 604,
+    letterPosition: 19,
+    upper: "С",
+    letter: "с",
+    mode: "cursive",
+    stageNumber: 12,
+    stageCode: "palavra",
+    stageTitle: "Copiar palavra",
+    level: "B1",
+    target: "собака",
+    word: "собака",
+    translation: "cachorro",
+    sound: "s",
+    prompt: "Copiar palavra: pratique С с em letra cursiva. Copie a palavra-modelo e confira cada ligação.",
+    objective: "Aplicar a letra em vocabulário real.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 605,
+    letterPosition: 19,
+    upper: "С",
+    letter: "с",
+    mode: "cursive",
+    stageNumber: 13,
+    stageCode: "frase",
+    stageTitle: "Copiar frase",
+    level: "B1",
+    target: "Я пишу слово «собака».",
+    word: "собака",
+    translation: "cachorro",
+    sound: "s",
+    prompt: "Copiar frase: pratique С с em letra cursiva. Copie uma frase curta sem interromper o ritmo.",
+    objective: "Aplicar a letra em contexto.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 606,
+    letterPosition: 19,
+    upper: "С",
+    letter: "с",
+    mode: "cursive",
+    stageNumber: 14,
+    stageCode: "ditado",
+    stageTitle: "Escrever por ditado",
+    level: "B1",
+    target: "собака",
+    word: "собака",
+    translation: "cachorro",
+    sound: "s",
+    prompt: "Escrever por ditado: pratique С с em letra cursiva. Ouça o modelo e escreva sem olhar; depois compare.",
+    objective: "Recuperar a grafia pela memória.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 607,
+    letterPosition: 19,
+    upper: "С",
+    letter: "с",
+    mode: "cursive",
+    stageNumber: 15,
+    stageCode: "fluencia",
+    stageTitle: "Treino de fluência",
+    level: "B2",
+    target: "собака",
+    word: "собака",
+    translation: "cachorro",
+    sound: "s",
+    prompt: "Treino de fluência: pratique С с em letra cursiva. Escreva com tempo controlado sem sacrificar clareza.",
+    objective: "Ganhar velocidade com legibilidade.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 608,
+    letterPosition: 19,
+    upper: "С",
+    letter: "с",
+    mode: "cursive",
+    stageNumber: 16,
+    stageCode: "producao",
+    stageTitle: "Produção livre",
+    level: "C1",
+    target: "Я пишу слово «собака».",
+    word: "собака",
+    translation: "cachorro",
+    sound: "s",
+    prompt: "Produção livre: pratique С с em letra cursiva. Crie uma frase curta usando a palavra-modelo.",
+    objective: "Usar a escrita de maneira independente.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 609,
+    letterPosition: 20,
+    upper: "Т",
+    letter: "т",
+    mode: "print",
+    stageNumber: 1,
+    stageCode: "observacao",
+    stageTitle: "Observar proporções",
+    level: "A1",
+    target: "ттттт",
+    word: "театр",
+    translation: "teatro",
+    sound: "t",
+    prompt: "Observar proporções: pratique Т т em letra de forma. Compare altura, largura, inclinação e posição na linha.",
+    objective: "Reconhecer a forma antes de escrever.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 610,
+    letterPosition: 20,
+    upper: "Т",
+    letter: "т",
+    mode: "print",
+    stageNumber: 2,
+    stageCode: "movimento_ar",
+    stageTitle: "Desenhar no ar",
+    level: "A1",
+    target: "ттттт",
+    word: "театр",
+    translation: "teatro",
+    sound: "t",
+    prompt: "Desenhar no ar: pratique Т т em letra de forma. Faça o movimento amplo com o braço antes de usar o lápis.",
+    objective: "Memorizar a direção geral do traço.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 611,
+    letterPosition: 20,
+    upper: "Т",
+    letter: "т",
+    mode: "print",
+    stageNumber: 3,
+    stageCode: "maiuscula_guiada",
+    stageTitle: "Traçar maiúscula",
+    level: "A1",
+    target: "ТТТТТ",
+    word: "театр",
+    translation: "teatro",
+    sound: "t",
+    prompt: "Traçar maiúscula: pratique Т т em letra de forma. Passe sobre o modelo maiúsculo sem acelerar.",
+    objective: "Controlar início, direção e encerramento.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 612,
+    letterPosition: 20,
+    upper: "Т",
+    letter: "т",
+    mode: "print",
+    stageNumber: 4,
+    stageCode: "minuscula_guiada",
+    stageTitle: "Traçar minúscula",
+    level: "A1",
+    target: "ттттт",
+    word: "театр",
+    translation: "teatro",
+    sound: "t",
+    prompt: "Traçar minúscula: pratique Т т em letra de forma. Passe sobre o modelo minúsculo mantendo a altura.",
+    objective: "Dominar a forma usada dentro das palavras.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 613,
+    letterPosition: 20,
+    upper: "Т",
+    letter: "т",
+    mode: "print",
+    stageNumber: 5,
+    stageCode: "copia_isolada",
+    stageTitle: "Copiar isoladamente",
+    level: "A1",
+    target: "ттттт",
+    word: "театр",
+    translation: "teatro",
+    sound: "t",
+    prompt: "Copiar isoladamente: pratique Т т em letra de forma. Copie a letra cinco vezes ao lado do modelo.",
+    objective: "Manter tamanho e espaçamento consistentes.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 614,
+    letterPosition: 20,
+    upper: "Т",
+    letter: "т",
+    mode: "print",
+    stageNumber: 6,
+    stageCode: "ritmo",
+    stageTitle: "Criar ritmo",
+    level: "A2",
+    target: "тттт тттт тттт",
+    word: "театр",
+    translation: "teatro",
+    sound: "t",
+    prompt: "Criar ritmo: pratique Т т em letra de forma. Escreva uma linha contínua com intervalos regulares.",
+    objective: "Automatizar o movimento sem perder legibilidade.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 615,
+    letterPosition: 20,
+    upper: "Т",
+    letter: "т",
+    mode: "print",
+    stageNumber: 7,
+    stageCode: "ligacao_a",
+    stageTitle: "Ligar com а",
+    level: "A2",
+    target: "та ат",
+    word: "театр",
+    translation: "teatro",
+    sound: "t",
+    prompt: "Ligar com а: pratique Т т em letra de forma. Pratique a ligação de entrada e saída com а.",
+    objective: "Aprender uma conexão frequente.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 616,
+    letterPosition: 20,
+    upper: "Т",
+    letter: "т",
+    mode: "print",
+    stageNumber: 8,
+    stageCode: "ligacao_o",
+    stageTitle: "Ligar com о",
+    level: "A2",
+    target: "то от",
+    word: "театр",
+    translation: "teatro",
+    sound: "t",
+    prompt: "Ligar com о: pratique Т т em letra de forma. Pratique a ligação de entrada e saída com о.",
+    objective: "Evitar que as letras se encostem demais.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 617,
+    letterPosition: 20,
+    upper: "Т",
+    letter: "т",
+    mode: "print",
+    stageNumber: 9,
+    stageCode: "ligacao_i",
+    stageTitle: "Ligar com и",
+    level: "A2",
+    target: "ти ит",
+    word: "театр",
+    translation: "teatro",
+    sound: "t",
+    prompt: "Ligar com и: pratique Т т em letra de forma. Pratique a ligação de entrada e saída com и.",
+    objective: "Manter o fluxo da cursiva.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 618,
+    letterPosition: 20,
+    upper: "Т",
+    letter: "т",
+    mode: "print",
+    stageNumber: 10,
+    stageCode: "ligacao_m",
+    stageTitle: "Ligar com м",
+    level: "A2",
+    target: "тм мт",
+    word: "театр",
+    translation: "teatro",
+    sound: "t",
+    prompt: "Ligar com м: pratique Т т em letra de forma. Pratique a ligação de entrada e saída com м.",
+    objective: "Diferenciar arcos e hastes semelhantes.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 619,
+    letterPosition: 20,
+    upper: "Т",
+    letter: "т",
+    mode: "print",
+    stageNumber: 11,
+    stageCode: "silaba",
+    stageTitle: "Copiar sílabas",
+    level: "A2",
+    target: "та то ту ти",
+    word: "театр",
+    translation: "teatro",
+    sound: "t",
+    prompt: "Copiar sílabas: pratique Т т em letra de forma. Copie sílabas curtas e leia em voz alta.",
+    objective: "Unir escrita, leitura e som.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 620,
+    letterPosition: 20,
+    upper: "Т",
+    letter: "т",
+    mode: "print",
+    stageNumber: 12,
+    stageCode: "palavra",
+    stageTitle: "Copiar palavra",
+    level: "B1",
+    target: "театр",
+    word: "театр",
+    translation: "teatro",
+    sound: "t",
+    prompt: "Copiar palavra: pratique Т т em letra de forma. Copie a palavra-modelo e confira cada ligação.",
+    objective: "Aplicar a letra em vocabulário real.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 621,
+    letterPosition: 20,
+    upper: "Т",
+    letter: "т",
+    mode: "print",
+    stageNumber: 13,
+    stageCode: "frase",
+    stageTitle: "Copiar frase",
+    level: "B1",
+    target: "Я пишу слово «театр».",
+    word: "театр",
+    translation: "teatro",
+    sound: "t",
+    prompt: "Copiar frase: pratique Т т em letra de forma. Copie uma frase curta sem interromper o ritmo.",
+    objective: "Aplicar a letra em contexto.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 622,
+    letterPosition: 20,
+    upper: "Т",
+    letter: "т",
+    mode: "print",
+    stageNumber: 14,
+    stageCode: "ditado",
+    stageTitle: "Escrever por ditado",
+    level: "B1",
+    target: "театр",
+    word: "театр",
+    translation: "teatro",
+    sound: "t",
+    prompt: "Escrever por ditado: pratique Т т em letra de forma. Ouça o modelo e escreva sem olhar; depois compare.",
+    objective: "Recuperar a grafia pela memória.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 623,
+    letterPosition: 20,
+    upper: "Т",
+    letter: "т",
+    mode: "print",
+    stageNumber: 15,
+    stageCode: "fluencia",
+    stageTitle: "Treino de fluência",
+    level: "B2",
+    target: "театр",
+    word: "театр",
+    translation: "teatro",
+    sound: "t",
+    prompt: "Treino de fluência: pratique Т т em letra de forma. Escreva com tempo controlado sem sacrificar clareza.",
+    objective: "Ganhar velocidade com legibilidade.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 624,
+    letterPosition: 20,
+    upper: "Т",
+    letter: "т",
+    mode: "print",
+    stageNumber: 16,
+    stageCode: "producao",
+    stageTitle: "Produção livre",
+    level: "C1",
+    target: "Я пишу слово «театр».",
+    word: "театр",
+    translation: "teatro",
+    sound: "t",
+    prompt: "Produção livre: pratique Т т em letra de forma. Crie uma frase curta usando a palavra-modelo.",
+    objective: "Usar a escrita de maneira independente.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 625,
+    letterPosition: 20,
+    upper: "Т",
+    letter: "т",
+    mode: "cursive",
+    stageNumber: 1,
+    stageCode: "observacao",
+    stageTitle: "Observar proporções",
+    level: "A1",
+    target: "ттттт",
+    word: "театр",
+    translation: "teatro",
+    sound: "t",
+    prompt: "Observar proporções: pratique Т т em letra cursiva. Compare altura, largura, inclinação e posição na linha.",
+    objective: "Reconhecer a forma antes de escrever.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 626,
+    letterPosition: 20,
+    upper: "Т",
+    letter: "т",
+    mode: "cursive",
+    stageNumber: 2,
+    stageCode: "movimento_ar",
+    stageTitle: "Desenhar no ar",
+    level: "A1",
+    target: "ттттт",
+    word: "театр",
+    translation: "teatro",
+    sound: "t",
+    prompt: "Desenhar no ar: pratique Т т em letra cursiva. Faça o movimento amplo com o braço antes de usar o lápis.",
+    objective: "Memorizar a direção geral do traço.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 627,
+    letterPosition: 20,
+    upper: "Т",
+    letter: "т",
+    mode: "cursive",
+    stageNumber: 3,
+    stageCode: "maiuscula_guiada",
+    stageTitle: "Traçar maiúscula",
+    level: "A1",
+    target: "ТТТТТ",
+    word: "театр",
+    translation: "teatro",
+    sound: "t",
+    prompt: "Traçar maiúscula: pratique Т т em letra cursiva. Passe sobre o modelo maiúsculo sem acelerar.",
+    objective: "Controlar início, direção e encerramento.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 628,
+    letterPosition: 20,
+    upper: "Т",
+    letter: "т",
+    mode: "cursive",
+    stageNumber: 4,
+    stageCode: "minuscula_guiada",
+    stageTitle: "Traçar minúscula",
+    level: "A1",
+    target: "ттттт",
+    word: "театр",
+    translation: "teatro",
+    sound: "t",
+    prompt: "Traçar minúscula: pratique Т т em letra cursiva. Passe sobre o modelo minúsculo mantendo a altura.",
+    objective: "Dominar a forma usada dentro das palavras.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 629,
+    letterPosition: 20,
+    upper: "Т",
+    letter: "т",
+    mode: "cursive",
+    stageNumber: 5,
+    stageCode: "copia_isolada",
+    stageTitle: "Copiar isoladamente",
+    level: "A1",
+    target: "ттттт",
+    word: "театр",
+    translation: "teatro",
+    sound: "t",
+    prompt: "Copiar isoladamente: pratique Т т em letra cursiva. Copie a letra cinco vezes ao lado do modelo.",
+    objective: "Manter tamanho e espaçamento consistentes.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 630,
+    letterPosition: 20,
+    upper: "Т",
+    letter: "т",
+    mode: "cursive",
+    stageNumber: 6,
+    stageCode: "ritmo",
+    stageTitle: "Criar ritmo",
+    level: "A2",
+    target: "тттт тттт тттт",
+    word: "театр",
+    translation: "teatro",
+    sound: "t",
+    prompt: "Criar ritmo: pratique Т т em letra cursiva. Escreva uma linha contínua com intervalos regulares.",
+    objective: "Automatizar o movimento sem perder legibilidade.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 631,
+    letterPosition: 20,
+    upper: "Т",
+    letter: "т",
+    mode: "cursive",
+    stageNumber: 7,
+    stageCode: "ligacao_a",
+    stageTitle: "Ligar com а",
+    level: "A2",
+    target: "та ат",
+    word: "театр",
+    translation: "teatro",
+    sound: "t",
+    prompt: "Ligar com а: pratique Т т em letra cursiva. Pratique a ligação de entrada e saída com а.",
+    objective: "Aprender uma conexão frequente.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 632,
+    letterPosition: 20,
+    upper: "Т",
+    letter: "т",
+    mode: "cursive",
+    stageNumber: 8,
+    stageCode: "ligacao_o",
+    stageTitle: "Ligar com о",
+    level: "A2",
+    target: "то от",
+    word: "театр",
+    translation: "teatro",
+    sound: "t",
+    prompt: "Ligar com о: pratique Т т em letra cursiva. Pratique a ligação de entrada e saída com о.",
+    objective: "Evitar que as letras se encostem demais.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 633,
+    letterPosition: 20,
+    upper: "Т",
+    letter: "т",
+    mode: "cursive",
+    stageNumber: 9,
+    stageCode: "ligacao_i",
+    stageTitle: "Ligar com и",
+    level: "A2",
+    target: "ти ит",
+    word: "театр",
+    translation: "teatro",
+    sound: "t",
+    prompt: "Ligar com и: pratique Т т em letra cursiva. Pratique a ligação de entrada e saída com и.",
+    objective: "Manter o fluxo da cursiva.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 634,
+    letterPosition: 20,
+    upper: "Т",
+    letter: "т",
+    mode: "cursive",
+    stageNumber: 10,
+    stageCode: "ligacao_m",
+    stageTitle: "Ligar com м",
+    level: "A2",
+    target: "тм мт",
+    word: "театр",
+    translation: "teatro",
+    sound: "t",
+    prompt: "Ligar com м: pratique Т т em letra cursiva. Pratique a ligação de entrada e saída com м.",
+    objective: "Diferenciar arcos e hastes semelhantes.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 635,
+    letterPosition: 20,
+    upper: "Т",
+    letter: "т",
+    mode: "cursive",
+    stageNumber: 11,
+    stageCode: "silaba",
+    stageTitle: "Copiar sílabas",
+    level: "A2",
+    target: "та то ту ти",
+    word: "театр",
+    translation: "teatro",
+    sound: "t",
+    prompt: "Copiar sílabas: pratique Т т em letra cursiva. Copie sílabas curtas e leia em voz alta.",
+    objective: "Unir escrita, leitura e som.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 636,
+    letterPosition: 20,
+    upper: "Т",
+    letter: "т",
+    mode: "cursive",
+    stageNumber: 12,
+    stageCode: "palavra",
+    stageTitle: "Copiar palavra",
+    level: "B1",
+    target: "театр",
+    word: "театр",
+    translation: "teatro",
+    sound: "t",
+    prompt: "Copiar palavra: pratique Т т em letra cursiva. Copie a palavra-modelo e confira cada ligação.",
+    objective: "Aplicar a letra em vocabulário real.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 637,
+    letterPosition: 20,
+    upper: "Т",
+    letter: "т",
+    mode: "cursive",
+    stageNumber: 13,
+    stageCode: "frase",
+    stageTitle: "Copiar frase",
+    level: "B1",
+    target: "Я пишу слово «театр».",
+    word: "театр",
+    translation: "teatro",
+    sound: "t",
+    prompt: "Copiar frase: pratique Т т em letra cursiva. Copie uma frase curta sem interromper o ritmo.",
+    objective: "Aplicar a letra em contexto.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 638,
+    letterPosition: 20,
+    upper: "Т",
+    letter: "т",
+    mode: "cursive",
+    stageNumber: 14,
+    stageCode: "ditado",
+    stageTitle: "Escrever por ditado",
+    level: "B1",
+    target: "театр",
+    word: "театр",
+    translation: "teatro",
+    sound: "t",
+    prompt: "Escrever por ditado: pratique Т т em letra cursiva. Ouça o modelo e escreva sem olhar; depois compare.",
+    objective: "Recuperar a grafia pela memória.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 639,
+    letterPosition: 20,
+    upper: "Т",
+    letter: "т",
+    mode: "cursive",
+    stageNumber: 15,
+    stageCode: "fluencia",
+    stageTitle: "Treino de fluência",
+    level: "B2",
+    target: "театр",
+    word: "театр",
+    translation: "teatro",
+    sound: "t",
+    prompt: "Treino de fluência: pratique Т т em letra cursiva. Escreva com tempo controlado sem sacrificar clareza.",
+    objective: "Ganhar velocidade com legibilidade.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 640,
+    letterPosition: 20,
+    upper: "Т",
+    letter: "т",
+    mode: "cursive",
+    stageNumber: 16,
+    stageCode: "producao",
+    stageTitle: "Produção livre",
+    level: "C1",
+    target: "Я пишу слово «театр».",
+    word: "театр",
+    translation: "teatro",
+    sound: "t",
+    prompt: "Produção livre: pratique Т т em letra cursiva. Crie uma frase curta usando a palavra-modelo.",
+    objective: "Usar a escrita de maneira independente.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 641,
+    letterPosition: 21,
+    upper: "У",
+    letter: "у",
+    mode: "print",
+    stageNumber: 1,
+    stageCode: "observacao",
+    stageTitle: "Observar proporções",
+    level: "A1",
+    target: "ууууу",
+    word: "утро",
+    translation: "manhã",
+    sound: "u",
+    prompt: "Observar proporções: pratique У у em letra de forma. Compare altura, largura, inclinação e posição na linha.",
+    objective: "Reconhecer a forma antes de escrever.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 642,
+    letterPosition: 21,
+    upper: "У",
+    letter: "у",
+    mode: "print",
+    stageNumber: 2,
+    stageCode: "movimento_ar",
+    stageTitle: "Desenhar no ar",
+    level: "A1",
+    target: "ууууу",
+    word: "утро",
+    translation: "manhã",
+    sound: "u",
+    prompt: "Desenhar no ar: pratique У у em letra de forma. Faça o movimento amplo com o braço antes de usar o lápis.",
+    objective: "Memorizar a direção geral do traço.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 643,
+    letterPosition: 21,
+    upper: "У",
+    letter: "у",
+    mode: "print",
+    stageNumber: 3,
+    stageCode: "maiuscula_guiada",
+    stageTitle: "Traçar maiúscula",
+    level: "A1",
+    target: "УУУУУ",
+    word: "утро",
+    translation: "manhã",
+    sound: "u",
+    prompt: "Traçar maiúscula: pratique У у em letra de forma. Passe sobre o modelo maiúsculo sem acelerar.",
+    objective: "Controlar início, direção e encerramento.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 644,
+    letterPosition: 21,
+    upper: "У",
+    letter: "у",
+    mode: "print",
+    stageNumber: 4,
+    stageCode: "minuscula_guiada",
+    stageTitle: "Traçar minúscula",
+    level: "A1",
+    target: "ууууу",
+    word: "утро",
+    translation: "manhã",
+    sound: "u",
+    prompt: "Traçar minúscula: pratique У у em letra de forma. Passe sobre o modelo minúsculo mantendo a altura.",
+    objective: "Dominar a forma usada dentro das palavras.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 645,
+    letterPosition: 21,
+    upper: "У",
+    letter: "у",
+    mode: "print",
+    stageNumber: 5,
+    stageCode: "copia_isolada",
+    stageTitle: "Copiar isoladamente",
+    level: "A1",
+    target: "ууууу",
+    word: "утро",
+    translation: "manhã",
+    sound: "u",
+    prompt: "Copiar isoladamente: pratique У у em letra de forma. Copie a letra cinco vezes ao lado do modelo.",
+    objective: "Manter tamanho e espaçamento consistentes.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 646,
+    letterPosition: 21,
+    upper: "У",
+    letter: "у",
+    mode: "print",
+    stageNumber: 6,
+    stageCode: "ritmo",
+    stageTitle: "Criar ritmo",
+    level: "A2",
+    target: "уууу уууу уууу",
+    word: "утро",
+    translation: "manhã",
+    sound: "u",
+    prompt: "Criar ritmo: pratique У у em letra de forma. Escreva uma linha contínua com intervalos regulares.",
+    objective: "Automatizar o movimento sem perder legibilidade.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 647,
+    letterPosition: 21,
+    upper: "У",
+    letter: "у",
+    mode: "print",
+    stageNumber: 7,
+    stageCode: "ligacao_a",
+    stageTitle: "Ligar com а",
+    level: "A2",
+    target: "уа ау",
+    word: "утро",
+    translation: "manhã",
+    sound: "u",
+    prompt: "Ligar com а: pratique У у em letra de forma. Pratique a ligação de entrada e saída com а.",
+    objective: "Aprender uma conexão frequente.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 648,
+    letterPosition: 21,
+    upper: "У",
+    letter: "у",
+    mode: "print",
+    stageNumber: 8,
+    stageCode: "ligacao_o",
+    stageTitle: "Ligar com о",
+    level: "A2",
+    target: "уо оу",
+    word: "утро",
+    translation: "manhã",
+    sound: "u",
+    prompt: "Ligar com о: pratique У у em letra de forma. Pratique a ligação de entrada e saída com о.",
+    objective: "Evitar que as letras se encostem demais.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 649,
+    letterPosition: 21,
+    upper: "У",
+    letter: "у",
+    mode: "print",
+    stageNumber: 9,
+    stageCode: "ligacao_i",
+    stageTitle: "Ligar com и",
+    level: "A2",
+    target: "уи иу",
+    word: "утро",
+    translation: "manhã",
+    sound: "u",
+    prompt: "Ligar com и: pratique У у em letra de forma. Pratique a ligação de entrada e saída com и.",
+    objective: "Manter o fluxo da cursiva.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 650,
+    letterPosition: 21,
+    upper: "У",
+    letter: "у",
+    mode: "print",
+    stageNumber: 10,
+    stageCode: "ligacao_m",
+    stageTitle: "Ligar com м",
+    level: "A2",
+    target: "ум му",
+    word: "утро",
+    translation: "manhã",
+    sound: "u",
+    prompt: "Ligar com м: pratique У у em letra de forma. Pratique a ligação de entrada e saída com м.",
+    objective: "Diferenciar arcos e hastes semelhantes.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 651,
+    letterPosition: 21,
+    upper: "У",
+    letter: "у",
+    mode: "print",
+    stageNumber: 11,
+    stageCode: "silaba",
+    stageTitle: "Copiar sílabas",
+    level: "A2",
+    target: "уа уо уу уи",
+    word: "утро",
+    translation: "manhã",
+    sound: "u",
+    prompt: "Copiar sílabas: pratique У у em letra de forma. Copie sílabas curtas e leia em voz alta.",
+    objective: "Unir escrita, leitura e som.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 652,
+    letterPosition: 21,
+    upper: "У",
+    letter: "у",
+    mode: "print",
+    stageNumber: 12,
+    stageCode: "palavra",
+    stageTitle: "Copiar palavra",
+    level: "B1",
+    target: "утро",
+    word: "утро",
+    translation: "manhã",
+    sound: "u",
+    prompt: "Copiar palavra: pratique У у em letra de forma. Copie a palavra-modelo e confira cada ligação.",
+    objective: "Aplicar a letra em vocabulário real.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 653,
+    letterPosition: 21,
+    upper: "У",
+    letter: "у",
+    mode: "print",
+    stageNumber: 13,
+    stageCode: "frase",
+    stageTitle: "Copiar frase",
+    level: "B1",
+    target: "Я пишу слово «утро».",
+    word: "утро",
+    translation: "manhã",
+    sound: "u",
+    prompt: "Copiar frase: pratique У у em letra de forma. Copie uma frase curta sem interromper o ritmo.",
+    objective: "Aplicar a letra em contexto.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 654,
+    letterPosition: 21,
+    upper: "У",
+    letter: "у",
+    mode: "print",
+    stageNumber: 14,
+    stageCode: "ditado",
+    stageTitle: "Escrever por ditado",
+    level: "B1",
+    target: "утро",
+    word: "утро",
+    translation: "manhã",
+    sound: "u",
+    prompt: "Escrever por ditado: pratique У у em letra de forma. Ouça o modelo e escreva sem olhar; depois compare.",
+    objective: "Recuperar a grafia pela memória.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 655,
+    letterPosition: 21,
+    upper: "У",
+    letter: "у",
+    mode: "print",
+    stageNumber: 15,
+    stageCode: "fluencia",
+    stageTitle: "Treino de fluência",
+    level: "B2",
+    target: "утро",
+    word: "утро",
+    translation: "manhã",
+    sound: "u",
+    prompt: "Treino de fluência: pratique У у em letra de forma. Escreva com tempo controlado sem sacrificar clareza.",
+    objective: "Ganhar velocidade com legibilidade.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 656,
+    letterPosition: 21,
+    upper: "У",
+    letter: "у",
+    mode: "print",
+    stageNumber: 16,
+    stageCode: "producao",
+    stageTitle: "Produção livre",
+    level: "C1",
+    target: "Я пишу слово «утро».",
+    word: "утро",
+    translation: "manhã",
+    sound: "u",
+    prompt: "Produção livre: pratique У у em letra de forma. Crie uma frase curta usando a palavra-modelo.",
+    objective: "Usar a escrita de maneira independente.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 657,
+    letterPosition: 21,
+    upper: "У",
+    letter: "у",
+    mode: "cursive",
+    stageNumber: 1,
+    stageCode: "observacao",
+    stageTitle: "Observar proporções",
+    level: "A1",
+    target: "ууууу",
+    word: "утро",
+    translation: "manhã",
+    sound: "u",
+    prompt: "Observar proporções: pratique У у em letra cursiva. Compare altura, largura, inclinação e posição na linha.",
+    objective: "Reconhecer a forma antes de escrever.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 658,
+    letterPosition: 21,
+    upper: "У",
+    letter: "у",
+    mode: "cursive",
+    stageNumber: 2,
+    stageCode: "movimento_ar",
+    stageTitle: "Desenhar no ar",
+    level: "A1",
+    target: "ууууу",
+    word: "утро",
+    translation: "manhã",
+    sound: "u",
+    prompt: "Desenhar no ar: pratique У у em letra cursiva. Faça o movimento amplo com o braço antes de usar o lápis.",
+    objective: "Memorizar a direção geral do traço.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 659,
+    letterPosition: 21,
+    upper: "У",
+    letter: "у",
+    mode: "cursive",
+    stageNumber: 3,
+    stageCode: "maiuscula_guiada",
+    stageTitle: "Traçar maiúscula",
+    level: "A1",
+    target: "УУУУУ",
+    word: "утро",
+    translation: "manhã",
+    sound: "u",
+    prompt: "Traçar maiúscula: pratique У у em letra cursiva. Passe sobre o modelo maiúsculo sem acelerar.",
+    objective: "Controlar início, direção e encerramento.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 660,
+    letterPosition: 21,
+    upper: "У",
+    letter: "у",
+    mode: "cursive",
+    stageNumber: 4,
+    stageCode: "minuscula_guiada",
+    stageTitle: "Traçar minúscula",
+    level: "A1",
+    target: "ууууу",
+    word: "утро",
+    translation: "manhã",
+    sound: "u",
+    prompt: "Traçar minúscula: pratique У у em letra cursiva. Passe sobre o modelo minúsculo mantendo a altura.",
+    objective: "Dominar a forma usada dentro das palavras.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 661,
+    letterPosition: 21,
+    upper: "У",
+    letter: "у",
+    mode: "cursive",
+    stageNumber: 5,
+    stageCode: "copia_isolada",
+    stageTitle: "Copiar isoladamente",
+    level: "A1",
+    target: "ууууу",
+    word: "утро",
+    translation: "manhã",
+    sound: "u",
+    prompt: "Copiar isoladamente: pratique У у em letra cursiva. Copie a letra cinco vezes ao lado do modelo.",
+    objective: "Manter tamanho e espaçamento consistentes.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 662,
+    letterPosition: 21,
+    upper: "У",
+    letter: "у",
+    mode: "cursive",
+    stageNumber: 6,
+    stageCode: "ritmo",
+    stageTitle: "Criar ritmo",
+    level: "A2",
+    target: "уууу уууу уууу",
+    word: "утро",
+    translation: "manhã",
+    sound: "u",
+    prompt: "Criar ritmo: pratique У у em letra cursiva. Escreva uma linha contínua com intervalos regulares.",
+    objective: "Automatizar o movimento sem perder legibilidade.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 663,
+    letterPosition: 21,
+    upper: "У",
+    letter: "у",
+    mode: "cursive",
+    stageNumber: 7,
+    stageCode: "ligacao_a",
+    stageTitle: "Ligar com а",
+    level: "A2",
+    target: "уа ау",
+    word: "утро",
+    translation: "manhã",
+    sound: "u",
+    prompt: "Ligar com а: pratique У у em letra cursiva. Pratique a ligação de entrada e saída com а.",
+    objective: "Aprender uma conexão frequente.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 664,
+    letterPosition: 21,
+    upper: "У",
+    letter: "у",
+    mode: "cursive",
+    stageNumber: 8,
+    stageCode: "ligacao_o",
+    stageTitle: "Ligar com о",
+    level: "A2",
+    target: "уо оу",
+    word: "утро",
+    translation: "manhã",
+    sound: "u",
+    prompt: "Ligar com о: pratique У у em letra cursiva. Pratique a ligação de entrada e saída com о.",
+    objective: "Evitar que as letras se encostem demais.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 665,
+    letterPosition: 21,
+    upper: "У",
+    letter: "у",
+    mode: "cursive",
+    stageNumber: 9,
+    stageCode: "ligacao_i",
+    stageTitle: "Ligar com и",
+    level: "A2",
+    target: "уи иу",
+    word: "утро",
+    translation: "manhã",
+    sound: "u",
+    prompt: "Ligar com и: pratique У у em letra cursiva. Pratique a ligação de entrada e saída com и.",
+    objective: "Manter o fluxo da cursiva.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 666,
+    letterPosition: 21,
+    upper: "У",
+    letter: "у",
+    mode: "cursive",
+    stageNumber: 10,
+    stageCode: "ligacao_m",
+    stageTitle: "Ligar com м",
+    level: "A2",
+    target: "ум му",
+    word: "утро",
+    translation: "manhã",
+    sound: "u",
+    prompt: "Ligar com м: pratique У у em letra cursiva. Pratique a ligação de entrada e saída com м.",
+    objective: "Diferenciar arcos e hastes semelhantes.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 667,
+    letterPosition: 21,
+    upper: "У",
+    letter: "у",
+    mode: "cursive",
+    stageNumber: 11,
+    stageCode: "silaba",
+    stageTitle: "Copiar sílabas",
+    level: "A2",
+    target: "уа уо уу уи",
+    word: "утро",
+    translation: "manhã",
+    sound: "u",
+    prompt: "Copiar sílabas: pratique У у em letra cursiva. Copie sílabas curtas e leia em voz alta.",
+    objective: "Unir escrita, leitura e som.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 668,
+    letterPosition: 21,
+    upper: "У",
+    letter: "у",
+    mode: "cursive",
+    stageNumber: 12,
+    stageCode: "palavra",
+    stageTitle: "Copiar palavra",
+    level: "B1",
+    target: "утро",
+    word: "утро",
+    translation: "manhã",
+    sound: "u",
+    prompt: "Copiar palavra: pratique У у em letra cursiva. Copie a palavra-modelo e confira cada ligação.",
+    objective: "Aplicar a letra em vocabulário real.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 669,
+    letterPosition: 21,
+    upper: "У",
+    letter: "у",
+    mode: "cursive",
+    stageNumber: 13,
+    stageCode: "frase",
+    stageTitle: "Copiar frase",
+    level: "B1",
+    target: "Я пишу слово «утро».",
+    word: "утро",
+    translation: "manhã",
+    sound: "u",
+    prompt: "Copiar frase: pratique У у em letra cursiva. Copie uma frase curta sem interromper o ritmo.",
+    objective: "Aplicar a letra em contexto.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 670,
+    letterPosition: 21,
+    upper: "У",
+    letter: "у",
+    mode: "cursive",
+    stageNumber: 14,
+    stageCode: "ditado",
+    stageTitle: "Escrever por ditado",
+    level: "B1",
+    target: "утро",
+    word: "утро",
+    translation: "manhã",
+    sound: "u",
+    prompt: "Escrever por ditado: pratique У у em letra cursiva. Ouça o modelo e escreva sem olhar; depois compare.",
+    objective: "Recuperar a grafia pela memória.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 671,
+    letterPosition: 21,
+    upper: "У",
+    letter: "у",
+    mode: "cursive",
+    stageNumber: 15,
+    stageCode: "fluencia",
+    stageTitle: "Treino de fluência",
+    level: "B2",
+    target: "утро",
+    word: "утро",
+    translation: "manhã",
+    sound: "u",
+    prompt: "Treino de fluência: pratique У у em letra cursiva. Escreva com tempo controlado sem sacrificar clareza.",
+    objective: "Ganhar velocidade com legibilidade.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 672,
+    letterPosition: 21,
+    upper: "У",
+    letter: "у",
+    mode: "cursive",
+    stageNumber: 16,
+    stageCode: "producao",
+    stageTitle: "Produção livre",
+    level: "C1",
+    target: "Я пишу слово «утро».",
+    word: "утро",
+    translation: "manhã",
+    sound: "u",
+    prompt: "Produção livre: pratique У у em letra cursiva. Crie uma frase curta usando a palavra-modelo.",
+    objective: "Usar a escrita de maneira independente.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 673,
+    letterPosition: 22,
+    upper: "Ф",
+    letter: "ф",
+    mode: "print",
+    stageNumber: 1,
+    stageCode: "observacao",
+    stageTitle: "Observar proporções",
+    level: "A1",
+    target: "ффффф",
+    word: "фото",
+    translation: "foto",
+    sound: "f",
+    prompt: "Observar proporções: pratique Ф ф em letra de forma. Compare altura, largura, inclinação e posição na linha.",
+    objective: "Reconhecer a forma antes de escrever.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 674,
+    letterPosition: 22,
+    upper: "Ф",
+    letter: "ф",
+    mode: "print",
+    stageNumber: 2,
+    stageCode: "movimento_ar",
+    stageTitle: "Desenhar no ar",
+    level: "A1",
+    target: "ффффф",
+    word: "фото",
+    translation: "foto",
+    sound: "f",
+    prompt: "Desenhar no ar: pratique Ф ф em letra de forma. Faça o movimento amplo com o braço antes de usar o lápis.",
+    objective: "Memorizar a direção geral do traço.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 675,
+    letterPosition: 22,
+    upper: "Ф",
+    letter: "ф",
+    mode: "print",
+    stageNumber: 3,
+    stageCode: "maiuscula_guiada",
+    stageTitle: "Traçar maiúscula",
+    level: "A1",
+    target: "ФФФФФ",
+    word: "фото",
+    translation: "foto",
+    sound: "f",
+    prompt: "Traçar maiúscula: pratique Ф ф em letra de forma. Passe sobre o modelo maiúsculo sem acelerar.",
+    objective: "Controlar início, direção e encerramento.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 676,
+    letterPosition: 22,
+    upper: "Ф",
+    letter: "ф",
+    mode: "print",
+    stageNumber: 4,
+    stageCode: "minuscula_guiada",
+    stageTitle: "Traçar minúscula",
+    level: "A1",
+    target: "ффффф",
+    word: "фото",
+    translation: "foto",
+    sound: "f",
+    prompt: "Traçar minúscula: pratique Ф ф em letra de forma. Passe sobre o modelo minúsculo mantendo a altura.",
+    objective: "Dominar a forma usada dentro das palavras.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 677,
+    letterPosition: 22,
+    upper: "Ф",
+    letter: "ф",
+    mode: "print",
+    stageNumber: 5,
+    stageCode: "copia_isolada",
+    stageTitle: "Copiar isoladamente",
+    level: "A1",
+    target: "ффффф",
+    word: "фото",
+    translation: "foto",
+    sound: "f",
+    prompt: "Copiar isoladamente: pratique Ф ф em letra de forma. Copie a letra cinco vezes ao lado do modelo.",
+    objective: "Manter tamanho e espaçamento consistentes.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 678,
+    letterPosition: 22,
+    upper: "Ф",
+    letter: "ф",
+    mode: "print",
+    stageNumber: 6,
+    stageCode: "ritmo",
+    stageTitle: "Criar ritmo",
+    level: "A2",
+    target: "фффф фффф фффф",
+    word: "фото",
+    translation: "foto",
+    sound: "f",
+    prompt: "Criar ritmo: pratique Ф ф em letra de forma. Escreva uma linha contínua com intervalos regulares.",
+    objective: "Automatizar o movimento sem perder legibilidade.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 679,
+    letterPosition: 22,
+    upper: "Ф",
+    letter: "ф",
+    mode: "print",
+    stageNumber: 7,
+    stageCode: "ligacao_a",
+    stageTitle: "Ligar com а",
+    level: "A2",
+    target: "фа аф",
+    word: "фото",
+    translation: "foto",
+    sound: "f",
+    prompt: "Ligar com а: pratique Ф ф em letra de forma. Pratique a ligação de entrada e saída com а.",
+    objective: "Aprender uma conexão frequente.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 680,
+    letterPosition: 22,
+    upper: "Ф",
+    letter: "ф",
+    mode: "print",
+    stageNumber: 8,
+    stageCode: "ligacao_o",
+    stageTitle: "Ligar com о",
+    level: "A2",
+    target: "фо оф",
+    word: "фото",
+    translation: "foto",
+    sound: "f",
+    prompt: "Ligar com о: pratique Ф ф em letra de forma. Pratique a ligação de entrada e saída com о.",
+    objective: "Evitar que as letras se encostem demais.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 681,
+    letterPosition: 22,
+    upper: "Ф",
+    letter: "ф",
+    mode: "print",
+    stageNumber: 9,
+    stageCode: "ligacao_i",
+    stageTitle: "Ligar com и",
+    level: "A2",
+    target: "фи иф",
+    word: "фото",
+    translation: "foto",
+    sound: "f",
+    prompt: "Ligar com и: pratique Ф ф em letra de forma. Pratique a ligação de entrada e saída com и.",
+    objective: "Manter o fluxo da cursiva.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 682,
+    letterPosition: 22,
+    upper: "Ф",
+    letter: "ф",
+    mode: "print",
+    stageNumber: 10,
+    stageCode: "ligacao_m",
+    stageTitle: "Ligar com м",
+    level: "A2",
+    target: "фм мф",
+    word: "фото",
+    translation: "foto",
+    sound: "f",
+    prompt: "Ligar com м: pratique Ф ф em letra de forma. Pratique a ligação de entrada e saída com м.",
+    objective: "Diferenciar arcos e hastes semelhantes.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 683,
+    letterPosition: 22,
+    upper: "Ф",
+    letter: "ф",
+    mode: "print",
+    stageNumber: 11,
+    stageCode: "silaba",
+    stageTitle: "Copiar sílabas",
+    level: "A2",
+    target: "фа фо фу фи",
+    word: "фото",
+    translation: "foto",
+    sound: "f",
+    prompt: "Copiar sílabas: pratique Ф ф em letra de forma. Copie sílabas curtas e leia em voz alta.",
+    objective: "Unir escrita, leitura e som.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 684,
+    letterPosition: 22,
+    upper: "Ф",
+    letter: "ф",
+    mode: "print",
+    stageNumber: 12,
+    stageCode: "palavra",
+    stageTitle: "Copiar palavra",
+    level: "B1",
+    target: "фото",
+    word: "фото",
+    translation: "foto",
+    sound: "f",
+    prompt: "Copiar palavra: pratique Ф ф em letra de forma. Copie a palavra-modelo e confira cada ligação.",
+    objective: "Aplicar a letra em vocabulário real.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 685,
+    letterPosition: 22,
+    upper: "Ф",
+    letter: "ф",
+    mode: "print",
+    stageNumber: 13,
+    stageCode: "frase",
+    stageTitle: "Copiar frase",
+    level: "B1",
+    target: "Я пишу слово «фото».",
+    word: "фото",
+    translation: "foto",
+    sound: "f",
+    prompt: "Copiar frase: pratique Ф ф em letra de forma. Copie uma frase curta sem interromper o ritmo.",
+    objective: "Aplicar a letra em contexto.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 686,
+    letterPosition: 22,
+    upper: "Ф",
+    letter: "ф",
+    mode: "print",
+    stageNumber: 14,
+    stageCode: "ditado",
+    stageTitle: "Escrever por ditado",
+    level: "B1",
+    target: "фото",
+    word: "фото",
+    translation: "foto",
+    sound: "f",
+    prompt: "Escrever por ditado: pratique Ф ф em letra de forma. Ouça o modelo e escreva sem olhar; depois compare.",
+    objective: "Recuperar a grafia pela memória.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 687,
+    letterPosition: 22,
+    upper: "Ф",
+    letter: "ф",
+    mode: "print",
+    stageNumber: 15,
+    stageCode: "fluencia",
+    stageTitle: "Treino de fluência",
+    level: "B2",
+    target: "фото",
+    word: "фото",
+    translation: "foto",
+    sound: "f",
+    prompt: "Treino de fluência: pratique Ф ф em letra de forma. Escreva com tempo controlado sem sacrificar clareza.",
+    objective: "Ganhar velocidade com legibilidade.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 688,
+    letterPosition: 22,
+    upper: "Ф",
+    letter: "ф",
+    mode: "print",
+    stageNumber: 16,
+    stageCode: "producao",
+    stageTitle: "Produção livre",
+    level: "C1",
+    target: "Я пишу слово «фото».",
+    word: "фото",
+    translation: "foto",
+    sound: "f",
+    prompt: "Produção livre: pratique Ф ф em letra de forma. Crie uma frase curta usando a palavra-modelo.",
+    objective: "Usar a escrita de maneira independente.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 689,
+    letterPosition: 22,
+    upper: "Ф",
+    letter: "ф",
+    mode: "cursive",
+    stageNumber: 1,
+    stageCode: "observacao",
+    stageTitle: "Observar proporções",
+    level: "A1",
+    target: "ффффф",
+    word: "фото",
+    translation: "foto",
+    sound: "f",
+    prompt: "Observar proporções: pratique Ф ф em letra cursiva. Compare altura, largura, inclinação e posição na linha.",
+    objective: "Reconhecer a forma antes de escrever.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 690,
+    letterPosition: 22,
+    upper: "Ф",
+    letter: "ф",
+    mode: "cursive",
+    stageNumber: 2,
+    stageCode: "movimento_ar",
+    stageTitle: "Desenhar no ar",
+    level: "A1",
+    target: "ффффф",
+    word: "фото",
+    translation: "foto",
+    sound: "f",
+    prompt: "Desenhar no ar: pratique Ф ф em letra cursiva. Faça o movimento amplo com o braço antes de usar o lápis.",
+    objective: "Memorizar a direção geral do traço.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 691,
+    letterPosition: 22,
+    upper: "Ф",
+    letter: "ф",
+    mode: "cursive",
+    stageNumber: 3,
+    stageCode: "maiuscula_guiada",
+    stageTitle: "Traçar maiúscula",
+    level: "A1",
+    target: "ФФФФФ",
+    word: "фото",
+    translation: "foto",
+    sound: "f",
+    prompt: "Traçar maiúscula: pratique Ф ф em letra cursiva. Passe sobre o modelo maiúsculo sem acelerar.",
+    objective: "Controlar início, direção e encerramento.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 692,
+    letterPosition: 22,
+    upper: "Ф",
+    letter: "ф",
+    mode: "cursive",
+    stageNumber: 4,
+    stageCode: "minuscula_guiada",
+    stageTitle: "Traçar minúscula",
+    level: "A1",
+    target: "ффффф",
+    word: "фото",
+    translation: "foto",
+    sound: "f",
+    prompt: "Traçar minúscula: pratique Ф ф em letra cursiva. Passe sobre o modelo minúsculo mantendo a altura.",
+    objective: "Dominar a forma usada dentro das palavras.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 693,
+    letterPosition: 22,
+    upper: "Ф",
+    letter: "ф",
+    mode: "cursive",
+    stageNumber: 5,
+    stageCode: "copia_isolada",
+    stageTitle: "Copiar isoladamente",
+    level: "A1",
+    target: "ффффф",
+    word: "фото",
+    translation: "foto",
+    sound: "f",
+    prompt: "Copiar isoladamente: pratique Ф ф em letra cursiva. Copie a letra cinco vezes ao lado do modelo.",
+    objective: "Manter tamanho e espaçamento consistentes.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 694,
+    letterPosition: 22,
+    upper: "Ф",
+    letter: "ф",
+    mode: "cursive",
+    stageNumber: 6,
+    stageCode: "ritmo",
+    stageTitle: "Criar ritmo",
+    level: "A2",
+    target: "фффф фффф фффф",
+    word: "фото",
+    translation: "foto",
+    sound: "f",
+    prompt: "Criar ritmo: pratique Ф ф em letra cursiva. Escreva uma linha contínua com intervalos regulares.",
+    objective: "Automatizar o movimento sem perder legibilidade.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 695,
+    letterPosition: 22,
+    upper: "Ф",
+    letter: "ф",
+    mode: "cursive",
+    stageNumber: 7,
+    stageCode: "ligacao_a",
+    stageTitle: "Ligar com а",
+    level: "A2",
+    target: "фа аф",
+    word: "фото",
+    translation: "foto",
+    sound: "f",
+    prompt: "Ligar com а: pratique Ф ф em letra cursiva. Pratique a ligação de entrada e saída com а.",
+    objective: "Aprender uma conexão frequente.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 696,
+    letterPosition: 22,
+    upper: "Ф",
+    letter: "ф",
+    mode: "cursive",
+    stageNumber: 8,
+    stageCode: "ligacao_o",
+    stageTitle: "Ligar com о",
+    level: "A2",
+    target: "фо оф",
+    word: "фото",
+    translation: "foto",
+    sound: "f",
+    prompt: "Ligar com о: pratique Ф ф em letra cursiva. Pratique a ligação de entrada e saída com о.",
+    objective: "Evitar que as letras se encostem demais.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 697,
+    letterPosition: 22,
+    upper: "Ф",
+    letter: "ф",
+    mode: "cursive",
+    stageNumber: 9,
+    stageCode: "ligacao_i",
+    stageTitle: "Ligar com и",
+    level: "A2",
+    target: "фи иф",
+    word: "фото",
+    translation: "foto",
+    sound: "f",
+    prompt: "Ligar com и: pratique Ф ф em letra cursiva. Pratique a ligação de entrada e saída com и.",
+    objective: "Manter o fluxo da cursiva.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 698,
+    letterPosition: 22,
+    upper: "Ф",
+    letter: "ф",
+    mode: "cursive",
+    stageNumber: 10,
+    stageCode: "ligacao_m",
+    stageTitle: "Ligar com м",
+    level: "A2",
+    target: "фм мф",
+    word: "фото",
+    translation: "foto",
+    sound: "f",
+    prompt: "Ligar com м: pratique Ф ф em letra cursiva. Pratique a ligação de entrada e saída com м.",
+    objective: "Diferenciar arcos e hastes semelhantes.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 699,
+    letterPosition: 22,
+    upper: "Ф",
+    letter: "ф",
+    mode: "cursive",
+    stageNumber: 11,
+    stageCode: "silaba",
+    stageTitle: "Copiar sílabas",
+    level: "A2",
+    target: "фа фо фу фи",
+    word: "фото",
+    translation: "foto",
+    sound: "f",
+    prompt: "Copiar sílabas: pratique Ф ф em letra cursiva. Copie sílabas curtas e leia em voz alta.",
+    objective: "Unir escrita, leitura e som.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 700,
+    letterPosition: 22,
+    upper: "Ф",
+    letter: "ф",
+    mode: "cursive",
+    stageNumber: 12,
+    stageCode: "palavra",
+    stageTitle: "Copiar palavra",
+    level: "B1",
+    target: "фото",
+    word: "фото",
+    translation: "foto",
+    sound: "f",
+    prompt: "Copiar palavra: pratique Ф ф em letra cursiva. Copie a palavra-modelo e confira cada ligação.",
+    objective: "Aplicar a letra em vocabulário real.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 701,
+    letterPosition: 22,
+    upper: "Ф",
+    letter: "ф",
+    mode: "cursive",
+    stageNumber: 13,
+    stageCode: "frase",
+    stageTitle: "Copiar frase",
+    level: "B1",
+    target: "Я пишу слово «фото».",
+    word: "фото",
+    translation: "foto",
+    sound: "f",
+    prompt: "Copiar frase: pratique Ф ф em letra cursiva. Copie uma frase curta sem interromper o ritmo.",
+    objective: "Aplicar a letra em contexto.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 702,
+    letterPosition: 22,
+    upper: "Ф",
+    letter: "ф",
+    mode: "cursive",
+    stageNumber: 14,
+    stageCode: "ditado",
+    stageTitle: "Escrever por ditado",
+    level: "B1",
+    target: "фото",
+    word: "фото",
+    translation: "foto",
+    sound: "f",
+    prompt: "Escrever por ditado: pratique Ф ф em letra cursiva. Ouça o modelo e escreva sem olhar; depois compare.",
+    objective: "Recuperar a grafia pela memória.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 703,
+    letterPosition: 22,
+    upper: "Ф",
+    letter: "ф",
+    mode: "cursive",
+    stageNumber: 15,
+    stageCode: "fluencia",
+    stageTitle: "Treino de fluência",
+    level: "B2",
+    target: "фото",
+    word: "фото",
+    translation: "foto",
+    sound: "f",
+    prompt: "Treino de fluência: pratique Ф ф em letra cursiva. Escreva com tempo controlado sem sacrificar clareza.",
+    objective: "Ganhar velocidade com legibilidade.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 704,
+    letterPosition: 22,
+    upper: "Ф",
+    letter: "ф",
+    mode: "cursive",
+    stageNumber: 16,
+    stageCode: "producao",
+    stageTitle: "Produção livre",
+    level: "C1",
+    target: "Я пишу слово «фото».",
+    word: "фото",
+    translation: "foto",
+    sound: "f",
+    prompt: "Produção livre: pratique Ф ф em letra cursiva. Crie uma frase curta usando a palavra-modelo.",
+    objective: "Usar a escrita de maneira independente.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 705,
+    letterPosition: 23,
+    upper: "Х",
+    letter: "х",
+    mode: "print",
+    stageNumber: 1,
+    stageCode: "observacao",
+    stageTitle: "Observar proporções",
+    level: "A1",
+    target: "ххххх",
+    word: "хлеб",
+    translation: "pão",
+    sound: "kh",
+    prompt: "Observar proporções: pratique Х х em letra de forma. Compare altura, largura, inclinação e posição na linha.",
+    objective: "Reconhecer a forma antes de escrever.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 706,
+    letterPosition: 23,
+    upper: "Х",
+    letter: "х",
+    mode: "print",
+    stageNumber: 2,
+    stageCode: "movimento_ar",
+    stageTitle: "Desenhar no ar",
+    level: "A1",
+    target: "ххххх",
+    word: "хлеб",
+    translation: "pão",
+    sound: "kh",
+    prompt: "Desenhar no ar: pratique Х х em letra de forma. Faça o movimento amplo com o braço antes de usar o lápis.",
+    objective: "Memorizar a direção geral do traço.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 707,
+    letterPosition: 23,
+    upper: "Х",
+    letter: "х",
+    mode: "print",
+    stageNumber: 3,
+    stageCode: "maiuscula_guiada",
+    stageTitle: "Traçar maiúscula",
+    level: "A1",
+    target: "ХХХХХ",
+    word: "хлеб",
+    translation: "pão",
+    sound: "kh",
+    prompt: "Traçar maiúscula: pratique Х х em letra de forma. Passe sobre o modelo maiúsculo sem acelerar.",
+    objective: "Controlar início, direção e encerramento.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 708,
+    letterPosition: 23,
+    upper: "Х",
+    letter: "х",
+    mode: "print",
+    stageNumber: 4,
+    stageCode: "minuscula_guiada",
+    stageTitle: "Traçar minúscula",
+    level: "A1",
+    target: "ххххх",
+    word: "хлеб",
+    translation: "pão",
+    sound: "kh",
+    prompt: "Traçar minúscula: pratique Х х em letra de forma. Passe sobre o modelo minúsculo mantendo a altura.",
+    objective: "Dominar a forma usada dentro das palavras.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 709,
+    letterPosition: 23,
+    upper: "Х",
+    letter: "х",
+    mode: "print",
+    stageNumber: 5,
+    stageCode: "copia_isolada",
+    stageTitle: "Copiar isoladamente",
+    level: "A1",
+    target: "ххххх",
+    word: "хлеб",
+    translation: "pão",
+    sound: "kh",
+    prompt: "Copiar isoladamente: pratique Х х em letra de forma. Copie a letra cinco vezes ao lado do modelo.",
+    objective: "Manter tamanho e espaçamento consistentes.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 710,
+    letterPosition: 23,
+    upper: "Х",
+    letter: "х",
+    mode: "print",
+    stageNumber: 6,
+    stageCode: "ritmo",
+    stageTitle: "Criar ritmo",
+    level: "A2",
+    target: "хххх хххх хххх",
+    word: "хлеб",
+    translation: "pão",
+    sound: "kh",
+    prompt: "Criar ritmo: pratique Х х em letra de forma. Escreva uma linha contínua com intervalos regulares.",
+    objective: "Automatizar o movimento sem perder legibilidade.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 711,
+    letterPosition: 23,
+    upper: "Х",
+    letter: "х",
+    mode: "print",
+    stageNumber: 7,
+    stageCode: "ligacao_a",
+    stageTitle: "Ligar com а",
+    level: "A2",
+    target: "ха ах",
+    word: "хлеб",
+    translation: "pão",
+    sound: "kh",
+    prompt: "Ligar com а: pratique Х х em letra de forma. Pratique a ligação de entrada e saída com а.",
+    objective: "Aprender uma conexão frequente.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 712,
+    letterPosition: 23,
+    upper: "Х",
+    letter: "х",
+    mode: "print",
+    stageNumber: 8,
+    stageCode: "ligacao_o",
+    stageTitle: "Ligar com о",
+    level: "A2",
+    target: "хо ох",
+    word: "хлеб",
+    translation: "pão",
+    sound: "kh",
+    prompt: "Ligar com о: pratique Х х em letra de forma. Pratique a ligação de entrada e saída com о.",
+    objective: "Evitar que as letras se encostem demais.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 713,
+    letterPosition: 23,
+    upper: "Х",
+    letter: "х",
+    mode: "print",
+    stageNumber: 9,
+    stageCode: "ligacao_i",
+    stageTitle: "Ligar com и",
+    level: "A2",
+    target: "хи их",
+    word: "хлеб",
+    translation: "pão",
+    sound: "kh",
+    prompt: "Ligar com и: pratique Х х em letra de forma. Pratique a ligação de entrada e saída com и.",
+    objective: "Manter o fluxo da cursiva.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 714,
+    letterPosition: 23,
+    upper: "Х",
+    letter: "х",
+    mode: "print",
+    stageNumber: 10,
+    stageCode: "ligacao_m",
+    stageTitle: "Ligar com м",
+    level: "A2",
+    target: "хм мх",
+    word: "хлеб",
+    translation: "pão",
+    sound: "kh",
+    prompt: "Ligar com м: pratique Х х em letra de forma. Pratique a ligação de entrada e saída com м.",
+    objective: "Diferenciar arcos e hastes semelhantes.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 715,
+    letterPosition: 23,
+    upper: "Х",
+    letter: "х",
+    mode: "print",
+    stageNumber: 11,
+    stageCode: "silaba",
+    stageTitle: "Copiar sílabas",
+    level: "A2",
+    target: "ха хо ху хи",
+    word: "хлеб",
+    translation: "pão",
+    sound: "kh",
+    prompt: "Copiar sílabas: pratique Х х em letra de forma. Copie sílabas curtas e leia em voz alta.",
+    objective: "Unir escrita, leitura e som.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 716,
+    letterPosition: 23,
+    upper: "Х",
+    letter: "х",
+    mode: "print",
+    stageNumber: 12,
+    stageCode: "palavra",
+    stageTitle: "Copiar palavra",
+    level: "B1",
+    target: "хлеб",
+    word: "хлеб",
+    translation: "pão",
+    sound: "kh",
+    prompt: "Copiar palavra: pratique Х х em letra de forma. Copie a palavra-modelo e confira cada ligação.",
+    objective: "Aplicar a letra em vocabulário real.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 717,
+    letterPosition: 23,
+    upper: "Х",
+    letter: "х",
+    mode: "print",
+    stageNumber: 13,
+    stageCode: "frase",
+    stageTitle: "Copiar frase",
+    level: "B1",
+    target: "Я пишу слово «хлеб».",
+    word: "хлеб",
+    translation: "pão",
+    sound: "kh",
+    prompt: "Copiar frase: pratique Х х em letra de forma. Copie uma frase curta sem interromper o ritmo.",
+    objective: "Aplicar a letra em contexto.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 718,
+    letterPosition: 23,
+    upper: "Х",
+    letter: "х",
+    mode: "print",
+    stageNumber: 14,
+    stageCode: "ditado",
+    stageTitle: "Escrever por ditado",
+    level: "B1",
+    target: "хлеб",
+    word: "хлеб",
+    translation: "pão",
+    sound: "kh",
+    prompt: "Escrever por ditado: pratique Х х em letra de forma. Ouça o modelo e escreva sem olhar; depois compare.",
+    objective: "Recuperar a grafia pela memória.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 719,
+    letterPosition: 23,
+    upper: "Х",
+    letter: "х",
+    mode: "print",
+    stageNumber: 15,
+    stageCode: "fluencia",
+    stageTitle: "Treino de fluência",
+    level: "B2",
+    target: "хлеб",
+    word: "хлеб",
+    translation: "pão",
+    sound: "kh",
+    prompt: "Treino de fluência: pratique Х х em letra de forma. Escreva com tempo controlado sem sacrificar clareza.",
+    objective: "Ganhar velocidade com legibilidade.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 720,
+    letterPosition: 23,
+    upper: "Х",
+    letter: "х",
+    mode: "print",
+    stageNumber: 16,
+    stageCode: "producao",
+    stageTitle: "Produção livre",
+    level: "C1",
+    target: "Я пишу слово «хлеб».",
+    word: "хлеб",
+    translation: "pão",
+    sound: "kh",
+    prompt: "Produção livre: pratique Х х em letra de forma. Crie uma frase curta usando a palavra-modelo.",
+    objective: "Usar a escrita de maneira independente.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 721,
+    letterPosition: 23,
+    upper: "Х",
+    letter: "х",
+    mode: "cursive",
+    stageNumber: 1,
+    stageCode: "observacao",
+    stageTitle: "Observar proporções",
+    level: "A1",
+    target: "ххххх",
+    word: "хлеб",
+    translation: "pão",
+    sound: "kh",
+    prompt: "Observar proporções: pratique Х х em letra cursiva. Compare altura, largura, inclinação e posição na linha.",
+    objective: "Reconhecer a forma antes de escrever.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 722,
+    letterPosition: 23,
+    upper: "Х",
+    letter: "х",
+    mode: "cursive",
+    stageNumber: 2,
+    stageCode: "movimento_ar",
+    stageTitle: "Desenhar no ar",
+    level: "A1",
+    target: "ххххх",
+    word: "хлеб",
+    translation: "pão",
+    sound: "kh",
+    prompt: "Desenhar no ar: pratique Х х em letra cursiva. Faça o movimento amplo com o braço antes de usar o lápis.",
+    objective: "Memorizar a direção geral do traço.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 723,
+    letterPosition: 23,
+    upper: "Х",
+    letter: "х",
+    mode: "cursive",
+    stageNumber: 3,
+    stageCode: "maiuscula_guiada",
+    stageTitle: "Traçar maiúscula",
+    level: "A1",
+    target: "ХХХХХ",
+    word: "хлеб",
+    translation: "pão",
+    sound: "kh",
+    prompt: "Traçar maiúscula: pratique Х х em letra cursiva. Passe sobre o modelo maiúsculo sem acelerar.",
+    objective: "Controlar início, direção e encerramento.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 724,
+    letterPosition: 23,
+    upper: "Х",
+    letter: "х",
+    mode: "cursive",
+    stageNumber: 4,
+    stageCode: "minuscula_guiada",
+    stageTitle: "Traçar minúscula",
+    level: "A1",
+    target: "ххххх",
+    word: "хлеб",
+    translation: "pão",
+    sound: "kh",
+    prompt: "Traçar minúscula: pratique Х х em letra cursiva. Passe sobre o modelo minúsculo mantendo a altura.",
+    objective: "Dominar a forma usada dentro das palavras.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 725,
+    letterPosition: 23,
+    upper: "Х",
+    letter: "х",
+    mode: "cursive",
+    stageNumber: 5,
+    stageCode: "copia_isolada",
+    stageTitle: "Copiar isoladamente",
+    level: "A1",
+    target: "ххххх",
+    word: "хлеб",
+    translation: "pão",
+    sound: "kh",
+    prompt: "Copiar isoladamente: pratique Х х em letra cursiva. Copie a letra cinco vezes ao lado do modelo.",
+    objective: "Manter tamanho e espaçamento consistentes.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 726,
+    letterPosition: 23,
+    upper: "Х",
+    letter: "х",
+    mode: "cursive",
+    stageNumber: 6,
+    stageCode: "ritmo",
+    stageTitle: "Criar ritmo",
+    level: "A2",
+    target: "хххх хххх хххх",
+    word: "хлеб",
+    translation: "pão",
+    sound: "kh",
+    prompt: "Criar ritmo: pratique Х х em letra cursiva. Escreva uma linha contínua com intervalos regulares.",
+    objective: "Automatizar o movimento sem perder legibilidade.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 727,
+    letterPosition: 23,
+    upper: "Х",
+    letter: "х",
+    mode: "cursive",
+    stageNumber: 7,
+    stageCode: "ligacao_a",
+    stageTitle: "Ligar com а",
+    level: "A2",
+    target: "ха ах",
+    word: "хлеб",
+    translation: "pão",
+    sound: "kh",
+    prompt: "Ligar com а: pratique Х х em letra cursiva. Pratique a ligação de entrada e saída com а.",
+    objective: "Aprender uma conexão frequente.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 728,
+    letterPosition: 23,
+    upper: "Х",
+    letter: "х",
+    mode: "cursive",
+    stageNumber: 8,
+    stageCode: "ligacao_o",
+    stageTitle: "Ligar com о",
+    level: "A2",
+    target: "хо ох",
+    word: "хлеб",
+    translation: "pão",
+    sound: "kh",
+    prompt: "Ligar com о: pratique Х х em letra cursiva. Pratique a ligação de entrada e saída com о.",
+    objective: "Evitar que as letras se encostem demais.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 729,
+    letterPosition: 23,
+    upper: "Х",
+    letter: "х",
+    mode: "cursive",
+    stageNumber: 9,
+    stageCode: "ligacao_i",
+    stageTitle: "Ligar com и",
+    level: "A2",
+    target: "хи их",
+    word: "хлеб",
+    translation: "pão",
+    sound: "kh",
+    prompt: "Ligar com и: pratique Х х em letra cursiva. Pratique a ligação de entrada e saída com и.",
+    objective: "Manter o fluxo da cursiva.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 730,
+    letterPosition: 23,
+    upper: "Х",
+    letter: "х",
+    mode: "cursive",
+    stageNumber: 10,
+    stageCode: "ligacao_m",
+    stageTitle: "Ligar com м",
+    level: "A2",
+    target: "хм мх",
+    word: "хлеб",
+    translation: "pão",
+    sound: "kh",
+    prompt: "Ligar com м: pratique Х х em letra cursiva. Pratique a ligação de entrada e saída com м.",
+    objective: "Diferenciar arcos e hastes semelhantes.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 731,
+    letterPosition: 23,
+    upper: "Х",
+    letter: "х",
+    mode: "cursive",
+    stageNumber: 11,
+    stageCode: "silaba",
+    stageTitle: "Copiar sílabas",
+    level: "A2",
+    target: "ха хо ху хи",
+    word: "хлеб",
+    translation: "pão",
+    sound: "kh",
+    prompt: "Copiar sílabas: pratique Х х em letra cursiva. Copie sílabas curtas e leia em voz alta.",
+    objective: "Unir escrita, leitura e som.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 732,
+    letterPosition: 23,
+    upper: "Х",
+    letter: "х",
+    mode: "cursive",
+    stageNumber: 12,
+    stageCode: "palavra",
+    stageTitle: "Copiar palavra",
+    level: "B1",
+    target: "хлеб",
+    word: "хлеб",
+    translation: "pão",
+    sound: "kh",
+    prompt: "Copiar palavra: pratique Х х em letra cursiva. Copie a palavra-modelo e confira cada ligação.",
+    objective: "Aplicar a letra em vocabulário real.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 733,
+    letterPosition: 23,
+    upper: "Х",
+    letter: "х",
+    mode: "cursive",
+    stageNumber: 13,
+    stageCode: "frase",
+    stageTitle: "Copiar frase",
+    level: "B1",
+    target: "Я пишу слово «хлеб».",
+    word: "хлеб",
+    translation: "pão",
+    sound: "kh",
+    prompt: "Copiar frase: pratique Х х em letra cursiva. Copie uma frase curta sem interromper o ritmo.",
+    objective: "Aplicar a letra em contexto.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 734,
+    letterPosition: 23,
+    upper: "Х",
+    letter: "х",
+    mode: "cursive",
+    stageNumber: 14,
+    stageCode: "ditado",
+    stageTitle: "Escrever por ditado",
+    level: "B1",
+    target: "хлеб",
+    word: "хлеб",
+    translation: "pão",
+    sound: "kh",
+    prompt: "Escrever por ditado: pratique Х х em letra cursiva. Ouça o modelo e escreva sem olhar; depois compare.",
+    objective: "Recuperar a grafia pela memória.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 735,
+    letterPosition: 23,
+    upper: "Х",
+    letter: "х",
+    mode: "cursive",
+    stageNumber: 15,
+    stageCode: "fluencia",
+    stageTitle: "Treino de fluência",
+    level: "B2",
+    target: "хлеб",
+    word: "хлеб",
+    translation: "pão",
+    sound: "kh",
+    prompt: "Treino de fluência: pratique Х х em letra cursiva. Escreva com tempo controlado sem sacrificar clareza.",
+    objective: "Ganhar velocidade com legibilidade.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 736,
+    letterPosition: 23,
+    upper: "Х",
+    letter: "х",
+    mode: "cursive",
+    stageNumber: 16,
+    stageCode: "producao",
+    stageTitle: "Produção livre",
+    level: "C1",
+    target: "Я пишу слово «хлеб».",
+    word: "хлеб",
+    translation: "pão",
+    sound: "kh",
+    prompt: "Produção livre: pratique Х х em letra cursiva. Crie uma frase curta usando a palavra-modelo.",
+    objective: "Usar a escrita de maneira independente.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 737,
+    letterPosition: 24,
+    upper: "Ц",
+    letter: "ц",
+    mode: "print",
+    stageNumber: 1,
+    stageCode: "observacao",
+    stageTitle: "Observar proporções",
+    level: "A1",
+    target: "ццццц",
+    word: "цирк",
+    translation: "circo",
+    sound: "ts",
+    prompt: "Observar proporções: pratique Ц ц em letra de forma. Compare altura, largura, inclinação e posição na linha.",
+    objective: "Reconhecer a forma antes de escrever.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 738,
+    letterPosition: 24,
+    upper: "Ц",
+    letter: "ц",
+    mode: "print",
+    stageNumber: 2,
+    stageCode: "movimento_ar",
+    stageTitle: "Desenhar no ar",
+    level: "A1",
+    target: "ццццц",
+    word: "цирк",
+    translation: "circo",
+    sound: "ts",
+    prompt: "Desenhar no ar: pratique Ц ц em letra de forma. Faça o movimento amplo com o braço antes de usar o lápis.",
+    objective: "Memorizar a direção geral do traço.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 739,
+    letterPosition: 24,
+    upper: "Ц",
+    letter: "ц",
+    mode: "print",
+    stageNumber: 3,
+    stageCode: "maiuscula_guiada",
+    stageTitle: "Traçar maiúscula",
+    level: "A1",
+    target: "ЦЦЦЦЦ",
+    word: "цирк",
+    translation: "circo",
+    sound: "ts",
+    prompt: "Traçar maiúscula: pratique Ц ц em letra de forma. Passe sobre o modelo maiúsculo sem acelerar.",
+    objective: "Controlar início, direção e encerramento.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 740,
+    letterPosition: 24,
+    upper: "Ц",
+    letter: "ц",
+    mode: "print",
+    stageNumber: 4,
+    stageCode: "minuscula_guiada",
+    stageTitle: "Traçar minúscula",
+    level: "A1",
+    target: "ццццц",
+    word: "цирк",
+    translation: "circo",
+    sound: "ts",
+    prompt: "Traçar minúscula: pratique Ц ц em letra de forma. Passe sobre o modelo minúsculo mantendo a altura.",
+    objective: "Dominar a forma usada dentro das palavras.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 741,
+    letterPosition: 24,
+    upper: "Ц",
+    letter: "ц",
+    mode: "print",
+    stageNumber: 5,
+    stageCode: "copia_isolada",
+    stageTitle: "Copiar isoladamente",
+    level: "A1",
+    target: "ццццц",
+    word: "цирк",
+    translation: "circo",
+    sound: "ts",
+    prompt: "Copiar isoladamente: pratique Ц ц em letra de forma. Copie a letra cinco vezes ao lado do modelo.",
+    objective: "Manter tamanho e espaçamento consistentes.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 742,
+    letterPosition: 24,
+    upper: "Ц",
+    letter: "ц",
+    mode: "print",
+    stageNumber: 6,
+    stageCode: "ritmo",
+    stageTitle: "Criar ritmo",
+    level: "A2",
+    target: "цццц цццц цццц",
+    word: "цирк",
+    translation: "circo",
+    sound: "ts",
+    prompt: "Criar ritmo: pratique Ц ц em letra de forma. Escreva uma linha contínua com intervalos regulares.",
+    objective: "Automatizar o movimento sem perder legibilidade.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 743,
+    letterPosition: 24,
+    upper: "Ц",
+    letter: "ц",
+    mode: "print",
+    stageNumber: 7,
+    stageCode: "ligacao_a",
+    stageTitle: "Ligar com а",
+    level: "A2",
+    target: "ца ац",
+    word: "цирк",
+    translation: "circo",
+    sound: "ts",
+    prompt: "Ligar com а: pratique Ц ц em letra de forma. Pratique a ligação de entrada e saída com а.",
+    objective: "Aprender uma conexão frequente.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 744,
+    letterPosition: 24,
+    upper: "Ц",
+    letter: "ц",
+    mode: "print",
+    stageNumber: 8,
+    stageCode: "ligacao_o",
+    stageTitle: "Ligar com о",
+    level: "A2",
+    target: "цо оц",
+    word: "цирк",
+    translation: "circo",
+    sound: "ts",
+    prompt: "Ligar com о: pratique Ц ц em letra de forma. Pratique a ligação de entrada e saída com о.",
+    objective: "Evitar que as letras se encostem demais.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 745,
+    letterPosition: 24,
+    upper: "Ц",
+    letter: "ц",
+    mode: "print",
+    stageNumber: 9,
+    stageCode: "ligacao_i",
+    stageTitle: "Ligar com и",
+    level: "A2",
+    target: "ци иц",
+    word: "цирк",
+    translation: "circo",
+    sound: "ts",
+    prompt: "Ligar com и: pratique Ц ц em letra de forma. Pratique a ligação de entrada e saída com и.",
+    objective: "Manter o fluxo da cursiva.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 746,
+    letterPosition: 24,
+    upper: "Ц",
+    letter: "ц",
+    mode: "print",
+    stageNumber: 10,
+    stageCode: "ligacao_m",
+    stageTitle: "Ligar com м",
+    level: "A2",
+    target: "цм мц",
+    word: "цирк",
+    translation: "circo",
+    sound: "ts",
+    prompt: "Ligar com м: pratique Ц ц em letra de forma. Pratique a ligação de entrada e saída com м.",
+    objective: "Diferenciar arcos e hastes semelhantes.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 747,
+    letterPosition: 24,
+    upper: "Ц",
+    letter: "ц",
+    mode: "print",
+    stageNumber: 11,
+    stageCode: "silaba",
+    stageTitle: "Copiar sílabas",
+    level: "A2",
+    target: "ца цо цу ци",
+    word: "цирк",
+    translation: "circo",
+    sound: "ts",
+    prompt: "Copiar sílabas: pratique Ц ц em letra de forma. Copie sílabas curtas e leia em voz alta.",
+    objective: "Unir escrita, leitura e som.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 748,
+    letterPosition: 24,
+    upper: "Ц",
+    letter: "ц",
+    mode: "print",
+    stageNumber: 12,
+    stageCode: "palavra",
+    stageTitle: "Copiar palavra",
+    level: "B1",
+    target: "цирк",
+    word: "цирк",
+    translation: "circo",
+    sound: "ts",
+    prompt: "Copiar palavra: pratique Ц ц em letra de forma. Copie a palavra-modelo e confira cada ligação.",
+    objective: "Aplicar a letra em vocabulário real.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 749,
+    letterPosition: 24,
+    upper: "Ц",
+    letter: "ц",
+    mode: "print",
+    stageNumber: 13,
+    stageCode: "frase",
+    stageTitle: "Copiar frase",
+    level: "B1",
+    target: "Я пишу слово «цирк».",
+    word: "цирк",
+    translation: "circo",
+    sound: "ts",
+    prompt: "Copiar frase: pratique Ц ц em letra de forma. Copie uma frase curta sem interromper o ritmo.",
+    objective: "Aplicar a letra em contexto.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 750,
+    letterPosition: 24,
+    upper: "Ц",
+    letter: "ц",
+    mode: "print",
+    stageNumber: 14,
+    stageCode: "ditado",
+    stageTitle: "Escrever por ditado",
+    level: "B1",
+    target: "цирк",
+    word: "цирк",
+    translation: "circo",
+    sound: "ts",
+    prompt: "Escrever por ditado: pratique Ц ц em letra de forma. Ouça o modelo e escreva sem olhar; depois compare.",
+    objective: "Recuperar a grafia pela memória.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 751,
+    letterPosition: 24,
+    upper: "Ц",
+    letter: "ц",
+    mode: "print",
+    stageNumber: 15,
+    stageCode: "fluencia",
+    stageTitle: "Treino de fluência",
+    level: "B2",
+    target: "цирк",
+    word: "цирк",
+    translation: "circo",
+    sound: "ts",
+    prompt: "Treino de fluência: pratique Ц ц em letra de forma. Escreva com tempo controlado sem sacrificar clareza.",
+    objective: "Ganhar velocidade com legibilidade.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 752,
+    letterPosition: 24,
+    upper: "Ц",
+    letter: "ц",
+    mode: "print",
+    stageNumber: 16,
+    stageCode: "producao",
+    stageTitle: "Produção livre",
+    level: "C1",
+    target: "Я пишу слово «цирк».",
+    word: "цирк",
+    translation: "circo",
+    sound: "ts",
+    prompt: "Produção livre: pratique Ц ц em letra de forma. Crie uma frase curta usando a palavra-modelo.",
+    objective: "Usar a escrita de maneira independente.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 753,
+    letterPosition: 24,
+    upper: "Ц",
+    letter: "ц",
+    mode: "cursive",
+    stageNumber: 1,
+    stageCode: "observacao",
+    stageTitle: "Observar proporções",
+    level: "A1",
+    target: "ццццц",
+    word: "цирк",
+    translation: "circo",
+    sound: "ts",
+    prompt: "Observar proporções: pratique Ц ц em letra cursiva. Compare altura, largura, inclinação e posição na linha.",
+    objective: "Reconhecer a forma antes de escrever.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 754,
+    letterPosition: 24,
+    upper: "Ц",
+    letter: "ц",
+    mode: "cursive",
+    stageNumber: 2,
+    stageCode: "movimento_ar",
+    stageTitle: "Desenhar no ar",
+    level: "A1",
+    target: "ццццц",
+    word: "цирк",
+    translation: "circo",
+    sound: "ts",
+    prompt: "Desenhar no ar: pratique Ц ц em letra cursiva. Faça o movimento amplo com o braço antes de usar o lápis.",
+    objective: "Memorizar a direção geral do traço.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 755,
+    letterPosition: 24,
+    upper: "Ц",
+    letter: "ц",
+    mode: "cursive",
+    stageNumber: 3,
+    stageCode: "maiuscula_guiada",
+    stageTitle: "Traçar maiúscula",
+    level: "A1",
+    target: "ЦЦЦЦЦ",
+    word: "цирк",
+    translation: "circo",
+    sound: "ts",
+    prompt: "Traçar maiúscula: pratique Ц ц em letra cursiva. Passe sobre o modelo maiúsculo sem acelerar.",
+    objective: "Controlar início, direção e encerramento.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 756,
+    letterPosition: 24,
+    upper: "Ц",
+    letter: "ц",
+    mode: "cursive",
+    stageNumber: 4,
+    stageCode: "minuscula_guiada",
+    stageTitle: "Traçar minúscula",
+    level: "A1",
+    target: "ццццц",
+    word: "цирк",
+    translation: "circo",
+    sound: "ts",
+    prompt: "Traçar minúscula: pratique Ц ц em letra cursiva. Passe sobre o modelo minúsculo mantendo a altura.",
+    objective: "Dominar a forma usada dentro das palavras.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 757,
+    letterPosition: 24,
+    upper: "Ц",
+    letter: "ц",
+    mode: "cursive",
+    stageNumber: 5,
+    stageCode: "copia_isolada",
+    stageTitle: "Copiar isoladamente",
+    level: "A1",
+    target: "ццццц",
+    word: "цирк",
+    translation: "circo",
+    sound: "ts",
+    prompt: "Copiar isoladamente: pratique Ц ц em letra cursiva. Copie a letra cinco vezes ao lado do modelo.",
+    objective: "Manter tamanho e espaçamento consistentes.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 758,
+    letterPosition: 24,
+    upper: "Ц",
+    letter: "ц",
+    mode: "cursive",
+    stageNumber: 6,
+    stageCode: "ritmo",
+    stageTitle: "Criar ritmo",
+    level: "A2",
+    target: "цццц цццц цццц",
+    word: "цирк",
+    translation: "circo",
+    sound: "ts",
+    prompt: "Criar ritmo: pratique Ц ц em letra cursiva. Escreva uma linha contínua com intervalos regulares.",
+    objective: "Automatizar o movimento sem perder legibilidade.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 759,
+    letterPosition: 24,
+    upper: "Ц",
+    letter: "ц",
+    mode: "cursive",
+    stageNumber: 7,
+    stageCode: "ligacao_a",
+    stageTitle: "Ligar com а",
+    level: "A2",
+    target: "ца ац",
+    word: "цирк",
+    translation: "circo",
+    sound: "ts",
+    prompt: "Ligar com а: pratique Ц ц em letra cursiva. Pratique a ligação de entrada e saída com а.",
+    objective: "Aprender uma conexão frequente.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 760,
+    letterPosition: 24,
+    upper: "Ц",
+    letter: "ц",
+    mode: "cursive",
+    stageNumber: 8,
+    stageCode: "ligacao_o",
+    stageTitle: "Ligar com о",
+    level: "A2",
+    target: "цо оц",
+    word: "цирк",
+    translation: "circo",
+    sound: "ts",
+    prompt: "Ligar com о: pratique Ц ц em letra cursiva. Pratique a ligação de entrada e saída com о.",
+    objective: "Evitar que as letras se encostem demais.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 761,
+    letterPosition: 24,
+    upper: "Ц",
+    letter: "ц",
+    mode: "cursive",
+    stageNumber: 9,
+    stageCode: "ligacao_i",
+    stageTitle: "Ligar com и",
+    level: "A2",
+    target: "ци иц",
+    word: "цирк",
+    translation: "circo",
+    sound: "ts",
+    prompt: "Ligar com и: pratique Ц ц em letra cursiva. Pratique a ligação de entrada e saída com и.",
+    objective: "Manter o fluxo da cursiva.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 762,
+    letterPosition: 24,
+    upper: "Ц",
+    letter: "ц",
+    mode: "cursive",
+    stageNumber: 10,
+    stageCode: "ligacao_m",
+    stageTitle: "Ligar com м",
+    level: "A2",
+    target: "цм мц",
+    word: "цирк",
+    translation: "circo",
+    sound: "ts",
+    prompt: "Ligar com м: pratique Ц ц em letra cursiva. Pratique a ligação de entrada e saída com м.",
+    objective: "Diferenciar arcos e hastes semelhantes.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 763,
+    letterPosition: 24,
+    upper: "Ц",
+    letter: "ц",
+    mode: "cursive",
+    stageNumber: 11,
+    stageCode: "silaba",
+    stageTitle: "Copiar sílabas",
+    level: "A2",
+    target: "ца цо цу ци",
+    word: "цирк",
+    translation: "circo",
+    sound: "ts",
+    prompt: "Copiar sílabas: pratique Ц ц em letra cursiva. Copie sílabas curtas e leia em voz alta.",
+    objective: "Unir escrita, leitura e som.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 764,
+    letterPosition: 24,
+    upper: "Ц",
+    letter: "ц",
+    mode: "cursive",
+    stageNumber: 12,
+    stageCode: "palavra",
+    stageTitle: "Copiar palavra",
+    level: "B1",
+    target: "цирк",
+    word: "цирк",
+    translation: "circo",
+    sound: "ts",
+    prompt: "Copiar palavra: pratique Ц ц em letra cursiva. Copie a palavra-modelo e confira cada ligação.",
+    objective: "Aplicar a letra em vocabulário real.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 765,
+    letterPosition: 24,
+    upper: "Ц",
+    letter: "ц",
+    mode: "cursive",
+    stageNumber: 13,
+    stageCode: "frase",
+    stageTitle: "Copiar frase",
+    level: "B1",
+    target: "Я пишу слово «цирк».",
+    word: "цирк",
+    translation: "circo",
+    sound: "ts",
+    prompt: "Copiar frase: pratique Ц ц em letra cursiva. Copie uma frase curta sem interromper o ritmo.",
+    objective: "Aplicar a letra em contexto.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 766,
+    letterPosition: 24,
+    upper: "Ц",
+    letter: "ц",
+    mode: "cursive",
+    stageNumber: 14,
+    stageCode: "ditado",
+    stageTitle: "Escrever por ditado",
+    level: "B1",
+    target: "цирк",
+    word: "цирк",
+    translation: "circo",
+    sound: "ts",
+    prompt: "Escrever por ditado: pratique Ц ц em letra cursiva. Ouça o modelo e escreva sem olhar; depois compare.",
+    objective: "Recuperar a grafia pela memória.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 767,
+    letterPosition: 24,
+    upper: "Ц",
+    letter: "ц",
+    mode: "cursive",
+    stageNumber: 15,
+    stageCode: "fluencia",
+    stageTitle: "Treino de fluência",
+    level: "B2",
+    target: "цирк",
+    word: "цирк",
+    translation: "circo",
+    sound: "ts",
+    prompt: "Treino de fluência: pratique Ц ц em letra cursiva. Escreva com tempo controlado sem sacrificar clareza.",
+    objective: "Ganhar velocidade com legibilidade.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 768,
+    letterPosition: 24,
+    upper: "Ц",
+    letter: "ц",
+    mode: "cursive",
+    stageNumber: 16,
+    stageCode: "producao",
+    stageTitle: "Produção livre",
+    level: "C1",
+    target: "Я пишу слово «цирк».",
+    word: "цирк",
+    translation: "circo",
+    sound: "ts",
+    prompt: "Produção livre: pratique Ц ц em letra cursiva. Crie uma frase curta usando a palavra-modelo.",
+    objective: "Usar a escrita de maneira independente.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 769,
+    letterPosition: 25,
+    upper: "Ч",
+    letter: "ч",
+    mode: "print",
+    stageNumber: 1,
+    stageCode: "observacao",
+    stageTitle: "Observar proporções",
+    level: "A1",
+    target: "ччччч",
+    word: "чай",
+    translation: "chá",
+    sound: "tch",
+    prompt: "Observar proporções: pratique Ч ч em letra de forma. Compare altura, largura, inclinação e posição na linha.",
+    objective: "Reconhecer a forma antes de escrever.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 770,
+    letterPosition: 25,
+    upper: "Ч",
+    letter: "ч",
+    mode: "print",
+    stageNumber: 2,
+    stageCode: "movimento_ar",
+    stageTitle: "Desenhar no ar",
+    level: "A1",
+    target: "ччччч",
+    word: "чай",
+    translation: "chá",
+    sound: "tch",
+    prompt: "Desenhar no ar: pratique Ч ч em letra de forma. Faça o movimento amplo com o braço antes de usar o lápis.",
+    objective: "Memorizar a direção geral do traço.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 771,
+    letterPosition: 25,
+    upper: "Ч",
+    letter: "ч",
+    mode: "print",
+    stageNumber: 3,
+    stageCode: "maiuscula_guiada",
+    stageTitle: "Traçar maiúscula",
+    level: "A1",
+    target: "ЧЧЧЧЧ",
+    word: "чай",
+    translation: "chá",
+    sound: "tch",
+    prompt: "Traçar maiúscula: pratique Ч ч em letra de forma. Passe sobre o modelo maiúsculo sem acelerar.",
+    objective: "Controlar início, direção e encerramento.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 772,
+    letterPosition: 25,
+    upper: "Ч",
+    letter: "ч",
+    mode: "print",
+    stageNumber: 4,
+    stageCode: "minuscula_guiada",
+    stageTitle: "Traçar minúscula",
+    level: "A1",
+    target: "ччччч",
+    word: "чай",
+    translation: "chá",
+    sound: "tch",
+    prompt: "Traçar minúscula: pratique Ч ч em letra de forma. Passe sobre o modelo minúsculo mantendo a altura.",
+    objective: "Dominar a forma usada dentro das palavras.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 773,
+    letterPosition: 25,
+    upper: "Ч",
+    letter: "ч",
+    mode: "print",
+    stageNumber: 5,
+    stageCode: "copia_isolada",
+    stageTitle: "Copiar isoladamente",
+    level: "A1",
+    target: "ччччч",
+    word: "чай",
+    translation: "chá",
+    sound: "tch",
+    prompt: "Copiar isoladamente: pratique Ч ч em letra de forma. Copie a letra cinco vezes ao lado do modelo.",
+    objective: "Manter tamanho e espaçamento consistentes.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 774,
+    letterPosition: 25,
+    upper: "Ч",
+    letter: "ч",
+    mode: "print",
+    stageNumber: 6,
+    stageCode: "ritmo",
+    stageTitle: "Criar ritmo",
+    level: "A2",
+    target: "чччч чччч чччч",
+    word: "чай",
+    translation: "chá",
+    sound: "tch",
+    prompt: "Criar ritmo: pratique Ч ч em letra de forma. Escreva uma linha contínua com intervalos regulares.",
+    objective: "Automatizar o movimento sem perder legibilidade.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 775,
+    letterPosition: 25,
+    upper: "Ч",
+    letter: "ч",
+    mode: "print",
+    stageNumber: 7,
+    stageCode: "ligacao_a",
+    stageTitle: "Ligar com а",
+    level: "A2",
+    target: "ча ач",
+    word: "чай",
+    translation: "chá",
+    sound: "tch",
+    prompt: "Ligar com а: pratique Ч ч em letra de forma. Pratique a ligação de entrada e saída com а.",
+    objective: "Aprender uma conexão frequente.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 776,
+    letterPosition: 25,
+    upper: "Ч",
+    letter: "ч",
+    mode: "print",
+    stageNumber: 8,
+    stageCode: "ligacao_o",
+    stageTitle: "Ligar com о",
+    level: "A2",
+    target: "чо оч",
+    word: "чай",
+    translation: "chá",
+    sound: "tch",
+    prompt: "Ligar com о: pratique Ч ч em letra de forma. Pratique a ligação de entrada e saída com о.",
+    objective: "Evitar que as letras se encostem demais.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 777,
+    letterPosition: 25,
+    upper: "Ч",
+    letter: "ч",
+    mode: "print",
+    stageNumber: 9,
+    stageCode: "ligacao_i",
+    stageTitle: "Ligar com и",
+    level: "A2",
+    target: "чи ич",
+    word: "чай",
+    translation: "chá",
+    sound: "tch",
+    prompt: "Ligar com и: pratique Ч ч em letra de forma. Pratique a ligação de entrada e saída com и.",
+    objective: "Manter o fluxo da cursiva.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 778,
+    letterPosition: 25,
+    upper: "Ч",
+    letter: "ч",
+    mode: "print",
+    stageNumber: 10,
+    stageCode: "ligacao_m",
+    stageTitle: "Ligar com м",
+    level: "A2",
+    target: "чм мч",
+    word: "чай",
+    translation: "chá",
+    sound: "tch",
+    prompt: "Ligar com м: pratique Ч ч em letra de forma. Pratique a ligação de entrada e saída com м.",
+    objective: "Diferenciar arcos e hastes semelhantes.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 779,
+    letterPosition: 25,
+    upper: "Ч",
+    letter: "ч",
+    mode: "print",
+    stageNumber: 11,
+    stageCode: "silaba",
+    stageTitle: "Copiar sílabas",
+    level: "A2",
+    target: "ча чо чу чи",
+    word: "чай",
+    translation: "chá",
+    sound: "tch",
+    prompt: "Copiar sílabas: pratique Ч ч em letra de forma. Copie sílabas curtas e leia em voz alta.",
+    objective: "Unir escrita, leitura e som.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 780,
+    letterPosition: 25,
+    upper: "Ч",
+    letter: "ч",
+    mode: "print",
+    stageNumber: 12,
+    stageCode: "palavra",
+    stageTitle: "Copiar palavra",
+    level: "B1",
+    target: "чай",
+    word: "чай",
+    translation: "chá",
+    sound: "tch",
+    prompt: "Copiar palavra: pratique Ч ч em letra de forma. Copie a palavra-modelo e confira cada ligação.",
+    objective: "Aplicar a letra em vocabulário real.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 781,
+    letterPosition: 25,
+    upper: "Ч",
+    letter: "ч",
+    mode: "print",
+    stageNumber: 13,
+    stageCode: "frase",
+    stageTitle: "Copiar frase",
+    level: "B1",
+    target: "Я пишу слово «чай».",
+    word: "чай",
+    translation: "chá",
+    sound: "tch",
+    prompt: "Copiar frase: pratique Ч ч em letra de forma. Copie uma frase curta sem interromper o ritmo.",
+    objective: "Aplicar a letra em contexto.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 782,
+    letterPosition: 25,
+    upper: "Ч",
+    letter: "ч",
+    mode: "print",
+    stageNumber: 14,
+    stageCode: "ditado",
+    stageTitle: "Escrever por ditado",
+    level: "B1",
+    target: "чай",
+    word: "чай",
+    translation: "chá",
+    sound: "tch",
+    prompt: "Escrever por ditado: pratique Ч ч em letra de forma. Ouça o modelo e escreva sem olhar; depois compare.",
+    objective: "Recuperar a grafia pela memória.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 783,
+    letterPosition: 25,
+    upper: "Ч",
+    letter: "ч",
+    mode: "print",
+    stageNumber: 15,
+    stageCode: "fluencia",
+    stageTitle: "Treino de fluência",
+    level: "B2",
+    target: "чай",
+    word: "чай",
+    translation: "chá",
+    sound: "tch",
+    prompt: "Treino de fluência: pratique Ч ч em letra de forma. Escreva com tempo controlado sem sacrificar clareza.",
+    objective: "Ganhar velocidade com legibilidade.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 784,
+    letterPosition: 25,
+    upper: "Ч",
+    letter: "ч",
+    mode: "print",
+    stageNumber: 16,
+    stageCode: "producao",
+    stageTitle: "Produção livre",
+    level: "C1",
+    target: "Я пишу слово «чай».",
+    word: "чай",
+    translation: "chá",
+    sound: "tch",
+    prompt: "Produção livre: pratique Ч ч em letra de forma. Crie uma frase curta usando a palavra-modelo.",
+    objective: "Usar a escrita de maneira independente.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 785,
+    letterPosition: 25,
+    upper: "Ч",
+    letter: "ч",
+    mode: "cursive",
+    stageNumber: 1,
+    stageCode: "observacao",
+    stageTitle: "Observar proporções",
+    level: "A1",
+    target: "ччччч",
+    word: "чай",
+    translation: "chá",
+    sound: "tch",
+    prompt: "Observar proporções: pratique Ч ч em letra cursiva. Compare altura, largura, inclinação e posição na linha.",
+    objective: "Reconhecer a forma antes de escrever.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 786,
+    letterPosition: 25,
+    upper: "Ч",
+    letter: "ч",
+    mode: "cursive",
+    stageNumber: 2,
+    stageCode: "movimento_ar",
+    stageTitle: "Desenhar no ar",
+    level: "A1",
+    target: "ччччч",
+    word: "чай",
+    translation: "chá",
+    sound: "tch",
+    prompt: "Desenhar no ar: pratique Ч ч em letra cursiva. Faça o movimento amplo com o braço antes de usar o lápis.",
+    objective: "Memorizar a direção geral do traço.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 787,
+    letterPosition: 25,
+    upper: "Ч",
+    letter: "ч",
+    mode: "cursive",
+    stageNumber: 3,
+    stageCode: "maiuscula_guiada",
+    stageTitle: "Traçar maiúscula",
+    level: "A1",
+    target: "ЧЧЧЧЧ",
+    word: "чай",
+    translation: "chá",
+    sound: "tch",
+    prompt: "Traçar maiúscula: pratique Ч ч em letra cursiva. Passe sobre o modelo maiúsculo sem acelerar.",
+    objective: "Controlar início, direção e encerramento.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 788,
+    letterPosition: 25,
+    upper: "Ч",
+    letter: "ч",
+    mode: "cursive",
+    stageNumber: 4,
+    stageCode: "minuscula_guiada",
+    stageTitle: "Traçar minúscula",
+    level: "A1",
+    target: "ччччч",
+    word: "чай",
+    translation: "chá",
+    sound: "tch",
+    prompt: "Traçar minúscula: pratique Ч ч em letra cursiva. Passe sobre o modelo minúsculo mantendo a altura.",
+    objective: "Dominar a forma usada dentro das palavras.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 789,
+    letterPosition: 25,
+    upper: "Ч",
+    letter: "ч",
+    mode: "cursive",
+    stageNumber: 5,
+    stageCode: "copia_isolada",
+    stageTitle: "Copiar isoladamente",
+    level: "A1",
+    target: "ччччч",
+    word: "чай",
+    translation: "chá",
+    sound: "tch",
+    prompt: "Copiar isoladamente: pratique Ч ч em letra cursiva. Copie a letra cinco vezes ao lado do modelo.",
+    objective: "Manter tamanho e espaçamento consistentes.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 790,
+    letterPosition: 25,
+    upper: "Ч",
+    letter: "ч",
+    mode: "cursive",
+    stageNumber: 6,
+    stageCode: "ritmo",
+    stageTitle: "Criar ritmo",
+    level: "A2",
+    target: "чччч чччч чччч",
+    word: "чай",
+    translation: "chá",
+    sound: "tch",
+    prompt: "Criar ritmo: pratique Ч ч em letra cursiva. Escreva uma linha contínua com intervalos regulares.",
+    objective: "Automatizar o movimento sem perder legibilidade.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 791,
+    letterPosition: 25,
+    upper: "Ч",
+    letter: "ч",
+    mode: "cursive",
+    stageNumber: 7,
+    stageCode: "ligacao_a",
+    stageTitle: "Ligar com а",
+    level: "A2",
+    target: "ча ач",
+    word: "чай",
+    translation: "chá",
+    sound: "tch",
+    prompt: "Ligar com а: pratique Ч ч em letra cursiva. Pratique a ligação de entrada e saída com а.",
+    objective: "Aprender uma conexão frequente.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 792,
+    letterPosition: 25,
+    upper: "Ч",
+    letter: "ч",
+    mode: "cursive",
+    stageNumber: 8,
+    stageCode: "ligacao_o",
+    stageTitle: "Ligar com о",
+    level: "A2",
+    target: "чо оч",
+    word: "чай",
+    translation: "chá",
+    sound: "tch",
+    prompt: "Ligar com о: pratique Ч ч em letra cursiva. Pratique a ligação de entrada e saída com о.",
+    objective: "Evitar que as letras se encostem demais.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 793,
+    letterPosition: 25,
+    upper: "Ч",
+    letter: "ч",
+    mode: "cursive",
+    stageNumber: 9,
+    stageCode: "ligacao_i",
+    stageTitle: "Ligar com и",
+    level: "A2",
+    target: "чи ич",
+    word: "чай",
+    translation: "chá",
+    sound: "tch",
+    prompt: "Ligar com и: pratique Ч ч em letra cursiva. Pratique a ligação de entrada e saída com и.",
+    objective: "Manter o fluxo da cursiva.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 794,
+    letterPosition: 25,
+    upper: "Ч",
+    letter: "ч",
+    mode: "cursive",
+    stageNumber: 10,
+    stageCode: "ligacao_m",
+    stageTitle: "Ligar com м",
+    level: "A2",
+    target: "чм мч",
+    word: "чай",
+    translation: "chá",
+    sound: "tch",
+    prompt: "Ligar com м: pratique Ч ч em letra cursiva. Pratique a ligação de entrada e saída com м.",
+    objective: "Diferenciar arcos e hastes semelhantes.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 795,
+    letterPosition: 25,
+    upper: "Ч",
+    letter: "ч",
+    mode: "cursive",
+    stageNumber: 11,
+    stageCode: "silaba",
+    stageTitle: "Copiar sílabas",
+    level: "A2",
+    target: "ча чо чу чи",
+    word: "чай",
+    translation: "chá",
+    sound: "tch",
+    prompt: "Copiar sílabas: pratique Ч ч em letra cursiva. Copie sílabas curtas e leia em voz alta.",
+    objective: "Unir escrita, leitura e som.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 796,
+    letterPosition: 25,
+    upper: "Ч",
+    letter: "ч",
+    mode: "cursive",
+    stageNumber: 12,
+    stageCode: "palavra",
+    stageTitle: "Copiar palavra",
+    level: "B1",
+    target: "чай",
+    word: "чай",
+    translation: "chá",
+    sound: "tch",
+    prompt: "Copiar palavra: pratique Ч ч em letra cursiva. Copie a palavra-modelo e confira cada ligação.",
+    objective: "Aplicar a letra em vocabulário real.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 797,
+    letterPosition: 25,
+    upper: "Ч",
+    letter: "ч",
+    mode: "cursive",
+    stageNumber: 13,
+    stageCode: "frase",
+    stageTitle: "Copiar frase",
+    level: "B1",
+    target: "Я пишу слово «чай».",
+    word: "чай",
+    translation: "chá",
+    sound: "tch",
+    prompt: "Copiar frase: pratique Ч ч em letra cursiva. Copie uma frase curta sem interromper o ritmo.",
+    objective: "Aplicar a letra em contexto.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 798,
+    letterPosition: 25,
+    upper: "Ч",
+    letter: "ч",
+    mode: "cursive",
+    stageNumber: 14,
+    stageCode: "ditado",
+    stageTitle: "Escrever por ditado",
+    level: "B1",
+    target: "чай",
+    word: "чай",
+    translation: "chá",
+    sound: "tch",
+    prompt: "Escrever por ditado: pratique Ч ч em letra cursiva. Ouça o modelo e escreva sem olhar; depois compare.",
+    objective: "Recuperar a grafia pela memória.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 799,
+    letterPosition: 25,
+    upper: "Ч",
+    letter: "ч",
+    mode: "cursive",
+    stageNumber: 15,
+    stageCode: "fluencia",
+    stageTitle: "Treino de fluência",
+    level: "B2",
+    target: "чай",
+    word: "чай",
+    translation: "chá",
+    sound: "tch",
+    prompt: "Treino de fluência: pratique Ч ч em letra cursiva. Escreva com tempo controlado sem sacrificar clareza.",
+    objective: "Ganhar velocidade com legibilidade.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 800,
+    letterPosition: 25,
+    upper: "Ч",
+    letter: "ч",
+    mode: "cursive",
+    stageNumber: 16,
+    stageCode: "producao",
+    stageTitle: "Produção livre",
+    level: "C1",
+    target: "Я пишу слово «чай».",
+    word: "чай",
+    translation: "chá",
+    sound: "tch",
+    prompt: "Produção livre: pratique Ч ч em letra cursiva. Crie uma frase curta usando a palavra-modelo.",
+    objective: "Usar a escrita de maneira independente.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 801,
+    letterPosition: 26,
+    upper: "Ш",
+    letter: "ш",
+    mode: "print",
+    stageNumber: 1,
+    stageCode: "observacao",
+    stageTitle: "Observar proporções",
+    level: "A1",
+    target: "шшшшш",
+    word: "школа",
+    translation: "escola",
+    sound: "sh",
+    prompt: "Observar proporções: pratique Ш ш em letra de forma. Compare altura, largura, inclinação e posição na linha.",
+    objective: "Reconhecer a forma antes de escrever.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 802,
+    letterPosition: 26,
+    upper: "Ш",
+    letter: "ш",
+    mode: "print",
+    stageNumber: 2,
+    stageCode: "movimento_ar",
+    stageTitle: "Desenhar no ar",
+    level: "A1",
+    target: "шшшшш",
+    word: "школа",
+    translation: "escola",
+    sound: "sh",
+    prompt: "Desenhar no ar: pratique Ш ш em letra de forma. Faça o movimento amplo com o braço antes de usar o lápis.",
+    objective: "Memorizar a direção geral do traço.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 803,
+    letterPosition: 26,
+    upper: "Ш",
+    letter: "ш",
+    mode: "print",
+    stageNumber: 3,
+    stageCode: "maiuscula_guiada",
+    stageTitle: "Traçar maiúscula",
+    level: "A1",
+    target: "ШШШШШ",
+    word: "школа",
+    translation: "escola",
+    sound: "sh",
+    prompt: "Traçar maiúscula: pratique Ш ш em letra de forma. Passe sobre o modelo maiúsculo sem acelerar.",
+    objective: "Controlar início, direção e encerramento.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 804,
+    letterPosition: 26,
+    upper: "Ш",
+    letter: "ш",
+    mode: "print",
+    stageNumber: 4,
+    stageCode: "minuscula_guiada",
+    stageTitle: "Traçar minúscula",
+    level: "A1",
+    target: "шшшшш",
+    word: "школа",
+    translation: "escola",
+    sound: "sh",
+    prompt: "Traçar minúscula: pratique Ш ш em letra de forma. Passe sobre o modelo minúsculo mantendo a altura.",
+    objective: "Dominar a forma usada dentro das palavras.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 805,
+    letterPosition: 26,
+    upper: "Ш",
+    letter: "ш",
+    mode: "print",
+    stageNumber: 5,
+    stageCode: "copia_isolada",
+    stageTitle: "Copiar isoladamente",
+    level: "A1",
+    target: "шшшшш",
+    word: "школа",
+    translation: "escola",
+    sound: "sh",
+    prompt: "Copiar isoladamente: pratique Ш ш em letra de forma. Copie a letra cinco vezes ao lado do modelo.",
+    objective: "Manter tamanho e espaçamento consistentes.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 806,
+    letterPosition: 26,
+    upper: "Ш",
+    letter: "ш",
+    mode: "print",
+    stageNumber: 6,
+    stageCode: "ritmo",
+    stageTitle: "Criar ritmo",
+    level: "A2",
+    target: "шшшш шшшш шшшш",
+    word: "школа",
+    translation: "escola",
+    sound: "sh",
+    prompt: "Criar ritmo: pratique Ш ш em letra de forma. Escreva uma linha contínua com intervalos regulares.",
+    objective: "Automatizar o movimento sem perder legibilidade.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 807,
+    letterPosition: 26,
+    upper: "Ш",
+    letter: "ш",
+    mode: "print",
+    stageNumber: 7,
+    stageCode: "ligacao_a",
+    stageTitle: "Ligar com а",
+    level: "A2",
+    target: "ша аш",
+    word: "школа",
+    translation: "escola",
+    sound: "sh",
+    prompt: "Ligar com а: pratique Ш ш em letra de forma. Pratique a ligação de entrada e saída com а.",
+    objective: "Aprender uma conexão frequente.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 808,
+    letterPosition: 26,
+    upper: "Ш",
+    letter: "ш",
+    mode: "print",
+    stageNumber: 8,
+    stageCode: "ligacao_o",
+    stageTitle: "Ligar com о",
+    level: "A2",
+    target: "шо ош",
+    word: "школа",
+    translation: "escola",
+    sound: "sh",
+    prompt: "Ligar com о: pratique Ш ш em letra de forma. Pratique a ligação de entrada e saída com о.",
+    objective: "Evitar que as letras se encostem demais.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 809,
+    letterPosition: 26,
+    upper: "Ш",
+    letter: "ш",
+    mode: "print",
+    stageNumber: 9,
+    stageCode: "ligacao_i",
+    stageTitle: "Ligar com и",
+    level: "A2",
+    target: "ши иш",
+    word: "школа",
+    translation: "escola",
+    sound: "sh",
+    prompt: "Ligar com и: pratique Ш ш em letra de forma. Pratique a ligação de entrada e saída com и.",
+    objective: "Manter o fluxo da cursiva.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 810,
+    letterPosition: 26,
+    upper: "Ш",
+    letter: "ш",
+    mode: "print",
+    stageNumber: 10,
+    stageCode: "ligacao_m",
+    stageTitle: "Ligar com м",
+    level: "A2",
+    target: "шм мш",
+    word: "школа",
+    translation: "escola",
+    sound: "sh",
+    prompt: "Ligar com м: pratique Ш ш em letra de forma. Pratique a ligação de entrada e saída com м.",
+    objective: "Diferenciar arcos e hastes semelhantes.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 811,
+    letterPosition: 26,
+    upper: "Ш",
+    letter: "ш",
+    mode: "print",
+    stageNumber: 11,
+    stageCode: "silaba",
+    stageTitle: "Copiar sílabas",
+    level: "A2",
+    target: "ша шо шу ши",
+    word: "школа",
+    translation: "escola",
+    sound: "sh",
+    prompt: "Copiar sílabas: pratique Ш ш em letra de forma. Copie sílabas curtas e leia em voz alta.",
+    objective: "Unir escrita, leitura e som.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 812,
+    letterPosition: 26,
+    upper: "Ш",
+    letter: "ш",
+    mode: "print",
+    stageNumber: 12,
+    stageCode: "palavra",
+    stageTitle: "Copiar palavra",
+    level: "B1",
+    target: "школа",
+    word: "школа",
+    translation: "escola",
+    sound: "sh",
+    prompt: "Copiar palavra: pratique Ш ш em letra de forma. Copie a palavra-modelo e confira cada ligação.",
+    objective: "Aplicar a letra em vocabulário real.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 813,
+    letterPosition: 26,
+    upper: "Ш",
+    letter: "ш",
+    mode: "print",
+    stageNumber: 13,
+    stageCode: "frase",
+    stageTitle: "Copiar frase",
+    level: "B1",
+    target: "Я пишу слово «школа».",
+    word: "школа",
+    translation: "escola",
+    sound: "sh",
+    prompt: "Copiar frase: pratique Ш ш em letra de forma. Copie uma frase curta sem interromper o ritmo.",
+    objective: "Aplicar a letra em contexto.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 814,
+    letterPosition: 26,
+    upper: "Ш",
+    letter: "ш",
+    mode: "print",
+    stageNumber: 14,
+    stageCode: "ditado",
+    stageTitle: "Escrever por ditado",
+    level: "B1",
+    target: "школа",
+    word: "школа",
+    translation: "escola",
+    sound: "sh",
+    prompt: "Escrever por ditado: pratique Ш ш em letra de forma. Ouça o modelo e escreva sem olhar; depois compare.",
+    objective: "Recuperar a grafia pela memória.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 815,
+    letterPosition: 26,
+    upper: "Ш",
+    letter: "ш",
+    mode: "print",
+    stageNumber: 15,
+    stageCode: "fluencia",
+    stageTitle: "Treino de fluência",
+    level: "B2",
+    target: "школа",
+    word: "школа",
+    translation: "escola",
+    sound: "sh",
+    prompt: "Treino de fluência: pratique Ш ш em letra de forma. Escreva com tempo controlado sem sacrificar clareza.",
+    objective: "Ganhar velocidade com legibilidade.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 816,
+    letterPosition: 26,
+    upper: "Ш",
+    letter: "ш",
+    mode: "print",
+    stageNumber: 16,
+    stageCode: "producao",
+    stageTitle: "Produção livre",
+    level: "C1",
+    target: "Я пишу слово «школа».",
+    word: "школа",
+    translation: "escola",
+    sound: "sh",
+    prompt: "Produção livre: pratique Ш ш em letra de forma. Crie uma frase curta usando a palavra-modelo.",
+    objective: "Usar a escrita de maneira independente.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 817,
+    letterPosition: 26,
+    upper: "Ш",
+    letter: "ш",
+    mode: "cursive",
+    stageNumber: 1,
+    stageCode: "observacao",
+    stageTitle: "Observar proporções",
+    level: "A1",
+    target: "шшшшш",
+    word: "школа",
+    translation: "escola",
+    sound: "sh",
+    prompt: "Observar proporções: pratique Ш ш em letra cursiva. Compare altura, largura, inclinação e posição na linha.",
+    objective: "Reconhecer a forma antes de escrever.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 818,
+    letterPosition: 26,
+    upper: "Ш",
+    letter: "ш",
+    mode: "cursive",
+    stageNumber: 2,
+    stageCode: "movimento_ar",
+    stageTitle: "Desenhar no ar",
+    level: "A1",
+    target: "шшшшш",
+    word: "школа",
+    translation: "escola",
+    sound: "sh",
+    prompt: "Desenhar no ar: pratique Ш ш em letra cursiva. Faça o movimento amplo com o braço antes de usar o lápis.",
+    objective: "Memorizar a direção geral do traço.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 819,
+    letterPosition: 26,
+    upper: "Ш",
+    letter: "ш",
+    mode: "cursive",
+    stageNumber: 3,
+    stageCode: "maiuscula_guiada",
+    stageTitle: "Traçar maiúscula",
+    level: "A1",
+    target: "ШШШШШ",
+    word: "школа",
+    translation: "escola",
+    sound: "sh",
+    prompt: "Traçar maiúscula: pratique Ш ш em letra cursiva. Passe sobre o modelo maiúsculo sem acelerar.",
+    objective: "Controlar início, direção e encerramento.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 820,
+    letterPosition: 26,
+    upper: "Ш",
+    letter: "ш",
+    mode: "cursive",
+    stageNumber: 4,
+    stageCode: "minuscula_guiada",
+    stageTitle: "Traçar minúscula",
+    level: "A1",
+    target: "шшшшш",
+    word: "школа",
+    translation: "escola",
+    sound: "sh",
+    prompt: "Traçar minúscula: pratique Ш ш em letra cursiva. Passe sobre o modelo minúsculo mantendo a altura.",
+    objective: "Dominar a forma usada dentro das palavras.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 821,
+    letterPosition: 26,
+    upper: "Ш",
+    letter: "ш",
+    mode: "cursive",
+    stageNumber: 5,
+    stageCode: "copia_isolada",
+    stageTitle: "Copiar isoladamente",
+    level: "A1",
+    target: "шшшшш",
+    word: "школа",
+    translation: "escola",
+    sound: "sh",
+    prompt: "Copiar isoladamente: pratique Ш ш em letra cursiva. Copie a letra cinco vezes ao lado do modelo.",
+    objective: "Manter tamanho e espaçamento consistentes.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 822,
+    letterPosition: 26,
+    upper: "Ш",
+    letter: "ш",
+    mode: "cursive",
+    stageNumber: 6,
+    stageCode: "ritmo",
+    stageTitle: "Criar ritmo",
+    level: "A2",
+    target: "шшшш шшшш шшшш",
+    word: "школа",
+    translation: "escola",
+    sound: "sh",
+    prompt: "Criar ritmo: pratique Ш ш em letra cursiva. Escreva uma linha contínua com intervalos regulares.",
+    objective: "Automatizar o movimento sem perder legibilidade.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 823,
+    letterPosition: 26,
+    upper: "Ш",
+    letter: "ш",
+    mode: "cursive",
+    stageNumber: 7,
+    stageCode: "ligacao_a",
+    stageTitle: "Ligar com а",
+    level: "A2",
+    target: "ша аш",
+    word: "школа",
+    translation: "escola",
+    sound: "sh",
+    prompt: "Ligar com а: pratique Ш ш em letra cursiva. Pratique a ligação de entrada e saída com а.",
+    objective: "Aprender uma conexão frequente.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 824,
+    letterPosition: 26,
+    upper: "Ш",
+    letter: "ш",
+    mode: "cursive",
+    stageNumber: 8,
+    stageCode: "ligacao_o",
+    stageTitle: "Ligar com о",
+    level: "A2",
+    target: "шо ош",
+    word: "школа",
+    translation: "escola",
+    sound: "sh",
+    prompt: "Ligar com о: pratique Ш ш em letra cursiva. Pratique a ligação de entrada e saída com о.",
+    objective: "Evitar que as letras se encostem demais.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 825,
+    letterPosition: 26,
+    upper: "Ш",
+    letter: "ш",
+    mode: "cursive",
+    stageNumber: 9,
+    stageCode: "ligacao_i",
+    stageTitle: "Ligar com и",
+    level: "A2",
+    target: "ши иш",
+    word: "школа",
+    translation: "escola",
+    sound: "sh",
+    prompt: "Ligar com и: pratique Ш ш em letra cursiva. Pratique a ligação de entrada e saída com и.",
+    objective: "Manter o fluxo da cursiva.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 826,
+    letterPosition: 26,
+    upper: "Ш",
+    letter: "ш",
+    mode: "cursive",
+    stageNumber: 10,
+    stageCode: "ligacao_m",
+    stageTitle: "Ligar com м",
+    level: "A2",
+    target: "шм мш",
+    word: "школа",
+    translation: "escola",
+    sound: "sh",
+    prompt: "Ligar com м: pratique Ш ш em letra cursiva. Pratique a ligação de entrada e saída com м.",
+    objective: "Diferenciar arcos e hastes semelhantes.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 827,
+    letterPosition: 26,
+    upper: "Ш",
+    letter: "ш",
+    mode: "cursive",
+    stageNumber: 11,
+    stageCode: "silaba",
+    stageTitle: "Copiar sílabas",
+    level: "A2",
+    target: "ша шо шу ши",
+    word: "школа",
+    translation: "escola",
+    sound: "sh",
+    prompt: "Copiar sílabas: pratique Ш ш em letra cursiva. Copie sílabas curtas e leia em voz alta.",
+    objective: "Unir escrita, leitura e som.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 828,
+    letterPosition: 26,
+    upper: "Ш",
+    letter: "ш",
+    mode: "cursive",
+    stageNumber: 12,
+    stageCode: "palavra",
+    stageTitle: "Copiar palavra",
+    level: "B1",
+    target: "школа",
+    word: "школа",
+    translation: "escola",
+    sound: "sh",
+    prompt: "Copiar palavra: pratique Ш ш em letra cursiva. Copie a palavra-modelo e confira cada ligação.",
+    objective: "Aplicar a letra em vocabulário real.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 829,
+    letterPosition: 26,
+    upper: "Ш",
+    letter: "ш",
+    mode: "cursive",
+    stageNumber: 13,
+    stageCode: "frase",
+    stageTitle: "Copiar frase",
+    level: "B1",
+    target: "Я пишу слово «школа».",
+    word: "школа",
+    translation: "escola",
+    sound: "sh",
+    prompt: "Copiar frase: pratique Ш ш em letra cursiva. Copie uma frase curta sem interromper o ritmo.",
+    objective: "Aplicar a letra em contexto.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 830,
+    letterPosition: 26,
+    upper: "Ш",
+    letter: "ш",
+    mode: "cursive",
+    stageNumber: 14,
+    stageCode: "ditado",
+    stageTitle: "Escrever por ditado",
+    level: "B1",
+    target: "школа",
+    word: "школа",
+    translation: "escola",
+    sound: "sh",
+    prompt: "Escrever por ditado: pratique Ш ш em letra cursiva. Ouça o modelo e escreva sem olhar; depois compare.",
+    objective: "Recuperar a grafia pela memória.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 831,
+    letterPosition: 26,
+    upper: "Ш",
+    letter: "ш",
+    mode: "cursive",
+    stageNumber: 15,
+    stageCode: "fluencia",
+    stageTitle: "Treino de fluência",
+    level: "B2",
+    target: "школа",
+    word: "школа",
+    translation: "escola",
+    sound: "sh",
+    prompt: "Treino de fluência: pratique Ш ш em letra cursiva. Escreva com tempo controlado sem sacrificar clareza.",
+    objective: "Ganhar velocidade com legibilidade.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 832,
+    letterPosition: 26,
+    upper: "Ш",
+    letter: "ш",
+    mode: "cursive",
+    stageNumber: 16,
+    stageCode: "producao",
+    stageTitle: "Produção livre",
+    level: "C1",
+    target: "Я пишу слово «школа».",
+    word: "школа",
+    translation: "escola",
+    sound: "sh",
+    prompt: "Produção livre: pratique Ш ш em letra cursiva. Crie uma frase curta usando a palavra-modelo.",
+    objective: "Usar a escrita de maneira independente.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 833,
+    letterPosition: 27,
+    upper: "Щ",
+    letter: "щ",
+    mode: "print",
+    stageNumber: 1,
+    stageCode: "observacao",
+    stageTitle: "Observar proporções",
+    level: "A1",
+    target: "щщщщщ",
+    word: "щука",
+    translation: "lúcio",
+    sound: "shch",
+    prompt: "Observar proporções: pratique Щ щ em letra de forma. Compare altura, largura, inclinação e posição na linha.",
+    objective: "Reconhecer a forma antes de escrever.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 834,
+    letterPosition: 27,
+    upper: "Щ",
+    letter: "щ",
+    mode: "print",
+    stageNumber: 2,
+    stageCode: "movimento_ar",
+    stageTitle: "Desenhar no ar",
+    level: "A1",
+    target: "щщщщщ",
+    word: "щука",
+    translation: "lúcio",
+    sound: "shch",
+    prompt: "Desenhar no ar: pratique Щ щ em letra de forma. Faça o movimento amplo com o braço antes de usar o lápis.",
+    objective: "Memorizar a direção geral do traço.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 835,
+    letterPosition: 27,
+    upper: "Щ",
+    letter: "щ",
+    mode: "print",
+    stageNumber: 3,
+    stageCode: "maiuscula_guiada",
+    stageTitle: "Traçar maiúscula",
+    level: "A1",
+    target: "ЩЩЩЩЩ",
+    word: "щука",
+    translation: "lúcio",
+    sound: "shch",
+    prompt: "Traçar maiúscula: pratique Щ щ em letra de forma. Passe sobre o modelo maiúsculo sem acelerar.",
+    objective: "Controlar início, direção e encerramento.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 836,
+    letterPosition: 27,
+    upper: "Щ",
+    letter: "щ",
+    mode: "print",
+    stageNumber: 4,
+    stageCode: "minuscula_guiada",
+    stageTitle: "Traçar minúscula",
+    level: "A1",
+    target: "щщщщщ",
+    word: "щука",
+    translation: "lúcio",
+    sound: "shch",
+    prompt: "Traçar minúscula: pratique Щ щ em letra de forma. Passe sobre o modelo minúsculo mantendo a altura.",
+    objective: "Dominar a forma usada dentro das palavras.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 837,
+    letterPosition: 27,
+    upper: "Щ",
+    letter: "щ",
+    mode: "print",
+    stageNumber: 5,
+    stageCode: "copia_isolada",
+    stageTitle: "Copiar isoladamente",
+    level: "A1",
+    target: "щщщщщ",
+    word: "щука",
+    translation: "lúcio",
+    sound: "shch",
+    prompt: "Copiar isoladamente: pratique Щ щ em letra de forma. Copie a letra cinco vezes ao lado do modelo.",
+    objective: "Manter tamanho e espaçamento consistentes.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 838,
+    letterPosition: 27,
+    upper: "Щ",
+    letter: "щ",
+    mode: "print",
+    stageNumber: 6,
+    stageCode: "ritmo",
+    stageTitle: "Criar ritmo",
+    level: "A2",
+    target: "щщщщ щщщщ щщщщ",
+    word: "щука",
+    translation: "lúcio",
+    sound: "shch",
+    prompt: "Criar ritmo: pratique Щ щ em letra de forma. Escreva uma linha contínua com intervalos regulares.",
+    objective: "Automatizar o movimento sem perder legibilidade.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 839,
+    letterPosition: 27,
+    upper: "Щ",
+    letter: "щ",
+    mode: "print",
+    stageNumber: 7,
+    stageCode: "ligacao_a",
+    stageTitle: "Ligar com а",
+    level: "A2",
+    target: "ща ащ",
+    word: "щука",
+    translation: "lúcio",
+    sound: "shch",
+    prompt: "Ligar com а: pratique Щ щ em letra de forma. Pratique a ligação de entrada e saída com а.",
+    objective: "Aprender uma conexão frequente.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 840,
+    letterPosition: 27,
+    upper: "Щ",
+    letter: "щ",
+    mode: "print",
+    stageNumber: 8,
+    stageCode: "ligacao_o",
+    stageTitle: "Ligar com о",
+    level: "A2",
+    target: "що ощ",
+    word: "щука",
+    translation: "lúcio",
+    sound: "shch",
+    prompt: "Ligar com о: pratique Щ щ em letra de forma. Pratique a ligação de entrada e saída com о.",
+    objective: "Evitar que as letras se encostem demais.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 841,
+    letterPosition: 27,
+    upper: "Щ",
+    letter: "щ",
+    mode: "print",
+    stageNumber: 9,
+    stageCode: "ligacao_i",
+    stageTitle: "Ligar com и",
+    level: "A2",
+    target: "щи ищ",
+    word: "щука",
+    translation: "lúcio",
+    sound: "shch",
+    prompt: "Ligar com и: pratique Щ щ em letra de forma. Pratique a ligação de entrada e saída com и.",
+    objective: "Manter o fluxo da cursiva.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 842,
+    letterPosition: 27,
+    upper: "Щ",
+    letter: "щ",
+    mode: "print",
+    stageNumber: 10,
+    stageCode: "ligacao_m",
+    stageTitle: "Ligar com м",
+    level: "A2",
+    target: "щм мщ",
+    word: "щука",
+    translation: "lúcio",
+    sound: "shch",
+    prompt: "Ligar com м: pratique Щ щ em letra de forma. Pratique a ligação de entrada e saída com м.",
+    objective: "Diferenciar arcos e hastes semelhantes.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 843,
+    letterPosition: 27,
+    upper: "Щ",
+    letter: "щ",
+    mode: "print",
+    stageNumber: 11,
+    stageCode: "silaba",
+    stageTitle: "Copiar sílabas",
+    level: "A2",
+    target: "ща що щу щи",
+    word: "щука",
+    translation: "lúcio",
+    sound: "shch",
+    prompt: "Copiar sílabas: pratique Щ щ em letra de forma. Copie sílabas curtas e leia em voz alta.",
+    objective: "Unir escrita, leitura e som.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 844,
+    letterPosition: 27,
+    upper: "Щ",
+    letter: "щ",
+    mode: "print",
+    stageNumber: 12,
+    stageCode: "palavra",
+    stageTitle: "Copiar palavra",
+    level: "B1",
+    target: "щука",
+    word: "щука",
+    translation: "lúcio",
+    sound: "shch",
+    prompt: "Copiar palavra: pratique Щ щ em letra de forma. Copie a palavra-modelo e confira cada ligação.",
+    objective: "Aplicar a letra em vocabulário real.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 845,
+    letterPosition: 27,
+    upper: "Щ",
+    letter: "щ",
+    mode: "print",
+    stageNumber: 13,
+    stageCode: "frase",
+    stageTitle: "Copiar frase",
+    level: "B1",
+    target: "Я пишу слово «щука».",
+    word: "щука",
+    translation: "lúcio",
+    sound: "shch",
+    prompt: "Copiar frase: pratique Щ щ em letra de forma. Copie uma frase curta sem interromper o ritmo.",
+    objective: "Aplicar a letra em contexto.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 846,
+    letterPosition: 27,
+    upper: "Щ",
+    letter: "щ",
+    mode: "print",
+    stageNumber: 14,
+    stageCode: "ditado",
+    stageTitle: "Escrever por ditado",
+    level: "B1",
+    target: "щука",
+    word: "щука",
+    translation: "lúcio",
+    sound: "shch",
+    prompt: "Escrever por ditado: pratique Щ щ em letra de forma. Ouça o modelo e escreva sem olhar; depois compare.",
+    objective: "Recuperar a grafia pela memória.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 847,
+    letterPosition: 27,
+    upper: "Щ",
+    letter: "щ",
+    mode: "print",
+    stageNumber: 15,
+    stageCode: "fluencia",
+    stageTitle: "Treino de fluência",
+    level: "B2",
+    target: "щука",
+    word: "щука",
+    translation: "lúcio",
+    sound: "shch",
+    prompt: "Treino de fluência: pratique Щ щ em letra de forma. Escreva com tempo controlado sem sacrificar clareza.",
+    objective: "Ganhar velocidade com legibilidade.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 848,
+    letterPosition: 27,
+    upper: "Щ",
+    letter: "щ",
+    mode: "print",
+    stageNumber: 16,
+    stageCode: "producao",
+    stageTitle: "Produção livre",
+    level: "C1",
+    target: "Я пишу слово «щука».",
+    word: "щука",
+    translation: "lúcio",
+    sound: "shch",
+    prompt: "Produção livre: pratique Щ щ em letra de forma. Crie uma frase curta usando a palavra-modelo.",
+    objective: "Usar a escrita de maneira independente.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 849,
+    letterPosition: 27,
+    upper: "Щ",
+    letter: "щ",
+    mode: "cursive",
+    stageNumber: 1,
+    stageCode: "observacao",
+    stageTitle: "Observar proporções",
+    level: "A1",
+    target: "щщщщщ",
+    word: "щука",
+    translation: "lúcio",
+    sound: "shch",
+    prompt: "Observar proporções: pratique Щ щ em letra cursiva. Compare altura, largura, inclinação e posição na linha.",
+    objective: "Reconhecer a forma antes de escrever.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 850,
+    letterPosition: 27,
+    upper: "Щ",
+    letter: "щ",
+    mode: "cursive",
+    stageNumber: 2,
+    stageCode: "movimento_ar",
+    stageTitle: "Desenhar no ar",
+    level: "A1",
+    target: "щщщщщ",
+    word: "щука",
+    translation: "lúcio",
+    sound: "shch",
+    prompt: "Desenhar no ar: pratique Щ щ em letra cursiva. Faça o movimento amplo com o braço antes de usar o lápis.",
+    objective: "Memorizar a direção geral do traço.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 851,
+    letterPosition: 27,
+    upper: "Щ",
+    letter: "щ",
+    mode: "cursive",
+    stageNumber: 3,
+    stageCode: "maiuscula_guiada",
+    stageTitle: "Traçar maiúscula",
+    level: "A1",
+    target: "ЩЩЩЩЩ",
+    word: "щука",
+    translation: "lúcio",
+    sound: "shch",
+    prompt: "Traçar maiúscula: pratique Щ щ em letra cursiva. Passe sobre o modelo maiúsculo sem acelerar.",
+    objective: "Controlar início, direção e encerramento.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 852,
+    letterPosition: 27,
+    upper: "Щ",
+    letter: "щ",
+    mode: "cursive",
+    stageNumber: 4,
+    stageCode: "minuscula_guiada",
+    stageTitle: "Traçar minúscula",
+    level: "A1",
+    target: "щщщщщ",
+    word: "щука",
+    translation: "lúcio",
+    sound: "shch",
+    prompt: "Traçar minúscula: pratique Щ щ em letra cursiva. Passe sobre o modelo minúsculo mantendo a altura.",
+    objective: "Dominar a forma usada dentro das palavras.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 853,
+    letterPosition: 27,
+    upper: "Щ",
+    letter: "щ",
+    mode: "cursive",
+    stageNumber: 5,
+    stageCode: "copia_isolada",
+    stageTitle: "Copiar isoladamente",
+    level: "A1",
+    target: "щщщщщ",
+    word: "щука",
+    translation: "lúcio",
+    sound: "shch",
+    prompt: "Copiar isoladamente: pratique Щ щ em letra cursiva. Copie a letra cinco vezes ao lado do modelo.",
+    objective: "Manter tamanho e espaçamento consistentes.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 854,
+    letterPosition: 27,
+    upper: "Щ",
+    letter: "щ",
+    mode: "cursive",
+    stageNumber: 6,
+    stageCode: "ritmo",
+    stageTitle: "Criar ritmo",
+    level: "A2",
+    target: "щщщщ щщщщ щщщщ",
+    word: "щука",
+    translation: "lúcio",
+    sound: "shch",
+    prompt: "Criar ritmo: pratique Щ щ em letra cursiva. Escreva uma linha contínua com intervalos regulares.",
+    objective: "Automatizar o movimento sem perder legibilidade.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 855,
+    letterPosition: 27,
+    upper: "Щ",
+    letter: "щ",
+    mode: "cursive",
+    stageNumber: 7,
+    stageCode: "ligacao_a",
+    stageTitle: "Ligar com а",
+    level: "A2",
+    target: "ща ащ",
+    word: "щука",
+    translation: "lúcio",
+    sound: "shch",
+    prompt: "Ligar com а: pratique Щ щ em letra cursiva. Pratique a ligação de entrada e saída com а.",
+    objective: "Aprender uma conexão frequente.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 856,
+    letterPosition: 27,
+    upper: "Щ",
+    letter: "щ",
+    mode: "cursive",
+    stageNumber: 8,
+    stageCode: "ligacao_o",
+    stageTitle: "Ligar com о",
+    level: "A2",
+    target: "що ощ",
+    word: "щука",
+    translation: "lúcio",
+    sound: "shch",
+    prompt: "Ligar com о: pratique Щ щ em letra cursiva. Pratique a ligação de entrada e saída com о.",
+    objective: "Evitar que as letras se encostem demais.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 857,
+    letterPosition: 27,
+    upper: "Щ",
+    letter: "щ",
+    mode: "cursive",
+    stageNumber: 9,
+    stageCode: "ligacao_i",
+    stageTitle: "Ligar com и",
+    level: "A2",
+    target: "щи ищ",
+    word: "щука",
+    translation: "lúcio",
+    sound: "shch",
+    prompt: "Ligar com и: pratique Щ щ em letra cursiva. Pratique a ligação de entrada e saída com и.",
+    objective: "Manter o fluxo da cursiva.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 858,
+    letterPosition: 27,
+    upper: "Щ",
+    letter: "щ",
+    mode: "cursive",
+    stageNumber: 10,
+    stageCode: "ligacao_m",
+    stageTitle: "Ligar com м",
+    level: "A2",
+    target: "щм мщ",
+    word: "щука",
+    translation: "lúcio",
+    sound: "shch",
+    prompt: "Ligar com м: pratique Щ щ em letra cursiva. Pratique a ligação de entrada e saída com м.",
+    objective: "Diferenciar arcos e hastes semelhantes.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 859,
+    letterPosition: 27,
+    upper: "Щ",
+    letter: "щ",
+    mode: "cursive",
+    stageNumber: 11,
+    stageCode: "silaba",
+    stageTitle: "Copiar sílabas",
+    level: "A2",
+    target: "ща що щу щи",
+    word: "щука",
+    translation: "lúcio",
+    sound: "shch",
+    prompt: "Copiar sílabas: pratique Щ щ em letra cursiva. Copie sílabas curtas e leia em voz alta.",
+    objective: "Unir escrita, leitura e som.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 860,
+    letterPosition: 27,
+    upper: "Щ",
+    letter: "щ",
+    mode: "cursive",
+    stageNumber: 12,
+    stageCode: "palavra",
+    stageTitle: "Copiar palavra",
+    level: "B1",
+    target: "щука",
+    word: "щука",
+    translation: "lúcio",
+    sound: "shch",
+    prompt: "Copiar palavra: pratique Щ щ em letra cursiva. Copie a palavra-modelo e confira cada ligação.",
+    objective: "Aplicar a letra em vocabulário real.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 861,
+    letterPosition: 27,
+    upper: "Щ",
+    letter: "щ",
+    mode: "cursive",
+    stageNumber: 13,
+    stageCode: "frase",
+    stageTitle: "Copiar frase",
+    level: "B1",
+    target: "Я пишу слово «щука».",
+    word: "щука",
+    translation: "lúcio",
+    sound: "shch",
+    prompt: "Copiar frase: pratique Щ щ em letra cursiva. Copie uma frase curta sem interromper o ritmo.",
+    objective: "Aplicar a letra em contexto.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 862,
+    letterPosition: 27,
+    upper: "Щ",
+    letter: "щ",
+    mode: "cursive",
+    stageNumber: 14,
+    stageCode: "ditado",
+    stageTitle: "Escrever por ditado",
+    level: "B1",
+    target: "щука",
+    word: "щука",
+    translation: "lúcio",
+    sound: "shch",
+    prompt: "Escrever por ditado: pratique Щ щ em letra cursiva. Ouça o modelo e escreva sem olhar; depois compare.",
+    objective: "Recuperar a grafia pela memória.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 863,
+    letterPosition: 27,
+    upper: "Щ",
+    letter: "щ",
+    mode: "cursive",
+    stageNumber: 15,
+    stageCode: "fluencia",
+    stageTitle: "Treino de fluência",
+    level: "B2",
+    target: "щука",
+    word: "щука",
+    translation: "lúcio",
+    sound: "shch",
+    prompt: "Treino de fluência: pratique Щ щ em letra cursiva. Escreva com tempo controlado sem sacrificar clareza.",
+    objective: "Ganhar velocidade com legibilidade.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 864,
+    letterPosition: 27,
+    upper: "Щ",
+    letter: "щ",
+    mode: "cursive",
+    stageNumber: 16,
+    stageCode: "producao",
+    stageTitle: "Produção livre",
+    level: "C1",
+    target: "Я пишу слово «щука».",
+    word: "щука",
+    translation: "lúcio",
+    sound: "shch",
+    prompt: "Produção livre: pratique Щ щ em letra cursiva. Crie uma frase curta usando a palavra-modelo.",
+    objective: "Usar a escrita de maneira independente.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 865,
+    letterPosition: 28,
+    upper: "Ъ",
+    letter: "ъ",
+    mode: "print",
+    stageNumber: 1,
+    stageCode: "observacao",
+    stageTitle: "Observar proporções",
+    level: "A1",
+    target: "ъъъъъ",
+    word: "объект",
+    translation: "objeto",
+    sound: "sinal duro",
+    prompt: "Observar proporções: pratique Ъ ъ em letra de forma. Compare altura, largura, inclinação e posição na linha.",
+    objective: "Reconhecer a forma antes de escrever.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 866,
+    letterPosition: 28,
+    upper: "Ъ",
+    letter: "ъ",
+    mode: "print",
+    stageNumber: 2,
+    stageCode: "movimento_ar",
+    stageTitle: "Desenhar no ar",
+    level: "A1",
+    target: "ъъъъъ",
+    word: "объект",
+    translation: "objeto",
+    sound: "sinal duro",
+    prompt: "Desenhar no ar: pratique Ъ ъ em letra de forma. Faça o movimento amplo com o braço antes de usar o lápis.",
+    objective: "Memorizar a direção geral do traço.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 867,
+    letterPosition: 28,
+    upper: "Ъ",
+    letter: "ъ",
+    mode: "print",
+    stageNumber: 3,
+    stageCode: "maiuscula_guiada",
+    stageTitle: "Traçar maiúscula",
+    level: "A1",
+    target: "ЪЪЪЪЪ",
+    word: "объект",
+    translation: "objeto",
+    sound: "sinal duro",
+    prompt: "Traçar maiúscula: pratique Ъ ъ em letra de forma. Passe sobre o modelo maiúsculo sem acelerar.",
+    objective: "Controlar início, direção e encerramento.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 868,
+    letterPosition: 28,
+    upper: "Ъ",
+    letter: "ъ",
+    mode: "print",
+    stageNumber: 4,
+    stageCode: "minuscula_guiada",
+    stageTitle: "Traçar minúscula",
+    level: "A1",
+    target: "ъъъъъ",
+    word: "объект",
+    translation: "objeto",
+    sound: "sinal duro",
+    prompt: "Traçar minúscula: pratique Ъ ъ em letra de forma. Passe sobre o modelo minúsculo mantendo a altura.",
+    objective: "Dominar a forma usada dentro das palavras.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 869,
+    letterPosition: 28,
+    upper: "Ъ",
+    letter: "ъ",
+    mode: "print",
+    stageNumber: 5,
+    stageCode: "copia_isolada",
+    stageTitle: "Copiar isoladamente",
+    level: "A1",
+    target: "ъъъъъ",
+    word: "объект",
+    translation: "objeto",
+    sound: "sinal duro",
+    prompt: "Copiar isoladamente: pratique Ъ ъ em letra de forma. Copie a letra cinco vezes ao lado do modelo.",
+    objective: "Manter tamanho e espaçamento consistentes.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 870,
+    letterPosition: 28,
+    upper: "Ъ",
+    letter: "ъ",
+    mode: "print",
+    stageNumber: 6,
+    stageCode: "ritmo",
+    stageTitle: "Criar ritmo",
+    level: "A2",
+    target: "ъъъъ ъъъъ ъъъъ",
+    word: "объект",
+    translation: "objeto",
+    sound: "sinal duro",
+    prompt: "Criar ritmo: pratique Ъ ъ em letra de forma. Escreva uma linha contínua com intervalos regulares.",
+    objective: "Automatizar o movimento sem perder legibilidade.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 871,
+    letterPosition: 28,
+    upper: "Ъ",
+    letter: "ъ",
+    mode: "print",
+    stageNumber: 7,
+    stageCode: "ligacao_a",
+    stageTitle: "Ligar com а",
+    level: "A2",
+    target: "ъа аъ",
+    word: "объект",
+    translation: "objeto",
+    sound: "sinal duro",
+    prompt: "Ligar com а: pratique Ъ ъ em letra de forma. Pratique a ligação de entrada e saída com а.",
+    objective: "Aprender uma conexão frequente.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 872,
+    letterPosition: 28,
+    upper: "Ъ",
+    letter: "ъ",
+    mode: "print",
+    stageNumber: 8,
+    stageCode: "ligacao_o",
+    stageTitle: "Ligar com о",
+    level: "A2",
+    target: "ъо оъ",
+    word: "объект",
+    translation: "objeto",
+    sound: "sinal duro",
+    prompt: "Ligar com о: pratique Ъ ъ em letra de forma. Pratique a ligação de entrada e saída com о.",
+    objective: "Evitar que as letras se encostem demais.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 873,
+    letterPosition: 28,
+    upper: "Ъ",
+    letter: "ъ",
+    mode: "print",
+    stageNumber: 9,
+    stageCode: "ligacao_i",
+    stageTitle: "Ligar com и",
+    level: "A2",
+    target: "ъи иъ",
+    word: "объект",
+    translation: "objeto",
+    sound: "sinal duro",
+    prompt: "Ligar com и: pratique Ъ ъ em letra de forma. Pratique a ligação de entrada e saída com и.",
+    objective: "Manter o fluxo da cursiva.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 874,
+    letterPosition: 28,
+    upper: "Ъ",
+    letter: "ъ",
+    mode: "print",
+    stageNumber: 10,
+    stageCode: "ligacao_m",
+    stageTitle: "Ligar com м",
+    level: "A2",
+    target: "ъм мъ",
+    word: "объект",
+    translation: "objeto",
+    sound: "sinal duro",
+    prompt: "Ligar com м: pratique Ъ ъ em letra de forma. Pratique a ligação de entrada e saída com м.",
+    objective: "Diferenciar arcos e hastes semelhantes.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 875,
+    letterPosition: 28,
+    upper: "Ъ",
+    letter: "ъ",
+    mode: "print",
+    stageNumber: 11,
+    stageCode: "silaba",
+    stageTitle: "Copiar sílabas",
+    level: "A2",
+    target: "ъа ъо ъу ъи",
+    word: "объект",
+    translation: "objeto",
+    sound: "sinal duro",
+    prompt: "Copiar sílabas: pratique Ъ ъ em letra de forma. Copie sílabas curtas e leia em voz alta.",
+    objective: "Unir escrita, leitura e som.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 876,
+    letterPosition: 28,
+    upper: "Ъ",
+    letter: "ъ",
+    mode: "print",
+    stageNumber: 12,
+    stageCode: "palavra",
+    stageTitle: "Copiar palavra",
+    level: "B1",
+    target: "объект",
+    word: "объект",
+    translation: "objeto",
+    sound: "sinal duro",
+    prompt: "Copiar palavra: pratique Ъ ъ em letra de forma. Copie a palavra-modelo e confira cada ligação.",
+    objective: "Aplicar a letra em vocabulário real.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 877,
+    letterPosition: 28,
+    upper: "Ъ",
+    letter: "ъ",
+    mode: "print",
+    stageNumber: 13,
+    stageCode: "frase",
+    stageTitle: "Copiar frase",
+    level: "B1",
+    target: "Я пишу слово «объект».",
+    word: "объект",
+    translation: "objeto",
+    sound: "sinal duro",
+    prompt: "Copiar frase: pratique Ъ ъ em letra de forma. Copie uma frase curta sem interromper o ritmo.",
+    objective: "Aplicar a letra em contexto.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 878,
+    letterPosition: 28,
+    upper: "Ъ",
+    letter: "ъ",
+    mode: "print",
+    stageNumber: 14,
+    stageCode: "ditado",
+    stageTitle: "Escrever por ditado",
+    level: "B1",
+    target: "объект",
+    word: "объект",
+    translation: "objeto",
+    sound: "sinal duro",
+    prompt: "Escrever por ditado: pratique Ъ ъ em letra de forma. Ouça o modelo e escreva sem olhar; depois compare.",
+    objective: "Recuperar a grafia pela memória.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 879,
+    letterPosition: 28,
+    upper: "Ъ",
+    letter: "ъ",
+    mode: "print",
+    stageNumber: 15,
+    stageCode: "fluencia",
+    stageTitle: "Treino de fluência",
+    level: "B2",
+    target: "объект",
+    word: "объект",
+    translation: "objeto",
+    sound: "sinal duro",
+    prompt: "Treino de fluência: pratique Ъ ъ em letra de forma. Escreva com tempo controlado sem sacrificar clareza.",
+    objective: "Ganhar velocidade com legibilidade.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 880,
+    letterPosition: 28,
+    upper: "Ъ",
+    letter: "ъ",
+    mode: "print",
+    stageNumber: 16,
+    stageCode: "producao",
+    stageTitle: "Produção livre",
+    level: "C1",
+    target: "Я пишу слово «объект».",
+    word: "объект",
+    translation: "objeto",
+    sound: "sinal duro",
+    prompt: "Produção livre: pratique Ъ ъ em letra de forma. Crie uma frase curta usando a palavra-modelo.",
+    objective: "Usar a escrita de maneira independente.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 881,
+    letterPosition: 28,
+    upper: "Ъ",
+    letter: "ъ",
+    mode: "cursive",
+    stageNumber: 1,
+    stageCode: "observacao",
+    stageTitle: "Observar proporções",
+    level: "A1",
+    target: "ъъъъъ",
+    word: "объект",
+    translation: "objeto",
+    sound: "sinal duro",
+    prompt: "Observar proporções: pratique Ъ ъ em letra cursiva. Compare altura, largura, inclinação e posição na linha.",
+    objective: "Reconhecer a forma antes de escrever.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 882,
+    letterPosition: 28,
+    upper: "Ъ",
+    letter: "ъ",
+    mode: "cursive",
+    stageNumber: 2,
+    stageCode: "movimento_ar",
+    stageTitle: "Desenhar no ar",
+    level: "A1",
+    target: "ъъъъъ",
+    word: "объект",
+    translation: "objeto",
+    sound: "sinal duro",
+    prompt: "Desenhar no ar: pratique Ъ ъ em letra cursiva. Faça o movimento amplo com o braço antes de usar o lápis.",
+    objective: "Memorizar a direção geral do traço.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 883,
+    letterPosition: 28,
+    upper: "Ъ",
+    letter: "ъ",
+    mode: "cursive",
+    stageNumber: 3,
+    stageCode: "maiuscula_guiada",
+    stageTitle: "Traçar maiúscula",
+    level: "A1",
+    target: "ЪЪЪЪЪ",
+    word: "объект",
+    translation: "objeto",
+    sound: "sinal duro",
+    prompt: "Traçar maiúscula: pratique Ъ ъ em letra cursiva. Passe sobre o modelo maiúsculo sem acelerar.",
+    objective: "Controlar início, direção e encerramento.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 884,
+    letterPosition: 28,
+    upper: "Ъ",
+    letter: "ъ",
+    mode: "cursive",
+    stageNumber: 4,
+    stageCode: "minuscula_guiada",
+    stageTitle: "Traçar minúscula",
+    level: "A1",
+    target: "ъъъъъ",
+    word: "объект",
+    translation: "objeto",
+    sound: "sinal duro",
+    prompt: "Traçar minúscula: pratique Ъ ъ em letra cursiva. Passe sobre o modelo minúsculo mantendo a altura.",
+    objective: "Dominar a forma usada dentro das palavras.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 885,
+    letterPosition: 28,
+    upper: "Ъ",
+    letter: "ъ",
+    mode: "cursive",
+    stageNumber: 5,
+    stageCode: "copia_isolada",
+    stageTitle: "Copiar isoladamente",
+    level: "A1",
+    target: "ъъъъъ",
+    word: "объект",
+    translation: "objeto",
+    sound: "sinal duro",
+    prompt: "Copiar isoladamente: pratique Ъ ъ em letra cursiva. Copie a letra cinco vezes ao lado do modelo.",
+    objective: "Manter tamanho e espaçamento consistentes.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 886,
+    letterPosition: 28,
+    upper: "Ъ",
+    letter: "ъ",
+    mode: "cursive",
+    stageNumber: 6,
+    stageCode: "ritmo",
+    stageTitle: "Criar ritmo",
+    level: "A2",
+    target: "ъъъъ ъъъъ ъъъъ",
+    word: "объект",
+    translation: "objeto",
+    sound: "sinal duro",
+    prompt: "Criar ritmo: pratique Ъ ъ em letra cursiva. Escreva uma linha contínua com intervalos regulares.",
+    objective: "Automatizar o movimento sem perder legibilidade.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 887,
+    letterPosition: 28,
+    upper: "Ъ",
+    letter: "ъ",
+    mode: "cursive",
+    stageNumber: 7,
+    stageCode: "ligacao_a",
+    stageTitle: "Ligar com а",
+    level: "A2",
+    target: "ъа аъ",
+    word: "объект",
+    translation: "objeto",
+    sound: "sinal duro",
+    prompt: "Ligar com а: pratique Ъ ъ em letra cursiva. Pratique a ligação de entrada e saída com а.",
+    objective: "Aprender uma conexão frequente.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 888,
+    letterPosition: 28,
+    upper: "Ъ",
+    letter: "ъ",
+    mode: "cursive",
+    stageNumber: 8,
+    stageCode: "ligacao_o",
+    stageTitle: "Ligar com о",
+    level: "A2",
+    target: "ъо оъ",
+    word: "объект",
+    translation: "objeto",
+    sound: "sinal duro",
+    prompt: "Ligar com о: pratique Ъ ъ em letra cursiva. Pratique a ligação de entrada e saída com о.",
+    objective: "Evitar que as letras se encostem demais.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 889,
+    letterPosition: 28,
+    upper: "Ъ",
+    letter: "ъ",
+    mode: "cursive",
+    stageNumber: 9,
+    stageCode: "ligacao_i",
+    stageTitle: "Ligar com и",
+    level: "A2",
+    target: "ъи иъ",
+    word: "объект",
+    translation: "objeto",
+    sound: "sinal duro",
+    prompt: "Ligar com и: pratique Ъ ъ em letra cursiva. Pratique a ligação de entrada e saída com и.",
+    objective: "Manter o fluxo da cursiva.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 890,
+    letterPosition: 28,
+    upper: "Ъ",
+    letter: "ъ",
+    mode: "cursive",
+    stageNumber: 10,
+    stageCode: "ligacao_m",
+    stageTitle: "Ligar com м",
+    level: "A2",
+    target: "ъм мъ",
+    word: "объект",
+    translation: "objeto",
+    sound: "sinal duro",
+    prompt: "Ligar com м: pratique Ъ ъ em letra cursiva. Pratique a ligação de entrada e saída com м.",
+    objective: "Diferenciar arcos e hastes semelhantes.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 891,
+    letterPosition: 28,
+    upper: "Ъ",
+    letter: "ъ",
+    mode: "cursive",
+    stageNumber: 11,
+    stageCode: "silaba",
+    stageTitle: "Copiar sílabas",
+    level: "A2",
+    target: "ъа ъо ъу ъи",
+    word: "объект",
+    translation: "objeto",
+    sound: "sinal duro",
+    prompt: "Copiar sílabas: pratique Ъ ъ em letra cursiva. Copie sílabas curtas e leia em voz alta.",
+    objective: "Unir escrita, leitura e som.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 892,
+    letterPosition: 28,
+    upper: "Ъ",
+    letter: "ъ",
+    mode: "cursive",
+    stageNumber: 12,
+    stageCode: "palavra",
+    stageTitle: "Copiar palavra",
+    level: "B1",
+    target: "объект",
+    word: "объект",
+    translation: "objeto",
+    sound: "sinal duro",
+    prompt: "Copiar palavra: pratique Ъ ъ em letra cursiva. Copie a palavra-modelo e confira cada ligação.",
+    objective: "Aplicar a letra em vocabulário real.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 893,
+    letterPosition: 28,
+    upper: "Ъ",
+    letter: "ъ",
+    mode: "cursive",
+    stageNumber: 13,
+    stageCode: "frase",
+    stageTitle: "Copiar frase",
+    level: "B1",
+    target: "Я пишу слово «объект».",
+    word: "объект",
+    translation: "objeto",
+    sound: "sinal duro",
+    prompt: "Copiar frase: pratique Ъ ъ em letra cursiva. Copie uma frase curta sem interromper o ritmo.",
+    objective: "Aplicar a letra em contexto.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 894,
+    letterPosition: 28,
+    upper: "Ъ",
+    letter: "ъ",
+    mode: "cursive",
+    stageNumber: 14,
+    stageCode: "ditado",
+    stageTitle: "Escrever por ditado",
+    level: "B1",
+    target: "объект",
+    word: "объект",
+    translation: "objeto",
+    sound: "sinal duro",
+    prompt: "Escrever por ditado: pratique Ъ ъ em letra cursiva. Ouça o modelo e escreva sem olhar; depois compare.",
+    objective: "Recuperar a grafia pela memória.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 895,
+    letterPosition: 28,
+    upper: "Ъ",
+    letter: "ъ",
+    mode: "cursive",
+    stageNumber: 15,
+    stageCode: "fluencia",
+    stageTitle: "Treino de fluência",
+    level: "B2",
+    target: "объект",
+    word: "объект",
+    translation: "objeto",
+    sound: "sinal duro",
+    prompt: "Treino de fluência: pratique Ъ ъ em letra cursiva. Escreva com tempo controlado sem sacrificar clareza.",
+    objective: "Ganhar velocidade com legibilidade.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 896,
+    letterPosition: 28,
+    upper: "Ъ",
+    letter: "ъ",
+    mode: "cursive",
+    stageNumber: 16,
+    stageCode: "producao",
+    stageTitle: "Produção livre",
+    level: "C1",
+    target: "Я пишу слово «объект».",
+    word: "объект",
+    translation: "objeto",
+    sound: "sinal duro",
+    prompt: "Produção livre: pratique Ъ ъ em letra cursiva. Crie uma frase curta usando a palavra-modelo.",
+    objective: "Usar a escrita de maneira independente.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 897,
+    letterPosition: 29,
+    upper: "Ы",
+    letter: "ы",
+    mode: "print",
+    stageNumber: 1,
+    stageCode: "observacao",
+    stageTitle: "Observar proporções",
+    level: "A1",
+    target: "ыыыыы",
+    word: "мы",
+    translation: "nós",
+    sound: "y fechado",
+    prompt: "Observar proporções: pratique Ы ы em letra de forma. Compare altura, largura, inclinação e posição na linha.",
+    objective: "Reconhecer a forma antes de escrever.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 898,
+    letterPosition: 29,
+    upper: "Ы",
+    letter: "ы",
+    mode: "print",
+    stageNumber: 2,
+    stageCode: "movimento_ar",
+    stageTitle: "Desenhar no ar",
+    level: "A1",
+    target: "ыыыыы",
+    word: "мы",
+    translation: "nós",
+    sound: "y fechado",
+    prompt: "Desenhar no ar: pratique Ы ы em letra de forma. Faça o movimento amplo com o braço antes de usar o lápis.",
+    objective: "Memorizar a direção geral do traço.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 899,
+    letterPosition: 29,
+    upper: "Ы",
+    letter: "ы",
+    mode: "print",
+    stageNumber: 3,
+    stageCode: "maiuscula_guiada",
+    stageTitle: "Traçar maiúscula",
+    level: "A1",
+    target: "ЫЫЫЫЫ",
+    word: "мы",
+    translation: "nós",
+    sound: "y fechado",
+    prompt: "Traçar maiúscula: pratique Ы ы em letra de forma. Passe sobre o modelo maiúsculo sem acelerar.",
+    objective: "Controlar início, direção e encerramento.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 900,
+    letterPosition: 29,
+    upper: "Ы",
+    letter: "ы",
+    mode: "print",
+    stageNumber: 4,
+    stageCode: "minuscula_guiada",
+    stageTitle: "Traçar minúscula",
+    level: "A1",
+    target: "ыыыыы",
+    word: "мы",
+    translation: "nós",
+    sound: "y fechado",
+    prompt: "Traçar minúscula: pratique Ы ы em letra de forma. Passe sobre o modelo minúsculo mantendo a altura.",
+    objective: "Dominar a forma usada dentro das palavras.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 901,
+    letterPosition: 29,
+    upper: "Ы",
+    letter: "ы",
+    mode: "print",
+    stageNumber: 5,
+    stageCode: "copia_isolada",
+    stageTitle: "Copiar isoladamente",
+    level: "A1",
+    target: "ыыыыы",
+    word: "мы",
+    translation: "nós",
+    sound: "y fechado",
+    prompt: "Copiar isoladamente: pratique Ы ы em letra de forma. Copie a letra cinco vezes ao lado do modelo.",
+    objective: "Manter tamanho e espaçamento consistentes.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 902,
+    letterPosition: 29,
+    upper: "Ы",
+    letter: "ы",
+    mode: "print",
+    stageNumber: 6,
+    stageCode: "ritmo",
+    stageTitle: "Criar ritmo",
+    level: "A2",
+    target: "ыыыы ыыыы ыыыы",
+    word: "мы",
+    translation: "nós",
+    sound: "y fechado",
+    prompt: "Criar ritmo: pratique Ы ы em letra de forma. Escreva uma linha contínua com intervalos regulares.",
+    objective: "Automatizar o movimento sem perder legibilidade.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 903,
+    letterPosition: 29,
+    upper: "Ы",
+    letter: "ы",
+    mode: "print",
+    stageNumber: 7,
+    stageCode: "ligacao_a",
+    stageTitle: "Ligar com а",
+    level: "A2",
+    target: "ыа аы",
+    word: "мы",
+    translation: "nós",
+    sound: "y fechado",
+    prompt: "Ligar com а: pratique Ы ы em letra de forma. Pratique a ligação de entrada e saída com а.",
+    objective: "Aprender uma conexão frequente.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 904,
+    letterPosition: 29,
+    upper: "Ы",
+    letter: "ы",
+    mode: "print",
+    stageNumber: 8,
+    stageCode: "ligacao_o",
+    stageTitle: "Ligar com о",
+    level: "A2",
+    target: "ыо оы",
+    word: "мы",
+    translation: "nós",
+    sound: "y fechado",
+    prompt: "Ligar com о: pratique Ы ы em letra de forma. Pratique a ligação de entrada e saída com о.",
+    objective: "Evitar que as letras se encostem demais.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 905,
+    letterPosition: 29,
+    upper: "Ы",
+    letter: "ы",
+    mode: "print",
+    stageNumber: 9,
+    stageCode: "ligacao_i",
+    stageTitle: "Ligar com и",
+    level: "A2",
+    target: "ыи иы",
+    word: "мы",
+    translation: "nós",
+    sound: "y fechado",
+    prompt: "Ligar com и: pratique Ы ы em letra de forma. Pratique a ligação de entrada e saída com и.",
+    objective: "Manter o fluxo da cursiva.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 906,
+    letterPosition: 29,
+    upper: "Ы",
+    letter: "ы",
+    mode: "print",
+    stageNumber: 10,
+    stageCode: "ligacao_m",
+    stageTitle: "Ligar com м",
+    level: "A2",
+    target: "ым мы",
+    word: "мы",
+    translation: "nós",
+    sound: "y fechado",
+    prompt: "Ligar com м: pratique Ы ы em letra de forma. Pratique a ligação de entrada e saída com м.",
+    objective: "Diferenciar arcos e hastes semelhantes.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 907,
+    letterPosition: 29,
+    upper: "Ы",
+    letter: "ы",
+    mode: "print",
+    stageNumber: 11,
+    stageCode: "silaba",
+    stageTitle: "Copiar sílabas",
+    level: "A2",
+    target: "ыа ыо ыу ыи",
+    word: "мы",
+    translation: "nós",
+    sound: "y fechado",
+    prompt: "Copiar sílabas: pratique Ы ы em letra de forma. Copie sílabas curtas e leia em voz alta.",
+    objective: "Unir escrita, leitura e som.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 908,
+    letterPosition: 29,
+    upper: "Ы",
+    letter: "ы",
+    mode: "print",
+    stageNumber: 12,
+    stageCode: "palavra",
+    stageTitle: "Copiar palavra",
+    level: "B1",
+    target: "мы",
+    word: "мы",
+    translation: "nós",
+    sound: "y fechado",
+    prompt: "Copiar palavra: pratique Ы ы em letra de forma. Copie a palavra-modelo e confira cada ligação.",
+    objective: "Aplicar a letra em vocabulário real.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 909,
+    letterPosition: 29,
+    upper: "Ы",
+    letter: "ы",
+    mode: "print",
+    stageNumber: 13,
+    stageCode: "frase",
+    stageTitle: "Copiar frase",
+    level: "B1",
+    target: "Я пишу слово «мы».",
+    word: "мы",
+    translation: "nós",
+    sound: "y fechado",
+    prompt: "Copiar frase: pratique Ы ы em letra de forma. Copie uma frase curta sem interromper o ritmo.",
+    objective: "Aplicar a letra em contexto.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 910,
+    letterPosition: 29,
+    upper: "Ы",
+    letter: "ы",
+    mode: "print",
+    stageNumber: 14,
+    stageCode: "ditado",
+    stageTitle: "Escrever por ditado",
+    level: "B1",
+    target: "мы",
+    word: "мы",
+    translation: "nós",
+    sound: "y fechado",
+    prompt: "Escrever por ditado: pratique Ы ы em letra de forma. Ouça o modelo e escreva sem olhar; depois compare.",
+    objective: "Recuperar a grafia pela memória.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 911,
+    letterPosition: 29,
+    upper: "Ы",
+    letter: "ы",
+    mode: "print",
+    stageNumber: 15,
+    stageCode: "fluencia",
+    stageTitle: "Treino de fluência",
+    level: "B2",
+    target: "мы",
+    word: "мы",
+    translation: "nós",
+    sound: "y fechado",
+    prompt: "Treino de fluência: pratique Ы ы em letra de forma. Escreva com tempo controlado sem sacrificar clareza.",
+    objective: "Ganhar velocidade com legibilidade.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 912,
+    letterPosition: 29,
+    upper: "Ы",
+    letter: "ы",
+    mode: "print",
+    stageNumber: 16,
+    stageCode: "producao",
+    stageTitle: "Produção livre",
+    level: "C1",
+    target: "Я пишу слово «мы».",
+    word: "мы",
+    translation: "nós",
+    sound: "y fechado",
+    prompt: "Produção livre: pratique Ы ы em letra de forma. Crie uma frase curta usando a palavra-modelo.",
+    objective: "Usar a escrita de maneira independente.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 913,
+    letterPosition: 29,
+    upper: "Ы",
+    letter: "ы",
+    mode: "cursive",
+    stageNumber: 1,
+    stageCode: "observacao",
+    stageTitle: "Observar proporções",
+    level: "A1",
+    target: "ыыыыы",
+    word: "мы",
+    translation: "nós",
+    sound: "y fechado",
+    prompt: "Observar proporções: pratique Ы ы em letra cursiva. Compare altura, largura, inclinação e posição na linha.",
+    objective: "Reconhecer a forma antes de escrever.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 914,
+    letterPosition: 29,
+    upper: "Ы",
+    letter: "ы",
+    mode: "cursive",
+    stageNumber: 2,
+    stageCode: "movimento_ar",
+    stageTitle: "Desenhar no ar",
+    level: "A1",
+    target: "ыыыыы",
+    word: "мы",
+    translation: "nós",
+    sound: "y fechado",
+    prompt: "Desenhar no ar: pratique Ы ы em letra cursiva. Faça o movimento amplo com o braço antes de usar o lápis.",
+    objective: "Memorizar a direção geral do traço.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 915,
+    letterPosition: 29,
+    upper: "Ы",
+    letter: "ы",
+    mode: "cursive",
+    stageNumber: 3,
+    stageCode: "maiuscula_guiada",
+    stageTitle: "Traçar maiúscula",
+    level: "A1",
+    target: "ЫЫЫЫЫ",
+    word: "мы",
+    translation: "nós",
+    sound: "y fechado",
+    prompt: "Traçar maiúscula: pratique Ы ы em letra cursiva. Passe sobre o modelo maiúsculo sem acelerar.",
+    objective: "Controlar início, direção e encerramento.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 916,
+    letterPosition: 29,
+    upper: "Ы",
+    letter: "ы",
+    mode: "cursive",
+    stageNumber: 4,
+    stageCode: "minuscula_guiada",
+    stageTitle: "Traçar minúscula",
+    level: "A1",
+    target: "ыыыыы",
+    word: "мы",
+    translation: "nós",
+    sound: "y fechado",
+    prompt: "Traçar minúscula: pratique Ы ы em letra cursiva. Passe sobre o modelo minúsculo mantendo a altura.",
+    objective: "Dominar a forma usada dentro das palavras.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 917,
+    letterPosition: 29,
+    upper: "Ы",
+    letter: "ы",
+    mode: "cursive",
+    stageNumber: 5,
+    stageCode: "copia_isolada",
+    stageTitle: "Copiar isoladamente",
+    level: "A1",
+    target: "ыыыыы",
+    word: "мы",
+    translation: "nós",
+    sound: "y fechado",
+    prompt: "Copiar isoladamente: pratique Ы ы em letra cursiva. Copie a letra cinco vezes ao lado do modelo.",
+    objective: "Manter tamanho e espaçamento consistentes.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 918,
+    letterPosition: 29,
+    upper: "Ы",
+    letter: "ы",
+    mode: "cursive",
+    stageNumber: 6,
+    stageCode: "ritmo",
+    stageTitle: "Criar ritmo",
+    level: "A2",
+    target: "ыыыы ыыыы ыыыы",
+    word: "мы",
+    translation: "nós",
+    sound: "y fechado",
+    prompt: "Criar ritmo: pratique Ы ы em letra cursiva. Escreva uma linha contínua com intervalos regulares.",
+    objective: "Automatizar o movimento sem perder legibilidade.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 919,
+    letterPosition: 29,
+    upper: "Ы",
+    letter: "ы",
+    mode: "cursive",
+    stageNumber: 7,
+    stageCode: "ligacao_a",
+    stageTitle: "Ligar com а",
+    level: "A2",
+    target: "ыа аы",
+    word: "мы",
+    translation: "nós",
+    sound: "y fechado",
+    prompt: "Ligar com а: pratique Ы ы em letra cursiva. Pratique a ligação de entrada e saída com а.",
+    objective: "Aprender uma conexão frequente.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 920,
+    letterPosition: 29,
+    upper: "Ы",
+    letter: "ы",
+    mode: "cursive",
+    stageNumber: 8,
+    stageCode: "ligacao_o",
+    stageTitle: "Ligar com о",
+    level: "A2",
+    target: "ыо оы",
+    word: "мы",
+    translation: "nós",
+    sound: "y fechado",
+    prompt: "Ligar com о: pratique Ы ы em letra cursiva. Pratique a ligação de entrada e saída com о.",
+    objective: "Evitar que as letras se encostem demais.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 921,
+    letterPosition: 29,
+    upper: "Ы",
+    letter: "ы",
+    mode: "cursive",
+    stageNumber: 9,
+    stageCode: "ligacao_i",
+    stageTitle: "Ligar com и",
+    level: "A2",
+    target: "ыи иы",
+    word: "мы",
+    translation: "nós",
+    sound: "y fechado",
+    prompt: "Ligar com и: pratique Ы ы em letra cursiva. Pratique a ligação de entrada e saída com и.",
+    objective: "Manter o fluxo da cursiva.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 922,
+    letterPosition: 29,
+    upper: "Ы",
+    letter: "ы",
+    mode: "cursive",
+    stageNumber: 10,
+    stageCode: "ligacao_m",
+    stageTitle: "Ligar com м",
+    level: "A2",
+    target: "ым мы",
+    word: "мы",
+    translation: "nós",
+    sound: "y fechado",
+    prompt: "Ligar com м: pratique Ы ы em letra cursiva. Pratique a ligação de entrada e saída com м.",
+    objective: "Diferenciar arcos e hastes semelhantes.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 923,
+    letterPosition: 29,
+    upper: "Ы",
+    letter: "ы",
+    mode: "cursive",
+    stageNumber: 11,
+    stageCode: "silaba",
+    stageTitle: "Copiar sílabas",
+    level: "A2",
+    target: "ыа ыо ыу ыи",
+    word: "мы",
+    translation: "nós",
+    sound: "y fechado",
+    prompt: "Copiar sílabas: pratique Ы ы em letra cursiva. Copie sílabas curtas e leia em voz alta.",
+    objective: "Unir escrita, leitura e som.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 924,
+    letterPosition: 29,
+    upper: "Ы",
+    letter: "ы",
+    mode: "cursive",
+    stageNumber: 12,
+    stageCode: "palavra",
+    stageTitle: "Copiar palavra",
+    level: "B1",
+    target: "мы",
+    word: "мы",
+    translation: "nós",
+    sound: "y fechado",
+    prompt: "Copiar palavra: pratique Ы ы em letra cursiva. Copie a palavra-modelo e confira cada ligação.",
+    objective: "Aplicar a letra em vocabulário real.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 925,
+    letterPosition: 29,
+    upper: "Ы",
+    letter: "ы",
+    mode: "cursive",
+    stageNumber: 13,
+    stageCode: "frase",
+    stageTitle: "Copiar frase",
+    level: "B1",
+    target: "Я пишу слово «мы».",
+    word: "мы",
+    translation: "nós",
+    sound: "y fechado",
+    prompt: "Copiar frase: pratique Ы ы em letra cursiva. Copie uma frase curta sem interromper o ritmo.",
+    objective: "Aplicar a letra em contexto.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 926,
+    letterPosition: 29,
+    upper: "Ы",
+    letter: "ы",
+    mode: "cursive",
+    stageNumber: 14,
+    stageCode: "ditado",
+    stageTitle: "Escrever por ditado",
+    level: "B1",
+    target: "мы",
+    word: "мы",
+    translation: "nós",
+    sound: "y fechado",
+    prompt: "Escrever por ditado: pratique Ы ы em letra cursiva. Ouça o modelo e escreva sem olhar; depois compare.",
+    objective: "Recuperar a grafia pela memória.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 927,
+    letterPosition: 29,
+    upper: "Ы",
+    letter: "ы",
+    mode: "cursive",
+    stageNumber: 15,
+    stageCode: "fluencia",
+    stageTitle: "Treino de fluência",
+    level: "B2",
+    target: "мы",
+    word: "мы",
+    translation: "nós",
+    sound: "y fechado",
+    prompt: "Treino de fluência: pratique Ы ы em letra cursiva. Escreva com tempo controlado sem sacrificar clareza.",
+    objective: "Ganhar velocidade com legibilidade.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 928,
+    letterPosition: 29,
+    upper: "Ы",
+    letter: "ы",
+    mode: "cursive",
+    stageNumber: 16,
+    stageCode: "producao",
+    stageTitle: "Produção livre",
+    level: "C1",
+    target: "Я пишу слово «мы».",
+    word: "мы",
+    translation: "nós",
+    sound: "y fechado",
+    prompt: "Produção livre: pratique Ы ы em letra cursiva. Crie uma frase curta usando a palavra-modelo.",
+    objective: "Usar a escrita de maneira independente.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 929,
+    letterPosition: 30,
+    upper: "Ь",
+    letter: "ь",
+    mode: "print",
+    stageNumber: 1,
+    stageCode: "observacao",
+    stageTitle: "Observar proporções",
+    level: "A1",
+    target: "ььььь",
+    word: "день",
+    translation: "dia",
+    sound: "sinal brando",
+    prompt: "Observar proporções: pratique Ь ь em letra de forma. Compare altura, largura, inclinação e posição na linha.",
+    objective: "Reconhecer a forma antes de escrever.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 930,
+    letterPosition: 30,
+    upper: "Ь",
+    letter: "ь",
+    mode: "print",
+    stageNumber: 2,
+    stageCode: "movimento_ar",
+    stageTitle: "Desenhar no ar",
+    level: "A1",
+    target: "ььььь",
+    word: "день",
+    translation: "dia",
+    sound: "sinal brando",
+    prompt: "Desenhar no ar: pratique Ь ь em letra de forma. Faça o movimento amplo com o braço antes de usar o lápis.",
+    objective: "Memorizar a direção geral do traço.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 931,
+    letterPosition: 30,
+    upper: "Ь",
+    letter: "ь",
+    mode: "print",
+    stageNumber: 3,
+    stageCode: "maiuscula_guiada",
+    stageTitle: "Traçar maiúscula",
+    level: "A1",
+    target: "ЬЬЬЬЬ",
+    word: "день",
+    translation: "dia",
+    sound: "sinal brando",
+    prompt: "Traçar maiúscula: pratique Ь ь em letra de forma. Passe sobre o modelo maiúsculo sem acelerar.",
+    objective: "Controlar início, direção e encerramento.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 932,
+    letterPosition: 30,
+    upper: "Ь",
+    letter: "ь",
+    mode: "print",
+    stageNumber: 4,
+    stageCode: "minuscula_guiada",
+    stageTitle: "Traçar minúscula",
+    level: "A1",
+    target: "ььььь",
+    word: "день",
+    translation: "dia",
+    sound: "sinal brando",
+    prompt: "Traçar minúscula: pratique Ь ь em letra de forma. Passe sobre o modelo minúsculo mantendo a altura.",
+    objective: "Dominar a forma usada dentro das palavras.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 933,
+    letterPosition: 30,
+    upper: "Ь",
+    letter: "ь",
+    mode: "print",
+    stageNumber: 5,
+    stageCode: "copia_isolada",
+    stageTitle: "Copiar isoladamente",
+    level: "A1",
+    target: "ььььь",
+    word: "день",
+    translation: "dia",
+    sound: "sinal brando",
+    prompt: "Copiar isoladamente: pratique Ь ь em letra de forma. Copie a letra cinco vezes ao lado do modelo.",
+    objective: "Manter tamanho e espaçamento consistentes.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 934,
+    letterPosition: 30,
+    upper: "Ь",
+    letter: "ь",
+    mode: "print",
+    stageNumber: 6,
+    stageCode: "ritmo",
+    stageTitle: "Criar ritmo",
+    level: "A2",
+    target: "ьььь ьььь ьььь",
+    word: "день",
+    translation: "dia",
+    sound: "sinal brando",
+    prompt: "Criar ritmo: pratique Ь ь em letra de forma. Escreva uma linha contínua com intervalos regulares.",
+    objective: "Automatizar o movimento sem perder legibilidade.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 935,
+    letterPosition: 30,
+    upper: "Ь",
+    letter: "ь",
+    mode: "print",
+    stageNumber: 7,
+    stageCode: "ligacao_a",
+    stageTitle: "Ligar com а",
+    level: "A2",
+    target: "ьа аь",
+    word: "день",
+    translation: "dia",
+    sound: "sinal brando",
+    prompt: "Ligar com а: pratique Ь ь em letra de forma. Pratique a ligação de entrada e saída com а.",
+    objective: "Aprender uma conexão frequente.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 936,
+    letterPosition: 30,
+    upper: "Ь",
+    letter: "ь",
+    mode: "print",
+    stageNumber: 8,
+    stageCode: "ligacao_o",
+    stageTitle: "Ligar com о",
+    level: "A2",
+    target: "ьо оь",
+    word: "день",
+    translation: "dia",
+    sound: "sinal brando",
+    prompt: "Ligar com о: pratique Ь ь em letra de forma. Pratique a ligação de entrada e saída com о.",
+    objective: "Evitar que as letras se encostem demais.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 937,
+    letterPosition: 30,
+    upper: "Ь",
+    letter: "ь",
+    mode: "print",
+    stageNumber: 9,
+    stageCode: "ligacao_i",
+    stageTitle: "Ligar com и",
+    level: "A2",
+    target: "ьи иь",
+    word: "день",
+    translation: "dia",
+    sound: "sinal brando",
+    prompt: "Ligar com и: pratique Ь ь em letra de forma. Pratique a ligação de entrada e saída com и.",
+    objective: "Manter o fluxo da cursiva.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 938,
+    letterPosition: 30,
+    upper: "Ь",
+    letter: "ь",
+    mode: "print",
+    stageNumber: 10,
+    stageCode: "ligacao_m",
+    stageTitle: "Ligar com м",
+    level: "A2",
+    target: "ьм мь",
+    word: "день",
+    translation: "dia",
+    sound: "sinal brando",
+    prompt: "Ligar com м: pratique Ь ь em letra de forma. Pratique a ligação de entrada e saída com м.",
+    objective: "Diferenciar arcos e hastes semelhantes.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 939,
+    letterPosition: 30,
+    upper: "Ь",
+    letter: "ь",
+    mode: "print",
+    stageNumber: 11,
+    stageCode: "silaba",
+    stageTitle: "Copiar sílabas",
+    level: "A2",
+    target: "ьа ьо ьу ьи",
+    word: "день",
+    translation: "dia",
+    sound: "sinal brando",
+    prompt: "Copiar sílabas: pratique Ь ь em letra de forma. Copie sílabas curtas e leia em voz alta.",
+    objective: "Unir escrita, leitura e som.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 940,
+    letterPosition: 30,
+    upper: "Ь",
+    letter: "ь",
+    mode: "print",
+    stageNumber: 12,
+    stageCode: "palavra",
+    stageTitle: "Copiar palavra",
+    level: "B1",
+    target: "день",
+    word: "день",
+    translation: "dia",
+    sound: "sinal brando",
+    prompt: "Copiar palavra: pratique Ь ь em letra de forma. Copie a palavra-modelo e confira cada ligação.",
+    objective: "Aplicar a letra em vocabulário real.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 941,
+    letterPosition: 30,
+    upper: "Ь",
+    letter: "ь",
+    mode: "print",
+    stageNumber: 13,
+    stageCode: "frase",
+    stageTitle: "Copiar frase",
+    level: "B1",
+    target: "Я пишу слово «день».",
+    word: "день",
+    translation: "dia",
+    sound: "sinal brando",
+    prompt: "Copiar frase: pratique Ь ь em letra de forma. Copie uma frase curta sem interromper o ritmo.",
+    objective: "Aplicar a letra em contexto.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 942,
+    letterPosition: 30,
+    upper: "Ь",
+    letter: "ь",
+    mode: "print",
+    stageNumber: 14,
+    stageCode: "ditado",
+    stageTitle: "Escrever por ditado",
+    level: "B1",
+    target: "день",
+    word: "день",
+    translation: "dia",
+    sound: "sinal brando",
+    prompt: "Escrever por ditado: pratique Ь ь em letra de forma. Ouça o modelo e escreva sem olhar; depois compare.",
+    objective: "Recuperar a grafia pela memória.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 943,
+    letterPosition: 30,
+    upper: "Ь",
+    letter: "ь",
+    mode: "print",
+    stageNumber: 15,
+    stageCode: "fluencia",
+    stageTitle: "Treino de fluência",
+    level: "B2",
+    target: "день",
+    word: "день",
+    translation: "dia",
+    sound: "sinal brando",
+    prompt: "Treino de fluência: pratique Ь ь em letra de forma. Escreva com tempo controlado sem sacrificar clareza.",
+    objective: "Ganhar velocidade com legibilidade.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 944,
+    letterPosition: 30,
+    upper: "Ь",
+    letter: "ь",
+    mode: "print",
+    stageNumber: 16,
+    stageCode: "producao",
+    stageTitle: "Produção livre",
+    level: "C1",
+    target: "Я пишу слово «день».",
+    word: "день",
+    translation: "dia",
+    sound: "sinal brando",
+    prompt: "Produção livre: pratique Ь ь em letra de forma. Crie uma frase curta usando a palavra-modelo.",
+    objective: "Usar a escrita de maneira independente.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 945,
+    letterPosition: 30,
+    upper: "Ь",
+    letter: "ь",
+    mode: "cursive",
+    stageNumber: 1,
+    stageCode: "observacao",
+    stageTitle: "Observar proporções",
+    level: "A1",
+    target: "ььььь",
+    word: "день",
+    translation: "dia",
+    sound: "sinal brando",
+    prompt: "Observar proporções: pratique Ь ь em letra cursiva. Compare altura, largura, inclinação e posição na linha.",
+    objective: "Reconhecer a forma antes de escrever.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 946,
+    letterPosition: 30,
+    upper: "Ь",
+    letter: "ь",
+    mode: "cursive",
+    stageNumber: 2,
+    stageCode: "movimento_ar",
+    stageTitle: "Desenhar no ar",
+    level: "A1",
+    target: "ььььь",
+    word: "день",
+    translation: "dia",
+    sound: "sinal brando",
+    prompt: "Desenhar no ar: pratique Ь ь em letra cursiva. Faça o movimento amplo com o braço antes de usar o lápis.",
+    objective: "Memorizar a direção geral do traço.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 947,
+    letterPosition: 30,
+    upper: "Ь",
+    letter: "ь",
+    mode: "cursive",
+    stageNumber: 3,
+    stageCode: "maiuscula_guiada",
+    stageTitle: "Traçar maiúscula",
+    level: "A1",
+    target: "ЬЬЬЬЬ",
+    word: "день",
+    translation: "dia",
+    sound: "sinal brando",
+    prompt: "Traçar maiúscula: pratique Ь ь em letra cursiva. Passe sobre o modelo maiúsculo sem acelerar.",
+    objective: "Controlar início, direção e encerramento.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 948,
+    letterPosition: 30,
+    upper: "Ь",
+    letter: "ь",
+    mode: "cursive",
+    stageNumber: 4,
+    stageCode: "minuscula_guiada",
+    stageTitle: "Traçar minúscula",
+    level: "A1",
+    target: "ььььь",
+    word: "день",
+    translation: "dia",
+    sound: "sinal brando",
+    prompt: "Traçar minúscula: pratique Ь ь em letra cursiva. Passe sobre o modelo minúsculo mantendo a altura.",
+    objective: "Dominar a forma usada dentro das palavras.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 949,
+    letterPosition: 30,
+    upper: "Ь",
+    letter: "ь",
+    mode: "cursive",
+    stageNumber: 5,
+    stageCode: "copia_isolada",
+    stageTitle: "Copiar isoladamente",
+    level: "A1",
+    target: "ььььь",
+    word: "день",
+    translation: "dia",
+    sound: "sinal brando",
+    prompt: "Copiar isoladamente: pratique Ь ь em letra cursiva. Copie a letra cinco vezes ao lado do modelo.",
+    objective: "Manter tamanho e espaçamento consistentes.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 950,
+    letterPosition: 30,
+    upper: "Ь",
+    letter: "ь",
+    mode: "cursive",
+    stageNumber: 6,
+    stageCode: "ritmo",
+    stageTitle: "Criar ritmo",
+    level: "A2",
+    target: "ьььь ьььь ьььь",
+    word: "день",
+    translation: "dia",
+    sound: "sinal brando",
+    prompt: "Criar ritmo: pratique Ь ь em letra cursiva. Escreva uma linha contínua com intervalos regulares.",
+    objective: "Automatizar o movimento sem perder legibilidade.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 951,
+    letterPosition: 30,
+    upper: "Ь",
+    letter: "ь",
+    mode: "cursive",
+    stageNumber: 7,
+    stageCode: "ligacao_a",
+    stageTitle: "Ligar com а",
+    level: "A2",
+    target: "ьа аь",
+    word: "день",
+    translation: "dia",
+    sound: "sinal brando",
+    prompt: "Ligar com а: pratique Ь ь em letra cursiva. Pratique a ligação de entrada e saída com а.",
+    objective: "Aprender uma conexão frequente.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 952,
+    letterPosition: 30,
+    upper: "Ь",
+    letter: "ь",
+    mode: "cursive",
+    stageNumber: 8,
+    stageCode: "ligacao_o",
+    stageTitle: "Ligar com о",
+    level: "A2",
+    target: "ьо оь",
+    word: "день",
+    translation: "dia",
+    sound: "sinal brando",
+    prompt: "Ligar com о: pratique Ь ь em letra cursiva. Pratique a ligação de entrada e saída com о.",
+    objective: "Evitar que as letras se encostem demais.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 953,
+    letterPosition: 30,
+    upper: "Ь",
+    letter: "ь",
+    mode: "cursive",
+    stageNumber: 9,
+    stageCode: "ligacao_i",
+    stageTitle: "Ligar com и",
+    level: "A2",
+    target: "ьи иь",
+    word: "день",
+    translation: "dia",
+    sound: "sinal brando",
+    prompt: "Ligar com и: pratique Ь ь em letra cursiva. Pratique a ligação de entrada e saída com и.",
+    objective: "Manter o fluxo da cursiva.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 954,
+    letterPosition: 30,
+    upper: "Ь",
+    letter: "ь",
+    mode: "cursive",
+    stageNumber: 10,
+    stageCode: "ligacao_m",
+    stageTitle: "Ligar com м",
+    level: "A2",
+    target: "ьм мь",
+    word: "день",
+    translation: "dia",
+    sound: "sinal brando",
+    prompt: "Ligar com м: pratique Ь ь em letra cursiva. Pratique a ligação de entrada e saída com м.",
+    objective: "Diferenciar arcos e hastes semelhantes.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 955,
+    letterPosition: 30,
+    upper: "Ь",
+    letter: "ь",
+    mode: "cursive",
+    stageNumber: 11,
+    stageCode: "silaba",
+    stageTitle: "Copiar sílabas",
+    level: "A2",
+    target: "ьа ьо ьу ьи",
+    word: "день",
+    translation: "dia",
+    sound: "sinal brando",
+    prompt: "Copiar sílabas: pratique Ь ь em letra cursiva. Copie sílabas curtas e leia em voz alta.",
+    objective: "Unir escrita, leitura e som.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 956,
+    letterPosition: 30,
+    upper: "Ь",
+    letter: "ь",
+    mode: "cursive",
+    stageNumber: 12,
+    stageCode: "palavra",
+    stageTitle: "Copiar palavra",
+    level: "B1",
+    target: "день",
+    word: "день",
+    translation: "dia",
+    sound: "sinal brando",
+    prompt: "Copiar palavra: pratique Ь ь em letra cursiva. Copie a palavra-modelo e confira cada ligação.",
+    objective: "Aplicar a letra em vocabulário real.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 957,
+    letterPosition: 30,
+    upper: "Ь",
+    letter: "ь",
+    mode: "cursive",
+    stageNumber: 13,
+    stageCode: "frase",
+    stageTitle: "Copiar frase",
+    level: "B1",
+    target: "Я пишу слово «день».",
+    word: "день",
+    translation: "dia",
+    sound: "sinal brando",
+    prompt: "Copiar frase: pratique Ь ь em letra cursiva. Copie uma frase curta sem interromper o ritmo.",
+    objective: "Aplicar a letra em contexto.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 958,
+    letterPosition: 30,
+    upper: "Ь",
+    letter: "ь",
+    mode: "cursive",
+    stageNumber: 14,
+    stageCode: "ditado",
+    stageTitle: "Escrever por ditado",
+    level: "B1",
+    target: "день",
+    word: "день",
+    translation: "dia",
+    sound: "sinal brando",
+    prompt: "Escrever por ditado: pratique Ь ь em letra cursiva. Ouça o modelo e escreva sem olhar; depois compare.",
+    objective: "Recuperar a grafia pela memória.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 959,
+    letterPosition: 30,
+    upper: "Ь",
+    letter: "ь",
+    mode: "cursive",
+    stageNumber: 15,
+    stageCode: "fluencia",
+    stageTitle: "Treino de fluência",
+    level: "B2",
+    target: "день",
+    word: "день",
+    translation: "dia",
+    sound: "sinal brando",
+    prompt: "Treino de fluência: pratique Ь ь em letra cursiva. Escreva com tempo controlado sem sacrificar clareza.",
+    objective: "Ganhar velocidade com legibilidade.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 960,
+    letterPosition: 30,
+    upper: "Ь",
+    letter: "ь",
+    mode: "cursive",
+    stageNumber: 16,
+    stageCode: "producao",
+    stageTitle: "Produção livre",
+    level: "C1",
+    target: "Я пишу слово «день».",
+    word: "день",
+    translation: "dia",
+    sound: "sinal brando",
+    prompt: "Produção livre: pratique Ь ь em letra cursiva. Crie uma frase curta usando a palavra-modelo.",
+    objective: "Usar a escrita de maneira independente.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 961,
+    letterPosition: 31,
+    upper: "Э",
+    letter: "э",
+    mode: "print",
+    stageNumber: 1,
+    stageCode: "observacao",
+    stageTitle: "Observar proporções",
+    level: "A1",
+    target: "эээээ",
+    word: "это",
+    translation: "isto",
+    sound: "é aberto",
+    prompt: "Observar proporções: pratique Э э em letra de forma. Compare altura, largura, inclinação e posição na linha.",
+    objective: "Reconhecer a forma antes de escrever.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 962,
+    letterPosition: 31,
+    upper: "Э",
+    letter: "э",
+    mode: "print",
+    stageNumber: 2,
+    stageCode: "movimento_ar",
+    stageTitle: "Desenhar no ar",
+    level: "A1",
+    target: "эээээ",
+    word: "это",
+    translation: "isto",
+    sound: "é aberto",
+    prompt: "Desenhar no ar: pratique Э э em letra de forma. Faça o movimento amplo com o braço antes de usar o lápis.",
+    objective: "Memorizar a direção geral do traço.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 963,
+    letterPosition: 31,
+    upper: "Э",
+    letter: "э",
+    mode: "print",
+    stageNumber: 3,
+    stageCode: "maiuscula_guiada",
+    stageTitle: "Traçar maiúscula",
+    level: "A1",
+    target: "ЭЭЭЭЭ",
+    word: "это",
+    translation: "isto",
+    sound: "é aberto",
+    prompt: "Traçar maiúscula: pratique Э э em letra de forma. Passe sobre o modelo maiúsculo sem acelerar.",
+    objective: "Controlar início, direção e encerramento.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 964,
+    letterPosition: 31,
+    upper: "Э",
+    letter: "э",
+    mode: "print",
+    stageNumber: 4,
+    stageCode: "minuscula_guiada",
+    stageTitle: "Traçar minúscula",
+    level: "A1",
+    target: "эээээ",
+    word: "это",
+    translation: "isto",
+    sound: "é aberto",
+    prompt: "Traçar minúscula: pratique Э э em letra de forma. Passe sobre o modelo minúsculo mantendo a altura.",
+    objective: "Dominar a forma usada dentro das palavras.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 965,
+    letterPosition: 31,
+    upper: "Э",
+    letter: "э",
+    mode: "print",
+    stageNumber: 5,
+    stageCode: "copia_isolada",
+    stageTitle: "Copiar isoladamente",
+    level: "A1",
+    target: "эээээ",
+    word: "это",
+    translation: "isto",
+    sound: "é aberto",
+    prompt: "Copiar isoladamente: pratique Э э em letra de forma. Copie a letra cinco vezes ao lado do modelo.",
+    objective: "Manter tamanho e espaçamento consistentes.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 966,
+    letterPosition: 31,
+    upper: "Э",
+    letter: "э",
+    mode: "print",
+    stageNumber: 6,
+    stageCode: "ritmo",
+    stageTitle: "Criar ritmo",
+    level: "A2",
+    target: "ээээ ээээ ээээ",
+    word: "это",
+    translation: "isto",
+    sound: "é aberto",
+    prompt: "Criar ritmo: pratique Э э em letra de forma. Escreva uma linha contínua com intervalos regulares.",
+    objective: "Automatizar o movimento sem perder legibilidade.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 967,
+    letterPosition: 31,
+    upper: "Э",
+    letter: "э",
+    mode: "print",
+    stageNumber: 7,
+    stageCode: "ligacao_a",
+    stageTitle: "Ligar com а",
+    level: "A2",
+    target: "эа аэ",
+    word: "это",
+    translation: "isto",
+    sound: "é aberto",
+    prompt: "Ligar com а: pratique Э э em letra de forma. Pratique a ligação de entrada e saída com а.",
+    objective: "Aprender uma conexão frequente.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 968,
+    letterPosition: 31,
+    upper: "Э",
+    letter: "э",
+    mode: "print",
+    stageNumber: 8,
+    stageCode: "ligacao_o",
+    stageTitle: "Ligar com о",
+    level: "A2",
+    target: "эо оэ",
+    word: "это",
+    translation: "isto",
+    sound: "é aberto",
+    prompt: "Ligar com о: pratique Э э em letra de forma. Pratique a ligação de entrada e saída com о.",
+    objective: "Evitar que as letras se encostem demais.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 969,
+    letterPosition: 31,
+    upper: "Э",
+    letter: "э",
+    mode: "print",
+    stageNumber: 9,
+    stageCode: "ligacao_i",
+    stageTitle: "Ligar com и",
+    level: "A2",
+    target: "эи иэ",
+    word: "это",
+    translation: "isto",
+    sound: "é aberto",
+    prompt: "Ligar com и: pratique Э э em letra de forma. Pratique a ligação de entrada e saída com и.",
+    objective: "Manter o fluxo da cursiva.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 970,
+    letterPosition: 31,
+    upper: "Э",
+    letter: "э",
+    mode: "print",
+    stageNumber: 10,
+    stageCode: "ligacao_m",
+    stageTitle: "Ligar com м",
+    level: "A2",
+    target: "эм мэ",
+    word: "это",
+    translation: "isto",
+    sound: "é aberto",
+    prompt: "Ligar com м: pratique Э э em letra de forma. Pratique a ligação de entrada e saída com м.",
+    objective: "Diferenciar arcos e hastes semelhantes.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 971,
+    letterPosition: 31,
+    upper: "Э",
+    letter: "э",
+    mode: "print",
+    stageNumber: 11,
+    stageCode: "silaba",
+    stageTitle: "Copiar sílabas",
+    level: "A2",
+    target: "эа эо эу эи",
+    word: "это",
+    translation: "isto",
+    sound: "é aberto",
+    prompt: "Copiar sílabas: pratique Э э em letra de forma. Copie sílabas curtas e leia em voz alta.",
+    objective: "Unir escrita, leitura e som.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 972,
+    letterPosition: 31,
+    upper: "Э",
+    letter: "э",
+    mode: "print",
+    stageNumber: 12,
+    stageCode: "palavra",
+    stageTitle: "Copiar palavra",
+    level: "B1",
+    target: "это",
+    word: "это",
+    translation: "isto",
+    sound: "é aberto",
+    prompt: "Copiar palavra: pratique Э э em letra de forma. Copie a palavra-modelo e confira cada ligação.",
+    objective: "Aplicar a letra em vocabulário real.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 973,
+    letterPosition: 31,
+    upper: "Э",
+    letter: "э",
+    mode: "print",
+    stageNumber: 13,
+    stageCode: "frase",
+    stageTitle: "Copiar frase",
+    level: "B1",
+    target: "Я пишу слово «это».",
+    word: "это",
+    translation: "isto",
+    sound: "é aberto",
+    prompt: "Copiar frase: pratique Э э em letra de forma. Copie uma frase curta sem interromper o ritmo.",
+    objective: "Aplicar a letra em contexto.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 974,
+    letterPosition: 31,
+    upper: "Э",
+    letter: "э",
+    mode: "print",
+    stageNumber: 14,
+    stageCode: "ditado",
+    stageTitle: "Escrever por ditado",
+    level: "B1",
+    target: "это",
+    word: "это",
+    translation: "isto",
+    sound: "é aberto",
+    prompt: "Escrever por ditado: pratique Э э em letra de forma. Ouça o modelo e escreva sem olhar; depois compare.",
+    objective: "Recuperar a grafia pela memória.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 975,
+    letterPosition: 31,
+    upper: "Э",
+    letter: "э",
+    mode: "print",
+    stageNumber: 15,
+    stageCode: "fluencia",
+    stageTitle: "Treino de fluência",
+    level: "B2",
+    target: "это",
+    word: "это",
+    translation: "isto",
+    sound: "é aberto",
+    prompt: "Treino de fluência: pratique Э э em letra de forma. Escreva com tempo controlado sem sacrificar clareza.",
+    objective: "Ganhar velocidade com legibilidade.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 976,
+    letterPosition: 31,
+    upper: "Э",
+    letter: "э",
+    mode: "print",
+    stageNumber: 16,
+    stageCode: "producao",
+    stageTitle: "Produção livre",
+    level: "C1",
+    target: "Я пишу слово «это».",
+    word: "это",
+    translation: "isto",
+    sound: "é aberto",
+    prompt: "Produção livre: pratique Э э em letra de forma. Crie uma frase curta usando a palavra-modelo.",
+    objective: "Usar a escrita de maneira independente.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 977,
+    letterPosition: 31,
+    upper: "Э",
+    letter: "э",
+    mode: "cursive",
+    stageNumber: 1,
+    stageCode: "observacao",
+    stageTitle: "Observar proporções",
+    level: "A1",
+    target: "эээээ",
+    word: "это",
+    translation: "isto",
+    sound: "é aberto",
+    prompt: "Observar proporções: pratique Э э em letra cursiva. Compare altura, largura, inclinação e posição na linha.",
+    objective: "Reconhecer a forma antes de escrever.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 978,
+    letterPosition: 31,
+    upper: "Э",
+    letter: "э",
+    mode: "cursive",
+    stageNumber: 2,
+    stageCode: "movimento_ar",
+    stageTitle: "Desenhar no ar",
+    level: "A1",
+    target: "эээээ",
+    word: "это",
+    translation: "isto",
+    sound: "é aberto",
+    prompt: "Desenhar no ar: pratique Э э em letra cursiva. Faça o movimento amplo com o braço antes de usar o lápis.",
+    objective: "Memorizar a direção geral do traço.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 979,
+    letterPosition: 31,
+    upper: "Э",
+    letter: "э",
+    mode: "cursive",
+    stageNumber: 3,
+    stageCode: "maiuscula_guiada",
+    stageTitle: "Traçar maiúscula",
+    level: "A1",
+    target: "ЭЭЭЭЭ",
+    word: "это",
+    translation: "isto",
+    sound: "é aberto",
+    prompt: "Traçar maiúscula: pratique Э э em letra cursiva. Passe sobre o modelo maiúsculo sem acelerar.",
+    objective: "Controlar início, direção e encerramento.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 980,
+    letterPosition: 31,
+    upper: "Э",
+    letter: "э",
+    mode: "cursive",
+    stageNumber: 4,
+    stageCode: "minuscula_guiada",
+    stageTitle: "Traçar minúscula",
+    level: "A1",
+    target: "эээээ",
+    word: "это",
+    translation: "isto",
+    sound: "é aberto",
+    prompt: "Traçar minúscula: pratique Э э em letra cursiva. Passe sobre o modelo minúsculo mantendo a altura.",
+    objective: "Dominar a forma usada dentro das palavras.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 981,
+    letterPosition: 31,
+    upper: "Э",
+    letter: "э",
+    mode: "cursive",
+    stageNumber: 5,
+    stageCode: "copia_isolada",
+    stageTitle: "Copiar isoladamente",
+    level: "A1",
+    target: "эээээ",
+    word: "это",
+    translation: "isto",
+    sound: "é aberto",
+    prompt: "Copiar isoladamente: pratique Э э em letra cursiva. Copie a letra cinco vezes ao lado do modelo.",
+    objective: "Manter tamanho e espaçamento consistentes.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 982,
+    letterPosition: 31,
+    upper: "Э",
+    letter: "э",
+    mode: "cursive",
+    stageNumber: 6,
+    stageCode: "ritmo",
+    stageTitle: "Criar ritmo",
+    level: "A2",
+    target: "ээээ ээээ ээээ",
+    word: "это",
+    translation: "isto",
+    sound: "é aberto",
+    prompt: "Criar ritmo: pratique Э э em letra cursiva. Escreva uma linha contínua com intervalos regulares.",
+    objective: "Automatizar o movimento sem perder legibilidade.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 983,
+    letterPosition: 31,
+    upper: "Э",
+    letter: "э",
+    mode: "cursive",
+    stageNumber: 7,
+    stageCode: "ligacao_a",
+    stageTitle: "Ligar com а",
+    level: "A2",
+    target: "эа аэ",
+    word: "это",
+    translation: "isto",
+    sound: "é aberto",
+    prompt: "Ligar com а: pratique Э э em letra cursiva. Pratique a ligação de entrada e saída com а.",
+    objective: "Aprender uma conexão frequente.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 984,
+    letterPosition: 31,
+    upper: "Э",
+    letter: "э",
+    mode: "cursive",
+    stageNumber: 8,
+    stageCode: "ligacao_o",
+    stageTitle: "Ligar com о",
+    level: "A2",
+    target: "эо оэ",
+    word: "это",
+    translation: "isto",
+    sound: "é aberto",
+    prompt: "Ligar com о: pratique Э э em letra cursiva. Pratique a ligação de entrada e saída com о.",
+    objective: "Evitar que as letras se encostem demais.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 985,
+    letterPosition: 31,
+    upper: "Э",
+    letter: "э",
+    mode: "cursive",
+    stageNumber: 9,
+    stageCode: "ligacao_i",
+    stageTitle: "Ligar com и",
+    level: "A2",
+    target: "эи иэ",
+    word: "это",
+    translation: "isto",
+    sound: "é aberto",
+    prompt: "Ligar com и: pratique Э э em letra cursiva. Pratique a ligação de entrada e saída com и.",
+    objective: "Manter o fluxo da cursiva.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 986,
+    letterPosition: 31,
+    upper: "Э",
+    letter: "э",
+    mode: "cursive",
+    stageNumber: 10,
+    stageCode: "ligacao_m",
+    stageTitle: "Ligar com м",
+    level: "A2",
+    target: "эм мэ",
+    word: "это",
+    translation: "isto",
+    sound: "é aberto",
+    prompt: "Ligar com м: pratique Э э em letra cursiva. Pratique a ligação de entrada e saída com м.",
+    objective: "Diferenciar arcos e hastes semelhantes.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 987,
+    letterPosition: 31,
+    upper: "Э",
+    letter: "э",
+    mode: "cursive",
+    stageNumber: 11,
+    stageCode: "silaba",
+    stageTitle: "Copiar sílabas",
+    level: "A2",
+    target: "эа эо эу эи",
+    word: "это",
+    translation: "isto",
+    sound: "é aberto",
+    prompt: "Copiar sílabas: pratique Э э em letra cursiva. Copie sílabas curtas e leia em voz alta.",
+    objective: "Unir escrita, leitura e som.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 988,
+    letterPosition: 31,
+    upper: "Э",
+    letter: "э",
+    mode: "cursive",
+    stageNumber: 12,
+    stageCode: "palavra",
+    stageTitle: "Copiar palavra",
+    level: "B1",
+    target: "это",
+    word: "это",
+    translation: "isto",
+    sound: "é aberto",
+    prompt: "Copiar palavra: pratique Э э em letra cursiva. Copie a palavra-modelo e confira cada ligação.",
+    objective: "Aplicar a letra em vocabulário real.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 989,
+    letterPosition: 31,
+    upper: "Э",
+    letter: "э",
+    mode: "cursive",
+    stageNumber: 13,
+    stageCode: "frase",
+    stageTitle: "Copiar frase",
+    level: "B1",
+    target: "Я пишу слово «это».",
+    word: "это",
+    translation: "isto",
+    sound: "é aberto",
+    prompt: "Copiar frase: pratique Э э em letra cursiva. Copie uma frase curta sem interromper o ritmo.",
+    objective: "Aplicar a letra em contexto.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 990,
+    letterPosition: 31,
+    upper: "Э",
+    letter: "э",
+    mode: "cursive",
+    stageNumber: 14,
+    stageCode: "ditado",
+    stageTitle: "Escrever por ditado",
+    level: "B1",
+    target: "это",
+    word: "это",
+    translation: "isto",
+    sound: "é aberto",
+    prompt: "Escrever por ditado: pratique Э э em letra cursiva. Ouça o modelo e escreva sem olhar; depois compare.",
+    objective: "Recuperar a grafia pela memória.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 991,
+    letterPosition: 31,
+    upper: "Э",
+    letter: "э",
+    mode: "cursive",
+    stageNumber: 15,
+    stageCode: "fluencia",
+    stageTitle: "Treino de fluência",
+    level: "B2",
+    target: "это",
+    word: "это",
+    translation: "isto",
+    sound: "é aberto",
+    prompt: "Treino de fluência: pratique Э э em letra cursiva. Escreva com tempo controlado sem sacrificar clareza.",
+    objective: "Ganhar velocidade com legibilidade.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 992,
+    letterPosition: 31,
+    upper: "Э",
+    letter: "э",
+    mode: "cursive",
+    stageNumber: 16,
+    stageCode: "producao",
+    stageTitle: "Produção livre",
+    level: "C1",
+    target: "Я пишу слово «это».",
+    word: "это",
+    translation: "isto",
+    sound: "é aberto",
+    prompt: "Produção livre: pratique Э э em letra cursiva. Crie uma frase curta usando a palavra-modelo.",
+    objective: "Usar a escrita de maneira independente.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 993,
+    letterPosition: 32,
+    upper: "Ю",
+    letter: "ю",
+    mode: "print",
+    stageNumber: 1,
+    stageCode: "observacao",
+    stageTitle: "Observar proporções",
+    level: "A1",
+    target: "ююююю",
+    word: "юг",
+    translation: "sul",
+    sound: "iu",
+    prompt: "Observar proporções: pratique Ю ю em letra de forma. Compare altura, largura, inclinação e posição na linha.",
+    objective: "Reconhecer a forma antes de escrever.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 994,
+    letterPosition: 32,
+    upper: "Ю",
+    letter: "ю",
+    mode: "print",
+    stageNumber: 2,
+    stageCode: "movimento_ar",
+    stageTitle: "Desenhar no ar",
+    level: "A1",
+    target: "ююююю",
+    word: "юг",
+    translation: "sul",
+    sound: "iu",
+    prompt: "Desenhar no ar: pratique Ю ю em letra de forma. Faça o movimento amplo com o braço antes de usar o lápis.",
+    objective: "Memorizar a direção geral do traço.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 995,
+    letterPosition: 32,
+    upper: "Ю",
+    letter: "ю",
+    mode: "print",
+    stageNumber: 3,
+    stageCode: "maiuscula_guiada",
+    stageTitle: "Traçar maiúscula",
+    level: "A1",
+    target: "ЮЮЮЮЮ",
+    word: "юг",
+    translation: "sul",
+    sound: "iu",
+    prompt: "Traçar maiúscula: pratique Ю ю em letra de forma. Passe sobre o modelo maiúsculo sem acelerar.",
+    objective: "Controlar início, direção e encerramento.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 996,
+    letterPosition: 32,
+    upper: "Ю",
+    letter: "ю",
+    mode: "print",
+    stageNumber: 4,
+    stageCode: "minuscula_guiada",
+    stageTitle: "Traçar minúscula",
+    level: "A1",
+    target: "ююююю",
+    word: "юг",
+    translation: "sul",
+    sound: "iu",
+    prompt: "Traçar minúscula: pratique Ю ю em letra de forma. Passe sobre o modelo minúsculo mantendo a altura.",
+    objective: "Dominar a forma usada dentro das palavras.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 997,
+    letterPosition: 32,
+    upper: "Ю",
+    letter: "ю",
+    mode: "print",
+    stageNumber: 5,
+    stageCode: "copia_isolada",
+    stageTitle: "Copiar isoladamente",
+    level: "A1",
+    target: "ююююю",
+    word: "юг",
+    translation: "sul",
+    sound: "iu",
+    prompt: "Copiar isoladamente: pratique Ю ю em letra de forma. Copie a letra cinco vezes ao lado do modelo.",
+    objective: "Manter tamanho e espaçamento consistentes.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 998,
+    letterPosition: 32,
+    upper: "Ю",
+    letter: "ю",
+    mode: "print",
+    stageNumber: 6,
+    stageCode: "ritmo",
+    stageTitle: "Criar ritmo",
+    level: "A2",
+    target: "юююю юююю юююю",
+    word: "юг",
+    translation: "sul",
+    sound: "iu",
+    prompt: "Criar ritmo: pratique Ю ю em letra de forma. Escreva uma linha contínua com intervalos regulares.",
+    objective: "Automatizar o movimento sem perder legibilidade.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 999,
+    letterPosition: 32,
+    upper: "Ю",
+    letter: "ю",
+    mode: "print",
+    stageNumber: 7,
+    stageCode: "ligacao_a",
+    stageTitle: "Ligar com а",
+    level: "A2",
+    target: "юа аю",
+    word: "юг",
+    translation: "sul",
+    sound: "iu",
+    prompt: "Ligar com а: pratique Ю ю em letra de forma. Pratique a ligação de entrada e saída com а.",
+    objective: "Aprender uma conexão frequente.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 1000,
+    letterPosition: 32,
+    upper: "Ю",
+    letter: "ю",
+    mode: "print",
+    stageNumber: 8,
+    stageCode: "ligacao_o",
+    stageTitle: "Ligar com о",
+    level: "A2",
+    target: "юо ою",
+    word: "юг",
+    translation: "sul",
+    sound: "iu",
+    prompt: "Ligar com о: pratique Ю ю em letra de forma. Pratique a ligação de entrada e saída com о.",
+    objective: "Evitar que as letras se encostem demais.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 1001,
+    letterPosition: 32,
+    upper: "Ю",
+    letter: "ю",
+    mode: "print",
+    stageNumber: 9,
+    stageCode: "ligacao_i",
+    stageTitle: "Ligar com и",
+    level: "A2",
+    target: "юи ию",
+    word: "юг",
+    translation: "sul",
+    sound: "iu",
+    prompt: "Ligar com и: pratique Ю ю em letra de forma. Pratique a ligação de entrada e saída com и.",
+    objective: "Manter o fluxo da cursiva.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 1002,
+    letterPosition: 32,
+    upper: "Ю",
+    letter: "ю",
+    mode: "print",
+    stageNumber: 10,
+    stageCode: "ligacao_m",
+    stageTitle: "Ligar com м",
+    level: "A2",
+    target: "юм мю",
+    word: "юг",
+    translation: "sul",
+    sound: "iu",
+    prompt: "Ligar com м: pratique Ю ю em letra de forma. Pratique a ligação de entrada e saída com м.",
+    objective: "Diferenciar arcos e hastes semelhantes.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 1003,
+    letterPosition: 32,
+    upper: "Ю",
+    letter: "ю",
+    mode: "print",
+    stageNumber: 11,
+    stageCode: "silaba",
+    stageTitle: "Copiar sílabas",
+    level: "A2",
+    target: "юа юо юу юи",
+    word: "юг",
+    translation: "sul",
+    sound: "iu",
+    prompt: "Copiar sílabas: pratique Ю ю em letra de forma. Copie sílabas curtas e leia em voz alta.",
+    objective: "Unir escrita, leitura e som.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 1004,
+    letterPosition: 32,
+    upper: "Ю",
+    letter: "ю",
+    mode: "print",
+    stageNumber: 12,
+    stageCode: "palavra",
+    stageTitle: "Copiar palavra",
+    level: "B1",
+    target: "юг",
+    word: "юг",
+    translation: "sul",
+    sound: "iu",
+    prompt: "Copiar palavra: pratique Ю ю em letra de forma. Copie a palavra-modelo e confira cada ligação.",
+    objective: "Aplicar a letra em vocabulário real.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 1005,
+    letterPosition: 32,
+    upper: "Ю",
+    letter: "ю",
+    mode: "print",
+    stageNumber: 13,
+    stageCode: "frase",
+    stageTitle: "Copiar frase",
+    level: "B1",
+    target: "Я пишу слово «юг».",
+    word: "юг",
+    translation: "sul",
+    sound: "iu",
+    prompt: "Copiar frase: pratique Ю ю em letra de forma. Copie uma frase curta sem interromper o ritmo.",
+    objective: "Aplicar a letra em contexto.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 1006,
+    letterPosition: 32,
+    upper: "Ю",
+    letter: "ю",
+    mode: "print",
+    stageNumber: 14,
+    stageCode: "ditado",
+    stageTitle: "Escrever por ditado",
+    level: "B1",
+    target: "юг",
+    word: "юг",
+    translation: "sul",
+    sound: "iu",
+    prompt: "Escrever por ditado: pratique Ю ю em letra de forma. Ouça o modelo e escreva sem olhar; depois compare.",
+    objective: "Recuperar a grafia pela memória.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 1007,
+    letterPosition: 32,
+    upper: "Ю",
+    letter: "ю",
+    mode: "print",
+    stageNumber: 15,
+    stageCode: "fluencia",
+    stageTitle: "Treino de fluência",
+    level: "B2",
+    target: "юг",
+    word: "юг",
+    translation: "sul",
+    sound: "iu",
+    prompt: "Treino de fluência: pratique Ю ю em letra de forma. Escreva com tempo controlado sem sacrificar clareza.",
+    objective: "Ganhar velocidade com legibilidade.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 1008,
+    letterPosition: 32,
+    upper: "Ю",
+    letter: "ю",
+    mode: "print",
+    stageNumber: 16,
+    stageCode: "producao",
+    stageTitle: "Produção livre",
+    level: "C1",
+    target: "Я пишу слово «юг».",
+    word: "юг",
+    translation: "sul",
+    sound: "iu",
+    prompt: "Produção livre: pratique Ю ю em letra de forma. Crie uma frase curta usando a palavra-modelo.",
+    objective: "Usar a escrita de maneira independente.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 1009,
+    letterPosition: 32,
+    upper: "Ю",
+    letter: "ю",
+    mode: "cursive",
+    stageNumber: 1,
+    stageCode: "observacao",
+    stageTitle: "Observar proporções",
+    level: "A1",
+    target: "ююююю",
+    word: "юг",
+    translation: "sul",
+    sound: "iu",
+    prompt: "Observar proporções: pratique Ю ю em letra cursiva. Compare altura, largura, inclinação e posição na linha.",
+    objective: "Reconhecer a forma antes de escrever.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 1010,
+    letterPosition: 32,
+    upper: "Ю",
+    letter: "ю",
+    mode: "cursive",
+    stageNumber: 2,
+    stageCode: "movimento_ar",
+    stageTitle: "Desenhar no ar",
+    level: "A1",
+    target: "ююююю",
+    word: "юг",
+    translation: "sul",
+    sound: "iu",
+    prompt: "Desenhar no ar: pratique Ю ю em letra cursiva. Faça o movimento amplo com o braço antes de usar o lápis.",
+    objective: "Memorizar a direção geral do traço.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 1011,
+    letterPosition: 32,
+    upper: "Ю",
+    letter: "ю",
+    mode: "cursive",
+    stageNumber: 3,
+    stageCode: "maiuscula_guiada",
+    stageTitle: "Traçar maiúscula",
+    level: "A1",
+    target: "ЮЮЮЮЮ",
+    word: "юг",
+    translation: "sul",
+    sound: "iu",
+    prompt: "Traçar maiúscula: pratique Ю ю em letra cursiva. Passe sobre o modelo maiúsculo sem acelerar.",
+    objective: "Controlar início, direção e encerramento.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 1012,
+    letterPosition: 32,
+    upper: "Ю",
+    letter: "ю",
+    mode: "cursive",
+    stageNumber: 4,
+    stageCode: "minuscula_guiada",
+    stageTitle: "Traçar minúscula",
+    level: "A1",
+    target: "ююююю",
+    word: "юг",
+    translation: "sul",
+    sound: "iu",
+    prompt: "Traçar minúscula: pratique Ю ю em letra cursiva. Passe sobre o modelo minúsculo mantendo a altura.",
+    objective: "Dominar a forma usada dentro das palavras.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 1013,
+    letterPosition: 32,
+    upper: "Ю",
+    letter: "ю",
+    mode: "cursive",
+    stageNumber: 5,
+    stageCode: "copia_isolada",
+    stageTitle: "Copiar isoladamente",
+    level: "A1",
+    target: "ююююю",
+    word: "юг",
+    translation: "sul",
+    sound: "iu",
+    prompt: "Copiar isoladamente: pratique Ю ю em letra cursiva. Copie a letra cinco vezes ao lado do modelo.",
+    objective: "Manter tamanho e espaçamento consistentes.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 1014,
+    letterPosition: 32,
+    upper: "Ю",
+    letter: "ю",
+    mode: "cursive",
+    stageNumber: 6,
+    stageCode: "ritmo",
+    stageTitle: "Criar ritmo",
+    level: "A2",
+    target: "юююю юююю юююю",
+    word: "юг",
+    translation: "sul",
+    sound: "iu",
+    prompt: "Criar ritmo: pratique Ю ю em letra cursiva. Escreva uma linha contínua com intervalos regulares.",
+    objective: "Automatizar o movimento sem perder legibilidade.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 1015,
+    letterPosition: 32,
+    upper: "Ю",
+    letter: "ю",
+    mode: "cursive",
+    stageNumber: 7,
+    stageCode: "ligacao_a",
+    stageTitle: "Ligar com а",
+    level: "A2",
+    target: "юа аю",
+    word: "юг",
+    translation: "sul",
+    sound: "iu",
+    prompt: "Ligar com а: pratique Ю ю em letra cursiva. Pratique a ligação de entrada e saída com а.",
+    objective: "Aprender uma conexão frequente.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 1016,
+    letterPosition: 32,
+    upper: "Ю",
+    letter: "ю",
+    mode: "cursive",
+    stageNumber: 8,
+    stageCode: "ligacao_o",
+    stageTitle: "Ligar com о",
+    level: "A2",
+    target: "юо ою",
+    word: "юг",
+    translation: "sul",
+    sound: "iu",
+    prompt: "Ligar com о: pratique Ю ю em letra cursiva. Pratique a ligação de entrada e saída com о.",
+    objective: "Evitar que as letras se encostem demais.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 1017,
+    letterPosition: 32,
+    upper: "Ю",
+    letter: "ю",
+    mode: "cursive",
+    stageNumber: 9,
+    stageCode: "ligacao_i",
+    stageTitle: "Ligar com и",
+    level: "A2",
+    target: "юи ию",
+    word: "юг",
+    translation: "sul",
+    sound: "iu",
+    prompt: "Ligar com и: pratique Ю ю em letra cursiva. Pratique a ligação de entrada e saída com и.",
+    objective: "Manter o fluxo da cursiva.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 1018,
+    letterPosition: 32,
+    upper: "Ю",
+    letter: "ю",
+    mode: "cursive",
+    stageNumber: 10,
+    stageCode: "ligacao_m",
+    stageTitle: "Ligar com м",
+    level: "A2",
+    target: "юм мю",
+    word: "юг",
+    translation: "sul",
+    sound: "iu",
+    prompt: "Ligar com м: pratique Ю ю em letra cursiva. Pratique a ligação de entrada e saída com м.",
+    objective: "Diferenciar arcos e hastes semelhantes.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 1019,
+    letterPosition: 32,
+    upper: "Ю",
+    letter: "ю",
+    mode: "cursive",
+    stageNumber: 11,
+    stageCode: "silaba",
+    stageTitle: "Copiar sílabas",
+    level: "A2",
+    target: "юа юо юу юи",
+    word: "юг",
+    translation: "sul",
+    sound: "iu",
+    prompt: "Copiar sílabas: pratique Ю ю em letra cursiva. Copie sílabas curtas e leia em voz alta.",
+    objective: "Unir escrita, leitura e som.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 1020,
+    letterPosition: 32,
+    upper: "Ю",
+    letter: "ю",
+    mode: "cursive",
+    stageNumber: 12,
+    stageCode: "palavra",
+    stageTitle: "Copiar palavra",
+    level: "B1",
+    target: "юг",
+    word: "юг",
+    translation: "sul",
+    sound: "iu",
+    prompt: "Copiar palavra: pratique Ю ю em letra cursiva. Copie a palavra-modelo e confira cada ligação.",
+    objective: "Aplicar a letra em vocabulário real.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 1021,
+    letterPosition: 32,
+    upper: "Ю",
+    letter: "ю",
+    mode: "cursive",
+    stageNumber: 13,
+    stageCode: "frase",
+    stageTitle: "Copiar frase",
+    level: "B1",
+    target: "Я пишу слово «юг».",
+    word: "юг",
+    translation: "sul",
+    sound: "iu",
+    prompt: "Copiar frase: pratique Ю ю em letra cursiva. Copie uma frase curta sem interromper o ritmo.",
+    objective: "Aplicar a letra em contexto.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 1022,
+    letterPosition: 32,
+    upper: "Ю",
+    letter: "ю",
+    mode: "cursive",
+    stageNumber: 14,
+    stageCode: "ditado",
+    stageTitle: "Escrever por ditado",
+    level: "B1",
+    target: "юг",
+    word: "юг",
+    translation: "sul",
+    sound: "iu",
+    prompt: "Escrever por ditado: pratique Ю ю em letra cursiva. Ouça o modelo e escreva sem olhar; depois compare.",
+    objective: "Recuperar a grafia pela memória.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 1023,
+    letterPosition: 32,
+    upper: "Ю",
+    letter: "ю",
+    mode: "cursive",
+    stageNumber: 15,
+    stageCode: "fluencia",
+    stageTitle: "Treino de fluência",
+    level: "B2",
+    target: "юг",
+    word: "юг",
+    translation: "sul",
+    sound: "iu",
+    prompt: "Treino de fluência: pratique Ю ю em letra cursiva. Escreva com tempo controlado sem sacrificar clareza.",
+    objective: "Ganhar velocidade com legibilidade.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 1024,
+    letterPosition: 32,
+    upper: "Ю",
+    letter: "ю",
+    mode: "cursive",
+    stageNumber: 16,
+    stageCode: "producao",
+    stageTitle: "Produção livre",
+    level: "C1",
+    target: "Я пишу слово «юг».",
+    word: "юг",
+    translation: "sul",
+    sound: "iu",
+    prompt: "Produção livre: pratique Ю ю em letra cursiva. Crie uma frase curta usando a palavra-modelo.",
+    objective: "Usar a escrita de maneira independente.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 1025,
+    letterPosition: 33,
+    upper: "Я",
+    letter: "я",
+    mode: "print",
+    stageNumber: 1,
+    stageCode: "observacao",
+    stageTitle: "Observar proporções",
+    level: "A1",
+    target: "яяяяя",
+    word: "яблоко",
+    translation: "maçã",
+    sound: "ia",
+    prompt: "Observar proporções: pratique Я я em letra de forma. Compare altura, largura, inclinação e posição na linha.",
+    objective: "Reconhecer a forma antes de escrever.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 1026,
+    letterPosition: 33,
+    upper: "Я",
+    letter: "я",
+    mode: "print",
+    stageNumber: 2,
+    stageCode: "movimento_ar",
+    stageTitle: "Desenhar no ar",
+    level: "A1",
+    target: "яяяяя",
+    word: "яблоко",
+    translation: "maçã",
+    sound: "ia",
+    prompt: "Desenhar no ar: pratique Я я em letra de forma. Faça o movimento amplo com o braço antes de usar o lápis.",
+    objective: "Memorizar a direção geral do traço.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 1027,
+    letterPosition: 33,
+    upper: "Я",
+    letter: "я",
+    mode: "print",
+    stageNumber: 3,
+    stageCode: "maiuscula_guiada",
+    stageTitle: "Traçar maiúscula",
+    level: "A1",
+    target: "ЯЯЯЯЯ",
+    word: "яблоко",
+    translation: "maçã",
+    sound: "ia",
+    prompt: "Traçar maiúscula: pratique Я я em letra de forma. Passe sobre o modelo maiúsculo sem acelerar.",
+    objective: "Controlar início, direção e encerramento.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 1028,
+    letterPosition: 33,
+    upper: "Я",
+    letter: "я",
+    mode: "print",
+    stageNumber: 4,
+    stageCode: "minuscula_guiada",
+    stageTitle: "Traçar minúscula",
+    level: "A1",
+    target: "яяяяя",
+    word: "яблоко",
+    translation: "maçã",
+    sound: "ia",
+    prompt: "Traçar minúscula: pratique Я я em letra de forma. Passe sobre o modelo minúsculo mantendo a altura.",
+    objective: "Dominar a forma usada dentro das palavras.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 1029,
+    letterPosition: 33,
+    upper: "Я",
+    letter: "я",
+    mode: "print",
+    stageNumber: 5,
+    stageCode: "copia_isolada",
+    stageTitle: "Copiar isoladamente",
+    level: "A1",
+    target: "яяяяя",
+    word: "яблоко",
+    translation: "maçã",
+    sound: "ia",
+    prompt: "Copiar isoladamente: pratique Я я em letra de forma. Copie a letra cinco vezes ao lado do modelo.",
+    objective: "Manter tamanho e espaçamento consistentes.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 1030,
+    letterPosition: 33,
+    upper: "Я",
+    letter: "я",
+    mode: "print",
+    stageNumber: 6,
+    stageCode: "ritmo",
+    stageTitle: "Criar ritmo",
+    level: "A2",
+    target: "яяяя яяяя яяяя",
+    word: "яблоко",
+    translation: "maçã",
+    sound: "ia",
+    prompt: "Criar ritmo: pratique Я я em letra de forma. Escreva uma linha contínua com intervalos regulares.",
+    objective: "Automatizar o movimento sem perder legibilidade.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 1031,
+    letterPosition: 33,
+    upper: "Я",
+    letter: "я",
+    mode: "print",
+    stageNumber: 7,
+    stageCode: "ligacao_a",
+    stageTitle: "Ligar com а",
+    level: "A2",
+    target: "яа ая",
+    word: "яблоко",
+    translation: "maçã",
+    sound: "ia",
+    prompt: "Ligar com а: pratique Я я em letra de forma. Pratique a ligação de entrada e saída com а.",
+    objective: "Aprender uma conexão frequente.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 1032,
+    letterPosition: 33,
+    upper: "Я",
+    letter: "я",
+    mode: "print",
+    stageNumber: 8,
+    stageCode: "ligacao_o",
+    stageTitle: "Ligar com о",
+    level: "A2",
+    target: "яо оя",
+    word: "яблоко",
+    translation: "maçã",
+    sound: "ia",
+    prompt: "Ligar com о: pratique Я я em letra de forma. Pratique a ligação de entrada e saída com о.",
+    objective: "Evitar que as letras se encostem demais.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 1033,
+    letterPosition: 33,
+    upper: "Я",
+    letter: "я",
+    mode: "print",
+    stageNumber: 9,
+    stageCode: "ligacao_i",
+    stageTitle: "Ligar com и",
+    level: "A2",
+    target: "яи ия",
+    word: "яблоко",
+    translation: "maçã",
+    sound: "ia",
+    prompt: "Ligar com и: pratique Я я em letra de forma. Pratique a ligação de entrada e saída com и.",
+    objective: "Manter o fluxo da cursiva.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 1034,
+    letterPosition: 33,
+    upper: "Я",
+    letter: "я",
+    mode: "print",
+    stageNumber: 10,
+    stageCode: "ligacao_m",
+    stageTitle: "Ligar com м",
+    level: "A2",
+    target: "ям мя",
+    word: "яблоко",
+    translation: "maçã",
+    sound: "ia",
+    prompt: "Ligar com м: pratique Я я em letra de forma. Pratique a ligação de entrada e saída com м.",
+    objective: "Diferenciar arcos e hastes semelhantes.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 1035,
+    letterPosition: 33,
+    upper: "Я",
+    letter: "я",
+    mode: "print",
+    stageNumber: 11,
+    stageCode: "silaba",
+    stageTitle: "Copiar sílabas",
+    level: "A2",
+    target: "яа яо яу яи",
+    word: "яблоко",
+    translation: "maçã",
+    sound: "ia",
+    prompt: "Copiar sílabas: pratique Я я em letra de forma. Copie sílabas curtas e leia em voz alta.",
+    objective: "Unir escrita, leitura e som.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 1036,
+    letterPosition: 33,
+    upper: "Я",
+    letter: "я",
+    mode: "print",
+    stageNumber: 12,
+    stageCode: "palavra",
+    stageTitle: "Copiar palavra",
+    level: "B1",
+    target: "яблоко",
+    word: "яблоко",
+    translation: "maçã",
+    sound: "ia",
+    prompt: "Copiar palavra: pratique Я я em letra de forma. Copie a palavra-modelo e confira cada ligação.",
+    objective: "Aplicar a letra em vocabulário real.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 1037,
+    letterPosition: 33,
+    upper: "Я",
+    letter: "я",
+    mode: "print",
+    stageNumber: 13,
+    stageCode: "frase",
+    stageTitle: "Copiar frase",
+    level: "B1",
+    target: "Я пишу слово «яблоко».",
+    word: "яблоко",
+    translation: "maçã",
+    sound: "ia",
+    prompt: "Copiar frase: pratique Я я em letra de forma. Copie uma frase curta sem interromper o ritmo.",
+    objective: "Aplicar a letra em contexto.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 1038,
+    letterPosition: 33,
+    upper: "Я",
+    letter: "я",
+    mode: "print",
+    stageNumber: 14,
+    stageCode: "ditado",
+    stageTitle: "Escrever por ditado",
+    level: "B1",
+    target: "яблоко",
+    word: "яблоко",
+    translation: "maçã",
+    sound: "ia",
+    prompt: "Escrever por ditado: pratique Я я em letra de forma. Ouça o modelo e escreva sem olhar; depois compare.",
+    objective: "Recuperar a grafia pela memória.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 1039,
+    letterPosition: 33,
+    upper: "Я",
+    letter: "я",
+    mode: "print",
+    stageNumber: 15,
+    stageCode: "fluencia",
+    stageTitle: "Treino de fluência",
+    level: "B2",
+    target: "яблоко",
+    word: "яблоко",
+    translation: "maçã",
+    sound: "ia",
+    prompt: "Treino de fluência: pratique Я я em letra de forma. Escreva com tempo controlado sem sacrificar clareza.",
+    objective: "Ganhar velocidade com legibilidade.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 1040,
+    letterPosition: 33,
+    upper: "Я",
+    letter: "я",
+    mode: "print",
+    stageNumber: 16,
+    stageCode: "producao",
+    stageTitle: "Produção livre",
+    level: "C1",
+    target: "Я пишу слово «яблоко».",
+    word: "яблоко",
+    translation: "maçã",
+    sound: "ia",
+    prompt: "Produção livre: pratique Я я em letra de forma. Crie uma frase curta usando a palavra-modelo.",
+    objective: "Usar a escrita de maneira independente.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 1041,
+    letterPosition: 33,
+    upper: "Я",
+    letter: "я",
+    mode: "cursive",
+    stageNumber: 1,
+    stageCode: "observacao",
+    stageTitle: "Observar proporções",
+    level: "A1",
+    target: "яяяяя",
+    word: "яблоко",
+    translation: "maçã",
+    sound: "ia",
+    prompt: "Observar proporções: pratique Я я em letra cursiva. Compare altura, largura, inclinação e posição na linha.",
+    objective: "Reconhecer a forma antes de escrever.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 1042,
+    letterPosition: 33,
+    upper: "Я",
+    letter: "я",
+    mode: "cursive",
+    stageNumber: 2,
+    stageCode: "movimento_ar",
+    stageTitle: "Desenhar no ar",
+    level: "A1",
+    target: "яяяяя",
+    word: "яблоко",
+    translation: "maçã",
+    sound: "ia",
+    prompt: "Desenhar no ar: pratique Я я em letra cursiva. Faça o movimento amplo com o braço antes de usar o lápis.",
+    objective: "Memorizar a direção geral do traço.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 1043,
+    letterPosition: 33,
+    upper: "Я",
+    letter: "я",
+    mode: "cursive",
+    stageNumber: 3,
+    stageCode: "maiuscula_guiada",
+    stageTitle: "Traçar maiúscula",
+    level: "A1",
+    target: "ЯЯЯЯЯ",
+    word: "яблоко",
+    translation: "maçã",
+    sound: "ia",
+    prompt: "Traçar maiúscula: pratique Я я em letra cursiva. Passe sobre o modelo maiúsculo sem acelerar.",
+    objective: "Controlar início, direção e encerramento.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 1044,
+    letterPosition: 33,
+    upper: "Я",
+    letter: "я",
+    mode: "cursive",
+    stageNumber: 4,
+    stageCode: "minuscula_guiada",
+    stageTitle: "Traçar minúscula",
+    level: "A1",
+    target: "яяяяя",
+    word: "яблоко",
+    translation: "maçã",
+    sound: "ia",
+    prompt: "Traçar minúscula: pratique Я я em letra cursiva. Passe sobre o modelo minúsculo mantendo a altura.",
+    objective: "Dominar a forma usada dentro das palavras.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 1045,
+    letterPosition: 33,
+    upper: "Я",
+    letter: "я",
+    mode: "cursive",
+    stageNumber: 5,
+    stageCode: "copia_isolada",
+    stageTitle: "Copiar isoladamente",
+    level: "A1",
+    target: "яяяяя",
+    word: "яблоко",
+    translation: "maçã",
+    sound: "ia",
+    prompt: "Copiar isoladamente: pratique Я я em letra cursiva. Copie a letra cinco vezes ao lado do modelo.",
+    objective: "Manter tamanho e espaçamento consistentes.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 1046,
+    letterPosition: 33,
+    upper: "Я",
+    letter: "я",
+    mode: "cursive",
+    stageNumber: 6,
+    stageCode: "ritmo",
+    stageTitle: "Criar ritmo",
+    level: "A2",
+    target: "яяяя яяяя яяяя",
+    word: "яблоко",
+    translation: "maçã",
+    sound: "ia",
+    prompt: "Criar ritmo: pratique Я я em letra cursiva. Escreva uma linha contínua com intervalos regulares.",
+    objective: "Automatizar o movimento sem perder legibilidade.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 1047,
+    letterPosition: 33,
+    upper: "Я",
+    letter: "я",
+    mode: "cursive",
+    stageNumber: 7,
+    stageCode: "ligacao_a",
+    stageTitle: "Ligar com а",
+    level: "A2",
+    target: "яа ая",
+    word: "яблоко",
+    translation: "maçã",
+    sound: "ia",
+    prompt: "Ligar com а: pratique Я я em letra cursiva. Pratique a ligação de entrada e saída com а.",
+    objective: "Aprender uma conexão frequente.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 1048,
+    letterPosition: 33,
+    upper: "Я",
+    letter: "я",
+    mode: "cursive",
+    stageNumber: 8,
+    stageCode: "ligacao_o",
+    stageTitle: "Ligar com о",
+    level: "A2",
+    target: "яо оя",
+    word: "яблоко",
+    translation: "maçã",
+    sound: "ia",
+    prompt: "Ligar com о: pratique Я я em letra cursiva. Pratique a ligação de entrada e saída com о.",
+    objective: "Evitar que as letras se encostem demais.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 1049,
+    letterPosition: 33,
+    upper: "Я",
+    letter: "я",
+    mode: "cursive",
+    stageNumber: 9,
+    stageCode: "ligacao_i",
+    stageTitle: "Ligar com и",
+    level: "A2",
+    target: "яи ия",
+    word: "яблоко",
+    translation: "maçã",
+    sound: "ia",
+    prompt: "Ligar com и: pratique Я я em letra cursiva. Pratique a ligação de entrada e saída com и.",
+    objective: "Manter o fluxo da cursiva.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 1050,
+    letterPosition: 33,
+    upper: "Я",
+    letter: "я",
+    mode: "cursive",
+    stageNumber: 10,
+    stageCode: "ligacao_m",
+    stageTitle: "Ligar com м",
+    level: "A2",
+    target: "ям мя",
+    word: "яблоко",
+    translation: "maçã",
+    sound: "ia",
+    prompt: "Ligar com м: pratique Я я em letra cursiva. Pratique a ligação de entrada e saída com м.",
+    objective: "Diferenciar arcos e hastes semelhantes.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 1051,
+    letterPosition: 33,
+    upper: "Я",
+    letter: "я",
+    mode: "cursive",
+    stageNumber: 11,
+    stageCode: "silaba",
+    stageTitle: "Copiar sílabas",
+    level: "A2",
+    target: "яа яо яу яи",
+    word: "яблоко",
+    translation: "maçã",
+    sound: "ia",
+    prompt: "Copiar sílabas: pratique Я я em letra cursiva. Copie sílabas curtas e leia em voz alta.",
+    objective: "Unir escrita, leitura e som.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 1052,
+    letterPosition: 33,
+    upper: "Я",
+    letter: "я",
+    mode: "cursive",
+    stageNumber: 12,
+    stageCode: "palavra",
+    stageTitle: "Copiar palavra",
+    level: "B1",
+    target: "яблоко",
+    word: "яблоко",
+    translation: "maçã",
+    sound: "ia",
+    prompt: "Copiar palavra: pratique Я я em letra cursiva. Copie a palavra-modelo e confira cada ligação.",
+    objective: "Aplicar a letra em vocabulário real.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 1053,
+    letterPosition: 33,
+    upper: "Я",
+    letter: "я",
+    mode: "cursive",
+    stageNumber: 13,
+    stageCode: "frase",
+    stageTitle: "Copiar frase",
+    level: "B1",
+    target: "Я пишу слово «яблоко».",
+    word: "яблоко",
+    translation: "maçã",
+    sound: "ia",
+    prompt: "Copiar frase: pratique Я я em letra cursiva. Copie uma frase curta sem interromper o ritmo.",
+    objective: "Aplicar a letra em contexto.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 1054,
+    letterPosition: 33,
+    upper: "Я",
+    letter: "я",
+    mode: "cursive",
+    stageNumber: 14,
+    stageCode: "ditado",
+    stageTitle: "Escrever por ditado",
+    level: "B1",
+    target: "яблоко",
+    word: "яблоко",
+    translation: "maçã",
+    sound: "ia",
+    prompt: "Escrever por ditado: pratique Я я em letra cursiva. Ouça o modelo e escreva sem olhar; depois compare.",
+    objective: "Recuperar a grafia pela memória.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 1055,
+    letterPosition: 33,
+    upper: "Я",
+    letter: "я",
+    mode: "cursive",
+    stageNumber: 15,
+    stageCode: "fluencia",
+    stageTitle: "Treino de fluência",
+    level: "B2",
+    target: "яблоко",
+    word: "яблоко",
+    translation: "maçã",
+    sound: "ia",
+    prompt: "Treino de fluência: pratique Я я em letra cursiva. Escreva com tempo controlado sem sacrificar clareza.",
+    objective: "Ganhar velocidade com legibilidade.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+  {
+    id: 1056,
+    letterPosition: 33,
+    upper: "Я",
+    letter: "я",
+    mode: "cursive",
+    stageNumber: 16,
+    stageCode: "producao",
+    stageTitle: "Produção livre",
+    level: "C1",
+    target: "Я пишу слово «яблоко».",
+    word: "яблоко",
+    translation: "maçã",
+    sound: "ia",
+    prompt: "Produção livre: pratique Я я em letra cursiva. Crie uma frase curta usando a palavra-modelo.",
+    objective: "Usar a escrita de maneira independente.",
+    rubric: "Observe proporção, linha de base, espaçamento, direção e legibilidade."
+  },
+];
+module.exports.PUTIRUSU_WRITING_CURRICULUM = PUTIRUSU_WRITING_CURRICULUM;
