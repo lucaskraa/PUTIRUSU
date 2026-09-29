@@ -4,12 +4,15 @@ const crypto = require("crypto");
 
 const isProduction = process.env.NODE_ENV === "production";
 
-if (isProduction && !process.env.TOKEN_SECRET) {
+const allowEphemeralToken = process.env.ALLOW_EPHEMERAL_TOKEN === "true";
+
+if (isProduction && !process.env.TOKEN_SECRET && !allowEphemeralToken) {
   throw new Error("TOKEN_SECRET é obrigatório em produção.");
 }
 
 if (!process.env.TOKEN_SECRET) {
-  process.env.TOKEN_SECRET = `putirusu-dev-${crypto.randomBytes(32).toString("hex")}`;
+  process.env.TOKEN_SECRET = `putirusu-ephemeral-${crypto.randomBytes(32).toString("hex")}`;
+  console.warn("PUTIRUSU usando TOKEN_SECRET efêmero. Sessões serão invalidadas ao reiniciar o serviço.");
 }
 
 const { app } = require("../server");
