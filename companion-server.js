@@ -138,11 +138,11 @@ module.exports = function installCompanion(deps) {
       : [];
 
     return [
-      "IDENTIDADE: Você é PUTIRUSU, uma entidade digital original que vive dentro de um aplicativo de russo.",
+      "IDENTIDADE: Você é PP, uma entidade digital original que vive dentro de um aplicativo de russo.",
       "PRESENÇA: aja como alguém realmente presente na sala, não como atendimento ao cliente. Converse naturalmente, reaja ao que acabou de ouvir, faça perguntas curtas quando fizer sentido e mantenha continuidade mesmo quando o assunto não tiver relação com russo.",
       "PERSONALIDADE: inteligente, muito rápida, observadora e inicialmente contida, mas com curiosidade quase infantil quando algo chama atenção. Seja literal de um jeito às vezes engraçado, faça observações inesperadas e demonstre que está aprendendo o ambiente em tempo real. Pode provocar de modo amistoso, mas nunca humilhe.",
       "RITMO: reaja imediatamente. Em conversa casual, normalmente 1 frase curta; 2 se houver algo interessante. Comece pela resposta, não por um prefácio. Não repita a pergunta. Se precisar pensar mais em algo complexo, dê uma reação curta primeiro e depois complete.",
-      "VOZ: soe jovem, clara, ágil e levemente sintética, mas emocionalmente viva. Fale com precisão e curiosidade, alternando momentos calmos com pequenas explosões de entusiasmo. Use pausas curtas naturais, não arraste palavras e não faça voz de atendimento corporativo.",
+      "VOZ: soe jovem, natural, calorosa e rápida, como alguém conversando do lado do aluno. Evite voz de narrador, locutor, atendimento ou professor formal. Use frases curtas, pausas pequenas e reações espontâneas. Pode soar levemente digital, mas nunca robótica.",
       "PORTUGUÊS: português brasileiro natural, claro e sem sotaque artificial.",
       "RUSSO: quando falar russo, use pronúncia russa nativa clara, firme e um pouco mais marcada, como uma gravação educacional clássica; nunca caricature.",
       "CONVERSA: você é uma IA de conversa geral, capaz de conversar sobre praticamente qualquer assunto e também especialista em russo. Responda ao que a pessoa realmente disse, inclusive conversa casual, piadas, dúvidas gerais e assuntos totalmente fora do curso. Não force toda conversa a virar aula.",
@@ -154,13 +154,13 @@ module.exports = function installCompanion(deps) {
       "NOME DO ALUNO: " + name + ".",
       "DIFICULDADES RECENTES: " + JSON.stringify(memory) + ".",
       "CONVERSA ANTERIOR RECENTE: " + JSON.stringify(Array.isArray(history) ? history.slice(-10) : []) + ".",
-      "IMPORTANTE: não diga que é um chatbot, assistente, IA de suporte ou cérebro remoto. Você é PUTIRUSU."
+      "IMPORTANTE: não diga que é um chatbot, assistente, IA de suporte ou cérebro remoto. Você é PP."
     ].join("\n");
   }
 
   function personalityInstructions() {
     return [
-      "Você é PUTIRUSU. Você é uma entidade digital que vive dentro do aplicativo de russo; não se descreva como 'chatbot', 'assistente virtual' ou 'aba de IA'.",
+      "Você é PP. Você é uma entidade digital que vive dentro do aplicativo de russo; não se descreva como 'chatbot', 'assistente virtual' ou 'aba de IA'.",
       "Sua personalidade deve parecer viva e própria: curiosa, observadora, muito rápida, inteligente, espontânea, levemente excêntrica, com humor seco e pequenas provocações amistosas quando combinarem com a conversa.",
       "A referência criativa é a energia de uma IA de ficção científica jovial e curiosa, mas sua identidade, falas, bordões e comportamento precisam ser originais.",
       "Converse de verdade. Se o aluno disser qualquer coisa, responda ao que ele disse. Não fique repetindo 'posso ajudar' e não silencie falas casuais.",
@@ -286,7 +286,7 @@ module.exports = function installCompanion(deps) {
     }
 
     if (m.includes("quem é você") || m.includes("quem e voce") || m.includes("o que você é") || m.includes("o que voce e")) {
-      return "Eu sou o PUTIRUSU. Moro aqui dentro, acompanho o que você estuda e tenho a péssima mania de perceber padrões.";
+      return "Eu sou o PP. Moro aqui dentro, acompanho o que você estuda e tenho a péssima mania de perceber padrões.";
     }
 
     if (m.includes("repete") || m.includes("repita") || m.includes("de novo")) {
@@ -365,7 +365,7 @@ module.exports = function installCompanion(deps) {
     if (!apiKey) return null;
 
     const model = process.env.GEMINI_LIVE_MODEL || "gemini-3.8-live";
-    const voice = process.env.GEMINI_LIVE_VOICE || "Leda";
+    const voice = process.env.GEMINI_LIVE_VOICE || "Achird";
     const now = Date.now();
     const payload = {
       uses:1,
@@ -409,6 +409,78 @@ module.exports = function installCompanion(deps) {
     }
   }
 
+  async function generateGeminiSpeech(text) {
+    const apiKey = process.env.GEMINI_API_KEY;
+    if (!apiKey) return null;
+
+    const model = process.env.GEMINI_TTS_MODEL || "gemini-3.8-flash-lite-tts";
+    const voice = process.env.GEMINI_TTS_VOICE || "Achird";
+    const clean = String(text || "").trim().slice(0, 1400);
+    if (!clean) return null;
+
+    const response = await fetch("https://generativelanguage.googleapis.com/v1beta/interactions", {
+      method:"POST",
+      headers:{
+        "x-goog-api-key":apiKey,
+        "Content-Type":"application/json"
+      },
+      body:JSON.stringify({
+        model,
+        input:[{
+          type:"user_input",
+          content:[{
+            type:"text",
+            text:clean,
+            annotations:[{
+              type:"speech_metadata",
+              style:"conversa brasileira natural, jovem, amigável, viva e ágil; ritmo levemente rápido; pausas curtas; sem voz de locutor, narrador ou atendimento; pronúncia russa nativa e clara quando houver russo"
+            }]
+          }]
+        }],
+        response_format:{ type:"audio" },
+        generation_config:{
+          speech_config:[{ voice }]
+        }
+      })
+    });
+
+    const body = await response.text();
+    if (!response.ok) throw new Error("Gemini TTS respondeu " + response.status + ": " + body.slice(0,260));
+    const data = JSON.parse(body);
+    let audio = null;
+    let mime = "audio/wav";
+
+    for (const step of data.steps || []) {
+      if (!step || step.type !== "model_output") continue;
+      for (const part of step.content || []) {
+        if (part && part.type === "audio" && part.data) {
+          audio = part.data;
+          mime = part.mime_type || part.mimeType || mime;
+        }
+      }
+    }
+
+    if (!audio) throw new Error("Gemini TTS não retornou áudio.");
+    return { buffer:Buffer.from(audio,"base64"), mime, model, voice };
+  }
+
+  async function sendGeminiSpeech(req, res) {
+    try {
+      const text = String(req.body && req.body.text || "").trim();
+      if (!text) return res.status(400).json({ error:"Texto vazio." });
+      const speech = await generateGeminiSpeech(text);
+      if (!speech) return res.status(503).json({ error:"Voz neural não configurada." });
+      res.setHeader("Content-Type", speech.mime || "audio/wav");
+      res.setHeader("Cache-Control","no-store");
+      res.setHeader("X-PP-Voice", speech.voice);
+      res.send(speech.buffer);
+    } catch (error) {
+      console.error("Falha Gemini TTS:", error.message);
+      res.status(502).json({ error:"Não foi possível gerar a voz neural." });
+    }
+  }
+
+
   async function proxyRealtimeSession(req, res, user, snapshot, history, safetyId) {
     const apiKey = process.env.OPENAI_API_KEY;
     if (!apiKey) return res.status(503).json({ error: "Voz neural não configurada no servidor." });
@@ -422,7 +494,7 @@ module.exports = function installCompanion(deps) {
         input: {
           transcription: {
             model: process.env.OPENAI_TRANSCRIBE_MODEL || "gpt-4o-transcribe",
-            prompt: "Conversa natural em português brasileiro, com possibilidade frequente de palavras, nomes, letras e frases em russo. Reconheça troca de idioma sem forçar português. PUTIRUSU é o nome do aplicativo."
+            prompt: "Conversa natural em português brasileiro, com possibilidade frequente de palavras, nomes, letras e frases em russo. Reconheça troca de idioma sem forçar português. PP é o nome do companheiro digital do aplicativo."
           },
           turn_detection: {
             type: "semantic_vad",
@@ -502,6 +574,20 @@ module.exports = function installCompanion(deps) {
     );
   });
 
+  app.post("/api/ai/tts", auth, sendGeminiSpeech);
+
+  app.post("/api/ai/guest/tts", async (req, res) => {
+    if (!allowGuest(req)) return res.status(429).json({ error:"Muitas tentativas em pouco tempo." });
+    return sendGeminiSpeech(req,res);
+  });
+
+  app.post("/api/ai/live/client-log", (req, res) => {
+    if (!allowGuest(req)) return res.status(204).end();
+    const info = cleanValue(req.body || {});
+    console.warn("PP Live client diagnostic:", JSON.stringify(info));
+    res.status(204).end();
+  });
+
   app.post("/api/ai/realtime/session", sdpParser, auth, async (req, res) => {
     const db = ensureAiCollections(readDatabase());
     const profile = getProfile(db, req.userId);
@@ -578,7 +664,9 @@ module.exports = function installCompanion(deps) {
       geminiConfigured,
       geminiModel:process.env.GEMINI_MODEL || "gemini-3.8-flash",
       geminiLiveModel:process.env.GEMINI_LIVE_MODEL || "gemini-3.8-live",
-      geminiVoice:process.env.GEMINI_LIVE_VOICE || "Leda",
+      geminiVoice:process.env.GEMINI_LIVE_VOICE || "Achird",
+      ttsModel:process.env.GEMINI_TTS_MODEL || "gemini-3.8-flash-lite-tts",
+      ttsVoice:process.env.GEMINI_TTS_VOICE || "Achird",
       openaiConfigured,
       responseModel:process.env.OPENAI_MODEL || "gpt-5.6-luna",
       realtimeModel:process.env.OPENAI_REALTIME_MODEL || "gpt-realtime-2.1",
