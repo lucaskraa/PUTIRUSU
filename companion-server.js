@@ -1041,12 +1041,12 @@ module.exports = function installCompanion(deps) {
 
       const model = process.env.GEMINI_LIVE_MODEL || "gemini-3.8-live";
       const upstreamUrl =
-        "wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent" +
-        "?key=" + encodeURIComponent(apiKey);
+        "wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent";
 
       const upstream = new WebSocket(upstreamUrl, {
         perMessageDeflate:false,
-        handshakeTimeout:10000
+        handshakeTimeout:10000,
+        headers:{ "x-goog-api-key":apiKey }
       });
 
       let upstreamReady = false;
@@ -1103,9 +1103,8 @@ module.exports = function installCompanion(deps) {
               turnCoverage:"TURN_INCLUDES_ONLY_ACTIVITY"
             },
             inputAudioTranscription:{
-              languageCodes:["pt-BR","ru-RU"],
-              mode:"SMART",
-              customVocabulary:["PP","PUTIRUSU","russo","cirílico","cirilico","pronúncia","pronuncia"]
+              languageCodes:[],
+              mode:"SMART"
             },
             outputAudioTranscription:{},
             sessionResumption:{}
@@ -1174,6 +1173,86 @@ module.exports = function installCompanion(deps) {
     });
 
     console.log("PP Live WebSocket proxy attached.");
+
+    setTimeout(async () => {
+      const apiKey = process.env.GEMINI_API_KEY;
+      if (!apiKey) return;
+
+      try {
+        const response = await fetch(
+          "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent",
+          {
+            method:"POST",
+            headers:{
+              "x-goog-api-key":apiKey,
+              "Content-Type":"application/json"
+            },
+            body:JSON.stringify({
+              contents:[{parts:[{text:"Responda apenas PP_OK"}]}],
+              generationConfig:{
+                maxOutputTokens:32,
+                thinkingConfig:{thinkingLevel:"low"}
+              }
+            })
+          }
+        );
+        const body = await response.text();
+        console.log("PP text self-test:", response.status, response.ok ? "ok" : body.slice(0,180));
+      } catch (error) {
+        console.warn("PP text self-test failed:", error.message);
+      }
+
+      try {
+        const model = process.env.GEMINI_LIVE_MODEL || "gemini-3.8-live";
+        const test = new WebSocket(
+          "wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent",
+          {
+            perMessageDeflate:false,
+            handshakeTimeout:10000,
+            headers:{ "x-goog-api-key":apiKey }
+          }
+        );
+
+        const timer = setTimeout(() => {
+          console.warn("PP Live self-test: timeout");
+          try { test.close(); } catch (_) {}
+        },10000);
+
+        test.on("open",() => {
+          test.send(JSON.stringify({
+            setup:{
+              model:"models/" + model,
+              generationConfig:{responseModalities:["AUDIO"],temperature:0.2},
+              systemInstruction:{parts:[{text:"Você é PP. Este é um teste de conexão; não gere fala até receber conteúdo."}]},
+              inputAudioTranscription:{languageCodes:[],mode:"SMART"},
+              outputAudioTranscription:{}
+            }
+          }));
+        });
+
+        test.on("message",data => {
+          try {
+            const event = JSON.parse(data.toString("utf8"));
+            if (event.setupComplete) {
+              clearTimeout(timer);
+              console.log("PP Live self-test: setupComplete");
+              test.close(1000,"self-test complete");
+            } else if (event.error) {
+              clearTimeout(timer);
+              console.warn("PP Live self-test error:", JSON.stringify(event.error).slice(0,360));
+              test.close();
+            }
+          } catch (_) {}
+        });
+        test.on("error",error => {
+          clearTimeout(timer);
+          console.warn("PP Live self-test websocket error:",error.message);
+        });
+      } catch (error) {
+        console.warn("PP Live self-test failed:",error.message);
+      }
+    },1200);
+
     return wss;
   }
 
