@@ -62,24 +62,10 @@
         <div><strong>PUTIRUSU</strong><span>РУССКИЙ • A1—C2</span></div>
       </div>
       <nav id="nav" aria-label="Navegação principal">
-        <p class="nav-label">Aprender</p>
         <button data-screen="home" class="active"><span class="nav-icon">⌂</span> Início</button>
         <button data-screen="course"><span class="nav-icon">▦</span> Curso</button>
-        <button data-screen="review"><span class="nav-icon">↻</span> Revisão</button>
-
-        <p class="nav-label">Laboratório</p>
-        <button data-screen="alphabet"><span class="nav-icon">А</span> Alfabeto</button>
-        <button data-screen="handwriting"><span class="nav-icon">✎</span> Escrita e cursiva</button>
-        <button data-screen="copybook"><span class="nav-icon">▤</span> Caderno</button>
-        <button data-screen="audio"><span class="nav-icon">◉</span> Escuta</button>
-        <button data-screen="speaking"><span class="nav-icon">◌</span> Fala</button>
-
-        <p class="nav-label">Apoio</p>
-        <button data-screen="chat"><span class="nav-icon">✦</span> Professor IA</button>
-        <button data-screen="exam"><span class="nav-icon">✓</span> Provas</button>
-        <button data-screen="dictionary"><span class="nav-icon">Aa</span> Dicionário</button>
-        <button data-screen="culture"><span class="nav-icon">◈</span> Cultura</button>
-        <button data-screen="games"><span class="nav-icon">◇</span> Jogos</button>
+        <button data-screen="practice"><span class="nav-icon">✎</span> Prática</button>
+        <button data-screen="chat"><span class="nav-icon">✦</span> Professor</button>
         <button data-screen="profile"><span class="nav-icon">○</span> Perfil</button>
       </nav>
       <button id="logoutBtn" class="ghost danger-outline" type="button">Sair</button>
@@ -93,56 +79,53 @@
       </header>
 
       <section id="screen-home" class="screen active home-screen">
-        <div class="home-dashboard">
-          <article class="home-welcome">
-            <div>
-              <p class="eyebrow">PUTIRUSU • RUSSO DO ZERO AO USO REAL</p>
-              <h1>Continue de onde você parou.</h1>
-              <p>Curso estruturado, fala, escuta, escrita e um professor IA que acompanha o que você está estudando.</p>
-            </div>
-            <div class="home-actions">
-              <button data-go="course">Continuar curso</button>
-              <button data-go="chat" class="ghost">Falar com professor</button>
-            </div>
-            <div class="home-capabilities">
-              <span>Leitura</span><span>Fala</span><span>Escuta</span><span>Cursiva</span><span>Gramática</span>
-            </div>
-          </article>
-
-          <aside class="today-panel">
-            <div class="today-head"><span>HOJE</span><strong>Plano de estudo</strong></div>
+        <div class="simple-home">
+          <div id="homeContinue" class="home-continue"></div>
+          <div class="home-shortcuts">
+            <button type="button" data-go="practice"><span>✎</span><strong>Praticar</strong><small>Fala, escrita, escuta e revisão</small></button>
+            <button type="button" data-go="chat"><span>✦</span><strong>Professor</strong><small>Tire dúvidas sobre o que estiver estudando</small></button>
+          </div>
+          <div class="home-daily-simple">
+            <div><span class="eyebrow">HOJE</span><h2>Sessão curta</h2></div>
             <div id="dailyMission"></div>
-            <button id="startDailyBtn">Começar sessão</button>
-          </aside>
+            <button id="startDailyBtn" type="button">Começar</button>
+          </div>
         </div>
-
-        <div class="home-section-head">
-          <div><span>ATALHOS</span><h2>Pratique uma habilidade</h2></div>
-          <p>Entre direto no laboratório que você precisa agora.</p>
-        </div>
-        <div id="homeQuick" class="quick-grid"></div>
-
-        <div class="home-section-head">
-          <div><span>ESCRITA</span><h2>Seu domínio do alfabeto</h2></div>
-          <p>Veja quais letras ainda precisam de prática.</p>
-        </div>
-        <div id="writingProgressOverview" class="alphabet-progress-grid"></div>
       </section>
 
       <section id="screen-course" class="screen course-screen">
-        <div class="course-header">
-          <div>
-            <p class="eyebrow">CURRÍCULO PUTIRUSU</p>
-            <h1>Russo por unidades.</h1>
-            <p>Uma sequência clara do A1 ao C2. Cada unidade combina teoria curta, prática, produção e conversa.</p>
+        <div id="courseListView">
+          <div class="simple-course-head">
+            <div>
+              <h1>Curso</h1>
+              <p>Escolha uma unidade para ver as aulas.</p>
+            </div>
+            <label class="course-level-filter">Nível
+              <select id="levelFilter"><option value="all">Todos</option><option>A1</option><option>A2</option><option>B1</option><option>B2</option><option>C1</option><option>C2</option></select>
+            </label>
           </div>
-          <label class="course-level-filter">Filtrar nível
-            <select id="levelFilter"><option value="all">Curso inteiro</option><option>A1</option><option>A2</option><option>B1</option><option>B2</option><option>C1</option><option>C2</option></select>
-          </label>
+          <div id="courseOverview" class="simple-course-progress" aria-live="polite"></div>
+          <div id="courseGrid" class="unit-grid"></div>
         </div>
-        <div id="courseOverview" class="course-overview" aria-live="polite"></div>
-        <div id="courseGrid" class="course-catalog"></div>
+        <div id="courseUnitView" class="unit-view hidden"></div>
         <div id="lessonView" class="lesson-view hidden"></div>
+      </section>
+
+      <section id="screen-practice" class="screen practice-screen">
+        <div class="simple-page-head">
+          <h1>Prática</h1>
+          <p>Escolha o que você quer treinar agora.</p>
+        </div>
+        <div class="practice-grid">
+          <button type="button" data-go="speaking"><span>◌</span><strong>Fala</strong><small>Pronúncia e resposta pelo microfone</small></button>
+          <button type="button" data-go="audio"><span>◉</span><strong>Escuta</strong><small>Entenda palavras e frases pelo som</small></button>
+          <button type="button" data-go="handwriting"><span>✎</span><strong>Escrita</strong><small>Cirílico e cursiva</small></button>
+          <button type="button" data-go="alphabet"><span>А</span><strong>Alfabeto</strong><small>Letras, sons e reconhecimento</small></button>
+          <button type="button" data-go="review"><span>↻</span><strong>Revisão</strong><small>Volte aos seus erros</small></button>
+          <button type="button" data-go="copybook"><span>▤</span><strong>Caderno</strong><small>Cópia e prática guiada</small></button>
+          <button type="button" data-go="dictionary"><span>Aa</span><strong>Dicionário</strong><small>Consulte palavras rapidamente</small></button>
+          <button type="button" data-go="exam"><span>✓</span><strong>Provas</strong><small>Teste o que já aprendeu</small></button>
+        </div>
       </section>
 
       <section id="screen-alphabet" class="screen">
