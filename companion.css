@@ -656,3 +656,206 @@
 .puti-privacy-note {
   opacity:.72;
 }
+
+
+/* === PUTIRUSU V24 — CUTE ROBOT FACE === */
+.puti-companion-orb {
+  width: 78px;
+  height: 72px;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  clip-path: none;
+  background: transparent;
+  box-shadow: none;
+  overflow: visible;
+}
+
+.puti-companion-orb::before,
+.puti-companion-orb::after,
+.puti-face,
+.puti-orb-core {
+  display: none !important;
+}
+
+.puti-avatar-svg {
+  width: 78px;
+  height: 68px;
+  overflow: visible;
+  filter: drop-shadow(0 8px 10px rgba(23, 35, 48, .22));
+  transform-origin: 50% 70%;
+}
+
+.puti-helmet-shadow {
+  fill: rgba(45, 58, 71, .24);
+  transform: translateY(3px);
+}
+
+.puti-helmet {
+  fill: #eef2f4;
+  stroke: #596674;
+  stroke-width: 2.5;
+  stroke-linejoin: round;
+}
+
+.puti-crest {
+  fill: #f8fafb;
+  stroke: #596674;
+  stroke-width: 2.2;
+  stroke-linejoin: round;
+}
+
+.puti-brow {
+  fill: #aeb9c3;
+  opacity: .95;
+}
+
+.puti-eye {
+  fill: #4fd7ff;
+  stroke: #0f708b;
+  stroke-width: 1.7;
+  filter: drop-shadow(0 0 4px rgba(79, 215, 255, .72));
+  transform-box: fill-box;
+  transform-origin: center;
+}
+
+.puti-cheek {
+  fill: #d7dfe5;
+  stroke: #82909d;
+  stroke-width: 1.2;
+}
+
+.puti-cheek-dot {
+  fill: #8fa0ac;
+  opacity: .8;
+}
+
+.puti-grill-shell {
+  fill: #f8fafb;
+  stroke: #596674;
+  stroke-width: 2;
+}
+
+.puti-grill-lines path {
+  stroke: #6f7b86;
+  stroke-width: 2;
+  stroke-linecap: round;
+}
+
+.puti-companion[data-state="idle"] .puti-avatar-svg {
+  animation: putiCuteIdle 3s ease-in-out infinite;
+}
+
+.puti-companion[data-state="listening"] .puti-avatar-svg {
+  animation: putiCuteListen 1.15s ease-in-out infinite;
+}
+
+.puti-companion[data-state="listening"] .puti-eye {
+  animation: putiEyeGlow .68s ease-in-out infinite alternate;
+}
+
+.puti-companion[data-state="thinking"] .puti-avatar-svg {
+  animation: putiCuteThink .55s ease-in-out infinite alternate;
+}
+
+.puti-companion[data-state="speaking"] .puti-avatar-svg {
+  animation: putiCuteTalk .34s ease-in-out infinite alternate;
+}
+
+.puti-companion[data-state="speaking"] .puti-grill-lines {
+  animation: putiGrillTalk .18s ease-in-out infinite alternate;
+  transform-box: fill-box;
+  transform-origin: center;
+}
+
+.puti-companion[data-mood="amused"] .puti-eye.left {
+  transform: rotate(4deg) scaleY(.72);
+}
+
+.puti-companion[data-mood="amused"] .puti-eye.right {
+  transform: rotate(-4deg) scaleY(.72);
+}
+
+.puti-companion[data-mood="focused"] .puti-eye.left {
+  transform: rotate(7deg) translateY(1px);
+}
+
+.puti-companion[data-mood="focused"] .puti-eye.right {
+  transform: rotate(-7deg) translateY(1px);
+}
+
+@keyframes putiCuteIdle {
+  0%,100% { transform: translateY(0) rotate(0deg); }
+  50% { transform: translateY(-3px) rotate(.8deg); }
+}
+
+@keyframes putiCuteListen {
+  0%,100% { transform: translateY(0) scale(1); }
+  50% { transform: translateY(-2px) scale(1.035); }
+}
+
+@keyframes putiCuteThink {
+  from { transform: translateY(0) rotate(-2.2deg); }
+  to { transform: translateY(-2px) rotate(2.2deg); }
+}
+
+@keyframes putiCuteTalk {
+  from { transform: translateY(0) scale(1); }
+  to { transform: translateY(-2px) scale(1.025); }
+}
+
+@keyframes putiEyeGlow {
+  from { filter: drop-shadow(0 0 3px rgba(79,215,255,.65)); }
+  to { filter: drop-shadow(0 0 9px rgba(79,215,255,1)); }
+}
+
+@keyframes putiGrillTalk {
+  from { transform: scaleY(.86); opacity: .78; }
+  to { transform: scaleY(1.16); opacity: 1; }
+}
+
+.puti-companion-bubble {
+  width: min(350px, calc(100vw - 28px));
+  padding: 15px 16px 14px;
+}
+
+.puti-companion-head {
+  align-items: center;
+}
+
+.puti-companion-head strong {
+  font-size: .74rem;
+}
+
+.puti-companion-head span {
+  font-size: .67rem;
+}
+
+.puti-companion-bubble > p {
+  margin: 13px 0 12px;
+  min-height: 0;
+  font-size: .91rem;
+  line-height: 1.46;
+}
+
+.puti-heard {
+  margin-top: 10px;
+  padding: 7px 9px;
+}
+
+.puti-privacy-note {
+  margin-top: 9px;
+  font-size: .61rem;
+}
+
+@media (max-width: 640px) {
+  .puti-companion-orb {
+    width: 68px;
+    height: 63px;
+  }
+
+  .puti-avatar-svg {
+    width: 68px;
+    height: 59px;
+  }
+}
