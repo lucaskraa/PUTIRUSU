@@ -1292,6 +1292,7 @@ function lessonAdvance() {
   session.selected=null;
   session.arranged=[];
   session.attempted=false;
+  session.speechCorrect=false;
   renderLessonActivity();
   window.scrollTo({top:0,behavior:"smooth"});
 }
@@ -1558,7 +1559,8 @@ function handleLessonPrimary() {
   if(mode==="check-arrange") {
     received=session.arranged.join(" ");
     expected=step.answer;
-    ok=normalize(received)===normalize(expected);
+    const glued=session.arranged.join("");
+    ok=normalize(received)===normalize(expected) || normalize(glued)===normalize(expected);
     byId("lessonArrangeAnswer").classList.add(ok?"correct":"wrong");
     byId("lessonWordBank").querySelectorAll("button").forEach(button=>button.disabled=true);
   }
@@ -1605,10 +1607,15 @@ function startLessonRecognition(step) {
     const heard=event.results[0][0].transcript;
     const score=similarity(normalize(step.target),normalize(heard));
     const ok=score>=72;
-    if(!session.attempted) session.graded += 1;
+    const wasAttempted=session.attempted;
+    const wasCorrect=Boolean(session.speechCorrect);
+    if(!wasAttempted) session.graded += 1;
     session.attempted=true;
-    if(ok) session.correct += 1;
-    else recordLessonMistake(session,step,step.target,heard);
+    if(ok && !wasCorrect) {
+      session.correct += 1;
+      session.speechCorrect=true;
+    }
+    if(!ok && !wasAttempted) recordLessonMistake(session,step,step.target,heard);
 
     result.className=`lesson-inline-result ${ok?"ok":"info"}`;
     result.innerHTML=`<strong>Você falou: ${heard}</strong><span>Correspondência aproximada: ${score}%. ${ok?"A frase foi reconhecida com clareza.":"Ouça o modelo e tente aproximar palavras e ritmo."}</span>`;
