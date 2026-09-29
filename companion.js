@@ -136,7 +136,7 @@
     root.dataset.mood = "curious";
     root.setAttribute("aria-live", "polite");
     root.innerHTML =
-      '<button id="putiCompanionOrb" class="puti-companion-orb" type="button" aria-label="Abrir PUTIRUSU">' +
+      '<button id="putiCompanionOrb" class="puti-companion-orb" type="button" aria-label="Abrir PP">' +
         '<span class="puti-orb-ring"></span>' +
         '<svg class="puti-avatar-svg" viewBox="0 0 96 82" aria-hidden="true">' +
           '<path class="puti-helmet-shadow" d="M13 29 25 13 43 7 48 2l5 5 18 6 12 16-4 31-14 15H31L17 60Z"/>' +
@@ -593,12 +593,12 @@
     }
 
     if (event.goAway) {
-      console.warn("PUTIRUSU Gemini Live vai encerrar a sessão:", event.goAway);
+      console.warn("PP Gemini Live vai encerrar a sessão:", event.goAway);
       return;
     }
 
     if (event.error) {
-      console.warn("PUTIRUSU Gemini Live:", event.error);
+      console.warn("PP Gemini Live:", event.error);
       return;
     }
 
@@ -751,7 +751,7 @@
                 }
               },
               systemInstruction:{
-                parts:[{ text:String(session.instructions || "Você é PUTIRUSU. Converse naturalmente em português brasileiro e russo.") }]
+                parts:[{ text:String(session.instructions || "Você é PP. Converse naturalmente em português brasileiro e russo.") }]
               },
               realtimeInputConfig:{
                 automaticActivityDetection:{
@@ -1364,7 +1364,7 @@
       panel.id = "putiPrivacyPanel";
       panel.className = "panel puti-privacy-panel";
       panel.innerHTML =
-        '<p class="tag">PUTIRUSU • PRIVACIDADE</p>' +
+        '<p class="tag">PP • PRIVACIDADE</p>' +
         '<h2>Memória e voz</h2>' +
         '<p class="puti-privacy-copy">A memória autenticada é separada por conta. O áudio bruto não é salvo.</p>' +
         '<label class="puti-setting"><span><b>Memória pedagógica</b><small>Guarda dificuldades e eventos de estudo.</small></span><input id="putiMemorySetting" type="checkbox"></label>' +
@@ -1392,7 +1392,7 @@
         else disableAmbientListening();
       });
       document.getElementById("putiClearMemory").addEventListener("click", async function () {
-        if (!confirm("Apagar a memória pedagógica e as conversas do PUTIRUSU desta conta? Seu progresso normal será mantido.")) return;
+        if (!confirm("Apagar a memória pedagógica e as conversas do PP desta conta? Seu progresso normal será mantido.")) return;
         if (!state.token || state.token === "local-demo") {
           toast("Esta sessão temporária não possui memória persistente.");
           return;
