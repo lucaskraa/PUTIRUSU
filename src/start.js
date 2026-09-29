@@ -15,7 +15,7 @@ if (!process.env.TOKEN_SECRET) {
   console.warn("PUTIRUSU usando TOKEN_SECRET efêmero. Sessões serão invalidadas ao reiniciar o serviço.");
 }
 
-const { app } = require("../server");
+const { app, companionRuntime } = require("../server");
 
 const PORT = Number(process.env.PORT || 3000);
 const HOST = process.env.HOST || "0.0.0.0";
@@ -25,6 +25,10 @@ app.set("trust proxy", 1);
 const server = app.listen(PORT, HOST, () => {
   console.log(`PUTIRUSU rodando em http://${HOST}:${PORT}`);
 });
+
+if (companionRuntime && typeof companionRuntime.attachWebSocketServer === "function") {
+  companionRuntime.attachWebSocketServer(server);
+}
 
 function shutdown(signal) {
   console.log(`${signal} recebido. Encerrando PUTIRUSU...`);
