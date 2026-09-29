@@ -13,6 +13,10 @@
     lastHeard: "",
     lastNudgeAt: 0,
     recentMistakes: 0,
+    lastAppEvent: null,
+    contextFingerprint: "",
+    contextSyncTimer: null,
+    contextObserver: null,
     restartTimer: null,
     ttsWatch: null,
     idleTimer: null,
@@ -81,15 +85,24 @@
     throw lastError || new Error("Servidor da IA indisponível.");
   }
 
+  function compactText(value, max) {
+    return String(value == null ? "" : value)
+      .replace(/\s+/g," ")
+      .trim()
+      .slice(0, max || 1800);
+  }
+
   function currentContext() {
     const activeScreen = document.querySelector(".screen.active");
+    const lessonMode = document.body.classList.contains("lesson-mode");
     const context = {
-      screen: activeScreen ? activeScreen.id.replace("screen-", "") : (document.body.classList.contains("lesson-mode") ? "course" : "unknown"),
-      title: document.getElementById("screenTitle") ? document.getElementById("screenTitle").textContent : ""
+      screen: activeScreen ? activeScreen.id.replace("screen-", "") : (lessonMode ? "course" : "unknown"),
+      title: document.getElementById("screenTitle") ? compactText(document.getElementById("screenTitle").textContent,120) : "",
+      lastEvent: companion.lastAppEvent || null
     };
 
     const session = state.lessonSession;
-    if (session && document.body.classList.contains("lesson-mode")) {
+    if (session && lessonMode) {
       const step = session.steps && session.steps[session.stepIndex];
       context.courseId = session.course && session.course.id;
       context.level = session.course && session.course.level;
@@ -99,9 +112,55 @@
       context.stepIndex = session.stepIndex;
       context.stepTotal = session.steps ? session.steps.length : 0;
       context.stepType = step && step.type;
-      context.focusText = step
-        ? (step.target || step.prompt || (step.item && (step.item.glyph || step.item.example)) || step.title || step.objective || "")
-        : "";
+      context.attempted = Boolean(session.attempted);
+      context.studentSelection = session.selected || "";
+      context.studentArrangement = Array.isArray(session.arranged) ? session.arranged.slice(0,30) : [];
+      context.speechCorrect = Boolean(session.speechCorrect);
+
+      if (step) {
+        context.activity = {
+          type:step.type || "",
+          title:compactText(step.title,220),
+          objective:compactText(step.objective,420),
+          prompt:compactText(step.prompt,700),
+          target:compactText(step.target,500),
+          translation:compactText(step.pt || step.translation,500),
+          answer:compactText(step.answer,500),
+          accepted:Array.isArray(step.accepted) ? step.accepted.slice(0,12) : [],
+          options:Array.isArray(step.options) ? step.options.slice(0,12) : [],
+          explain:compactText(step.explain || step.tip,700),
+          item:step.item ? {
+            glyph:compactText(step.item.glyph,120),
+            example:compactText(step.item.example,240),
+            meaning:compactText(step.item.meaning || step.item.pt,260),
+            sound:compactText(step.item.sound || step.item.pron,180)
+          } : null
+        };
+        context.focusText = context.activity.target || context.activity.prompt || (context.activity.item && (context.activity.item.glyph || context.activity.item.example)) || context.activity.title || context.activity.objective || "";
+      }
+
+      const typeInput = document.getElementById("lessonTypeInput");
+      if (typeInput) context.typedAnswer = compactText(typeInput.value,500);
+      const speechResult = document.getElementById("lessonSpeechResult");
+      if (speechResult) context.pronunciationFeedback = compactText(speechResult.textContent,900);
+      const feedback = document.getElementById("lessonFeedback");
+      if (feedback) context.feedback = compactText(feedback.textContent,900);
+
+      const recentMistakes = state.progress && Array.isArray(state.progress.lessonMistakes)
+        ? state.progress.lessonMistakes
+            .filter(item => !session.course || item.courseId === session.course.id)
+            .slice(0,4)
+            .map(item => ({
+              type:item.type,
+              prompt:compactText(item.prompt,400),
+              expected:compactText(item.expected,300),
+              received:compactText(item.received,300)
+            }))
+        : [];
+      if (recentMistakes.length) context.recentMistakes = recentMistakes;
+
+      const lessonView = document.getElementById("lessonView");
+      if (lessonView) context.visibleActivityText = compactText(lessonView.innerText,2200);
     }
 
     if (context.screen === "handwriting") {
@@ -110,17 +169,29 @@
         context.focusText = letter.upper + " " + letter.lower;
         context.letter = letter.lower;
         context.writingMode = state.writingMode;
+        context.writingScore = state.progress && state.progress.letters && state.progress.letters[letter.lower]
+          ? state.progress.letters[letter.lower]
+          : null;
       }
     }
 
     if (context.screen === "speaking" && state.speakingItem) {
       context.focusText = state.speakingItem.ru;
       context.translation = state.speakingItem.pt;
+      context.pronunciationGuide = state.speakingItem.pron || "";
+      const result = document.getElementById("speakResult");
+      if (result) context.pronunciationFeedback = compactText(result.textContent,900);
     }
 
     if (context.screen === "audio" && state.audioItem) {
       context.focusText = state.audioItem.ru;
       context.translation = state.audioItem.pt;
+      const feedback = document.getElementById("audioFeedback");
+      if (feedback) context.feedback = compactText(feedback.textContent,700);
+    }
+
+    if (!lessonMode && activeScreen) {
+      context.visibleScreenText = compactText(activeScreen.innerText,1600);
     }
 
     return context;
@@ -417,9 +488,10 @@
   }
 
   function pushRealtimeAppEvent(type, details) {
+    companion.lastAppEvent = { type, details:details || {}, at:new Date().toISOString() };
     if (!companion.realtimeConnected) return;
     sendGeminiClientContent(
-      "[APP_EVENT] " + JSON.stringify({ type, details:details || {}, at:new Date().toISOString() }),
+      "[APP_EVENT] " + JSON.stringify(companion.lastAppEvent),
       false
     );
   }
@@ -427,6 +499,37 @@
   function pushRealtimeContext() {
     if (!companion.realtimeConnected) return;
     sendGeminiClientContent("[APP_CONTEXT] " + JSON.stringify(currentContext()), false);
+  }
+
+  function syncRealtimeContext(force) {
+    const context = currentContext();
+    const fingerprint = JSON.stringify(context);
+    if (!force && fingerprint === companion.contextFingerprint) return;
+    companion.contextFingerprint = fingerprint;
+    if (companion.realtimeConnected) {
+      sendGeminiClientContent("[APP_CONTEXT] " + fingerprint, false);
+    }
+  }
+
+  function scheduleContextSync() {
+    if (companion.contextSyncTimer) clearTimeout(companion.contextSyncTimer);
+    companion.contextSyncTimer = setTimeout(() => syncRealtimeContext(false), 160);
+  }
+
+  function startContextObserver() {
+    if (companion.contextObserver || !document.body || !window.MutationObserver) return;
+    companion.contextObserver = new MutationObserver(scheduleContextSync);
+    companion.contextObserver.observe(document.body,{
+      subtree:true,
+      childList:true,
+      characterData:true,
+      attributes:true,
+      attributeFilter:["class","value","disabled","data-mode"]
+    });
+    document.addEventListener("input",scheduleContextSync,true);
+    document.addEventListener("change",scheduleContextSync,true);
+    document.addEventListener("click",scheduleContextSync,true);
+    syncRealtimeContext(true);
   }
 
   function sendRealtimeText(text) {
@@ -587,8 +690,10 @@
     if (event.setupComplete) {
       companion.realtimeConnected = true;
       companion.realtimeConnecting = false;
+      companion.realtimeFailures = 0;
       setStatus("listening","ouvindo");
       setMood("curious");
+      syncRealtimeContext(true);
       return;
     }
 
@@ -672,7 +777,7 @@
 
     const source = ctx.createMediaStreamSource(stream);
     companion.realtimeCaptureSource = source;
-    const processor = ctx.createScriptProcessor(4096,1,1);
+    const processor = ctx.createScriptProcessor(2048,1,1);
     companion.realtimeProcessor = processor;
 
     processor.onaudioprocess = event => {
@@ -758,8 +863,8 @@
                   disabled:false,
                   startOfSpeechSensitivity:"START_SENSITIVITY_HIGH",
                   endOfSpeechSensitivity:"END_SENSITIVITY_HIGH",
-                  prefixPaddingMs:40,
-                  silenceDurationMs:180
+                  prefixPaddingMs:60,
+                  silenceDurationMs:420
                 },
                 activityHandling:"START_OF_ACTIVITY_INTERRUPTS",
                 turnCoverage:"TURN_INCLUDES_ONLY_ACTIVITY"
@@ -869,7 +974,7 @@
     if (!companion.wantsListening || companion.speaking || companion.thinking || companion.lessonMicBusy) return;
     companion.restartTimer = setTimeout(function () {
       startRecognitionLoop(false);
-    }, delay || 550);
+    }, delay || 180);
   }
 
   function startRecognitionLoop(fromUserGesture) {
@@ -1167,8 +1272,8 @@
     }
 
     return focus
-      ? "Peguei. Eu ainda estou vendo “" + focus + "”."
-      : "Te ouvi. A voz ao vivo tropeçou, mas eu continuo pensando normal. Fala comigo.";
+      ? "Tô vendo “" + focus + "”. Se você está falando dessa atividade, me diz só onde travou e eu pego daqui."
+      : "A conexão neural oscilou agora. Repete a última ideia e eu continuo daqui.";
   }
 
   function cleanCompanionSpeech(text) {
@@ -1204,32 +1309,23 @@
       history:companion.history.slice(-14)
     });
 
-    const attempt = async () => {
-      if (authenticated) {
-        try {
-          const response = await companionFetch("/ai/respond", {
-            method:"POST",
-            headers:{ "Content-Type":"application/json" },
-            body
-          });
-          return response.json();
-        } catch (_) {}
-      }
-
-      const response = await companionFetch("/ai/guest/respond", {
-        method:"POST",
-        headers:{ "Content-Type":"application/json" },
-        body
-      });
-      return response.json();
-    };
-
-    try {
-      return await attempt();
-    } catch (firstError) {
-      await new Promise(resolve=>setTimeout(resolve,240));
-      return attempt();
+    if (authenticated) {
+      try {
+        const response = await companionFetch("/ai/respond", {
+          method:"POST",
+          headers:{ "Content-Type":"application/json" },
+          body
+        });
+        return response.json();
+      } catch (_) {}
     }
+
+    const response = await companionFetch("/ai/guest/respond", {
+      method:"POST",
+      headers:{ "Content-Type":"application/json" },
+      body
+    });
+    return response.json();
   }
 
   async function respondTo(message, options) {
@@ -1578,29 +1674,35 @@
 
     const oldSpeakingRecognition = startRecognition;
     startRecognition = function () {
+      const liveWasConnected = companion.realtimeConnected;
       companion.lessonMicBusy = true;
-      if (companion.realtimeConnected) setRealtimeMicEnabled(false);
-      stopRecognition(true);
+      if (!liveWasConnected) stopRecognition(true);
+      pushRealtimeAppEvent("pronunciation_attempt_started", currentContext());
       const result = oldSpeakingRecognition.apply(this, arguments);
       setTimeout(function () {
         companion.lessonMicBusy = false;
-        if (companion.realtimeConnected) setRealtimeMicEnabled(true);
-        else if (companion.wantsListening) scheduleRecognitionRestart(400);
-      }, 12000);
+        if (companion.realtimeConnected) {
+          setRealtimeMicEnabled(true);
+          scheduleContextSync();
+        } else if (companion.wantsListening) scheduleRecognitionRestart(180);
+      }, 9000);
       return result;
     };
 
     const oldLessonRecognition = startLessonRecognition;
     startLessonRecognition = function () {
+      const liveWasConnected = companion.realtimeConnected;
       companion.lessonMicBusy = true;
-      if (companion.realtimeConnected) setRealtimeMicEnabled(false);
-      stopRecognition(true);
+      if (!liveWasConnected) stopRecognition(true);
+      pushRealtimeAppEvent("lesson_pronunciation_attempt_started", currentContext());
       const result = oldLessonRecognition.apply(this, arguments);
       setTimeout(function () {
         companion.lessonMicBusy = false;
-        if (companion.realtimeConnected) setRealtimeMicEnabled(true);
-        else if (companion.wantsListening) scheduleRecognitionRestart(400);
-      }, 12000);
+        if (companion.realtimeConnected) {
+          setRealtimeMicEnabled(true);
+          scheduleContextSync();
+        } else if (companion.wantsListening) scheduleRecognitionRestart(180);
+      }, 9000);
       return result;
     };
 
@@ -1627,6 +1729,7 @@
     companion.initialized = true;
     createUi();
     installHooks();
+    startContextObserver();
     scheduleIdleLife();
     warmCompanionBackend();
     probeAiCapability();
