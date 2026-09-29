@@ -17,7 +17,18 @@ const TOKEN_SECRET = process.env.TOKEN_SECRET || "putirusu-local-secret-change-m
 app.use(cors({ origin: true, credentials: true }));
 app.use(express.json({ limit: "8mb" }));
 app.use(express.urlencoded({ extended: true }));
-app.use(express.static(ROOT, { extensions: ["html"] }));
+app.use(express.static(ROOT, {
+  extensions:["html"],
+  etag:true,
+  setHeaders(res,filePath) {
+    const name = path.basename(filePath);
+    if (name === "index.html" || name === "companion.js" || name === "companion.css") {
+      res.setHeader("Cache-Control","no-store, no-cache, must-revalidate, proxy-revalidate");
+      res.setHeader("Pragma","no-cache");
+      res.setHeader("Expires","0");
+    }
+  }
+}));
 
 function defaultDatabase() {
   const passwordHash = bcrypt.hashSync("123456", 10);
