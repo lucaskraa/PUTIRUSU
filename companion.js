@@ -15,6 +15,8 @@
     recentMistakes: 0,
     lastAppEvent: null,
     contextFingerprint: "",
+    lastAutonomyAt: 0,
+    autonomyTimer: null,
     contextSyncTimer: null,
     contextObserver: null,
     restartTimer: null,
@@ -487,8 +489,43 @@
     });
   }
 
+  function autonomousPrompt(type, details) {
+    if (type === "lesson_mistake") {
+      return "O aluno acabou de errar a atividade visível. Reaja por iniciativa própria em uma frase curta, natural e específica ao erro. Explique o ponto central sem soar como notificação do sistema.";
+    }
+    if (type === "lesson_complete") {
+      return "O aluno acabou de concluir a aula. Faça uma reação curta e espontânea sobre o desempenho, citando algo concreto do contexto se houver.";
+    }
+    if (type === "writing_score" && Number(details && details.score) < 70) {
+      return "Você acabou de ver uma tentativa de escrita fraca. Dê uma observação curta e específica do que vale ajustar agora.";
+    }
+    return "";
+  }
+
+  function maybeReactAutonomously(type, details) {
+    const prompt = autonomousPrompt(type,details);
+    if (!prompt || !companion.wantsListening || companion.speaking || companion.thinking) return;
+    const now = Date.now();
+    if (now - companion.lastAutonomyAt < 6500) return;
+    companion.lastAutonomyAt = now;
+
+    if (companion.autonomyTimer) clearTimeout(companion.autonomyTimer);
+    companion.autonomyTimer = setTimeout(() => {
+      if (companion.speaking || companion.thinking || !companion.wantsListening) return;
+      if (companion.realtimeConnected) {
+        sendGeminiClientContent(
+          "[AUTONOMOUS_REACTION]\n" + prompt + "\n[APP_CONTEXT]\n" + JSON.stringify(currentContext()),
+          true
+        );
+      } else if (companion.aiAvailable !== false) {
+        respondTo(prompt + "\nUse esta atividade: " + JSON.stringify(currentContext()), { silentUi:true });
+      }
+    },220);
+  }
+
   function pushRealtimeAppEvent(type, details) {
     companion.lastAppEvent = { type, details:details || {}, at:new Date().toISOString() };
+    maybeReactAutonomously(type,details || {});
     if (!companion.realtimeConnected) return;
     sendGeminiClientContent(
       "[APP_EVENT] " + JSON.stringify(companion.lastAppEvent),
@@ -704,6 +741,7 @@
 
     if (event.error) {
       console.warn("PP Gemini Live:", event.error);
+      reportLiveIssue("gemini_server_error", JSON.stringify(event.error).slice(0,700));
       return;
     }
 
@@ -846,14 +884,7 @@
               model:"models/" + session.model,
               generationConfig:{
                 responseModalities:["AUDIO"],
-                temperature:0.86,
-                speechConfig:{
-                  voiceConfig:{
-                    prebuiltVoiceConfig:{
-                      voiceName:session.voice || "Achird"
-                    }
-                  }
-                }
+                temperature:0.82
               },
               systemInstruction:{
                 parts:[{ text:String(session.instructions || "Você é PP. Converse naturalmente em português brasileiro e russo.") }]
@@ -863,13 +894,15 @@
                   disabled:false,
                   startOfSpeechSensitivity:"START_SENSITIVITY_HIGH",
                   endOfSpeechSensitivity:"END_SENSITIVITY_HIGH",
-                  prefixPaddingMs:60,
-                  silenceDurationMs:420
+                  prefixPaddingMs:80,
+                  silenceDurationMs:380
                 },
                 activityHandling:"START_OF_ACTIVITY_INTERRUPTS",
                 turnCoverage:"TURN_INCLUDES_ONLY_ACTIVITY"
               },
-              inputAudioTranscription:{},
+              inputAudioTranscription:{
+                languageCodes:["pt-BR","ru-RU"]
+              },
               outputAudioTranscription:{}
             }
           });
@@ -879,6 +912,11 @@
           try {
             const event = JSON.parse(message.data);
             handleRealtimeEvent(event);
+            if (event && event.error) {
+              clearTimeout(timeout);
+              reject(new Error("Gemini Live recusou o setup: " + JSON.stringify(event.error).slice(0,500)));
+              return;
+            }
             if (event && event.setupComplete) {
               clearTimeout(timeout);
               resolve();
@@ -1338,7 +1376,7 @@
 
     companion.thinking = true;
     stopRecognition(true);
-    setStatus("thinking", companion.realtimeAvailable === false ? "respondendo" : "pensando");
+    setStatus("thinking", companion.realtimeAvailable === false ? "pensando" : "pensando");
     setMood("focused");
 
     if (!(options && options.silentUi)) {
