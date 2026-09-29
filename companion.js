@@ -906,6 +906,10 @@
   }
 
   async function callBrain(message) {
+    if (companion.realtimeAvailable === false) {
+      return { answer:localBrain(message), provider:"local" };
+    }
+
     const authenticated = Boolean(state.token && state.token !== "local-demo");
     const body = JSON.stringify({
       message:String(message).slice(0,1600),
@@ -951,7 +955,7 @@
 
     companion.thinking = true;
     stopRecognition(true);
-    setStatus("thinking", "pensando");
+    setStatus("thinking", companion.realtimeAvailable === false ? "respondendo" : "pensando");
     setMood("focused");
 
     if (!(options && options.silentUi)) {
