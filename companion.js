@@ -858,15 +858,13 @@
 
     closeRealtime();
     companion.realtimeConnecting = true;
-    setStatus("thinking","acordando a voz");
+    setStatus("thinking","acordando");
 
     try {
-      const session = await fetchGeminiLiveSession();
-      if (!session || !session.token || !session.model) throw new Error("Token Gemini Live ausente.");
-
-      const endpoint =
-        "wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContentConstrained" +
-        "?access_token=" + encodeURIComponent(session.token);
+      const protocol = location.protocol === "https:" ? "wss://" : "ws://";
+      const endpoint = location.hostname === "putirusu-dev.onrender.com"
+        ? protocol + location.host + "/api/ai/live/socket"
+        : "wss://putirusu-dev.onrender.com/api/ai/live/socket";
 
       const ws = new WebSocket(endpoint);
       companion.realtimeWs = ws;
@@ -875,37 +873,13 @@
 
       await new Promise((resolve,reject)=>{
         const timeout = setTimeout(()=>{
-          reject(new Error("Gemini Live demorou para responder."));
-        },12000);
+          try { ws.close(); } catch (_) {}
+          reject(new Error("PP Live demorou para acordar."));
+        },10000);
 
         ws.onopen = () => {
-          sendRealtimeEvent({
-            setup:{
-              model:"models/" + session.model,
-              generationConfig:{
-                responseModalities:["AUDIO"],
-                temperature:0.82
-              },
-              systemInstruction:{
-                parts:[{ text:String(session.instructions || "Você é PP. Converse naturalmente em português brasileiro e russo.") }]
-              },
-              realtimeInputConfig:{
-                automaticActivityDetection:{
-                  disabled:false,
-                  startOfSpeechSensitivity:"START_SENSITIVITY_HIGH",
-                  endOfSpeechSensitivity:"END_SENSITIVITY_HIGH",
-                  prefixPaddingMs:80,
-                  silenceDurationMs:380
-                },
-                activityHandling:"START_OF_ACTIVITY_INTERRUPTS",
-                turnCoverage:"TURN_INCLUDES_ONLY_ACTIVITY"
-              },
-              inputAudioTranscription:{
-                languageCodes:["pt-BR","ru-RU"]
-              },
-              outputAudioTranscription:{}
-            }
-          });
+          setStatus("thinking","conectando");
+          // O servidor configura o Gemini Live. O navegador nunca recebe a chave permanente.
         };
 
         ws.onmessage = message => {
@@ -914,40 +888,54 @@
             handleRealtimeEvent(event);
             if (event && event.error) {
               clearTimeout(timeout);
-              reject(new Error("Gemini Live recusou o setup: " + JSON.stringify(event.error).slice(0,500)));
+              reject(new Error("PP Live: " + JSON.stringify(event.error).slice(0,500)));
               return;
             }
             if (event && event.setupComplete) {
               clearTimeout(timeout);
               resolve();
             }
-          } catch (_) {}
+          } catch (error) {
+            reportLiveIssue("message_parse",error);
+          }
         };
 
-        ws.onerror = event => {
+        ws.onerror = () => {
           clearTimeout(timeout);
-          reportLiveIssue("websocket_error","Falha no WebSocket Gemini Live.",{
+          reportLiveIssue("proxy_websocket_error","Falha no túnel WebSocket do PP.",{
             readyState:ws.readyState
           });
-          reject(new Error("Falha no WebSocket Gemini Live."));
+          reject(new Error("Falha no túnel de voz do PP."));
         };
 
         ws.onclose = event => {
           clearTimeout(timeout);
+          const wasActive = companion.realtimeConnected;
           companion.realtimeConnected = false;
           companion.realtimeConnecting = false;
           stopGeminiPlayback();
+
+          reportLiveIssue("proxy_websocket_close",event && event.reason || "socket fechado",{
+            code:event && event.code,
+            wasClean:Boolean(event && event.wasClean),
+            wasActive
+          });
+
           if (companion.wantsListening && !companion.lessonMicBusy) {
             companion.realtimeFailures += 1;
-            if (companion.realtimeFailures >= 2) companion.realtimeAvailable = false;
-            setStatus("listening","ouvindo");
-            if (!companion.recognition) startRecognitionLoop(false);
+            setStatus("thinking","reconectando");
+            if (companion.realtimeFailures < 3) {
+              setTimeout(async () => {
+                if (!companion.wantsListening || companion.realtimeConnected || companion.realtimeConnecting) return;
+                const ok = await connectRealtime();
+                if (!ok && !companion.recognition) startRecognitionLoop(false);
+              },650);
+            } else {
+              companion.realtimeAvailable = false;
+              setStatus("listening","ouvindo");
+              if (!companion.recognition) startRecognitionLoop(false);
+            }
           }
-          reportLiveIssue("websocket_close",event && event.reason || "socket fechado",{
-            code:event && event.code,
-            wasClean:Boolean(event && event.wasClean)
-          });
-          if (event && event.reason) console.warn("PP Gemini Live fechou:",event.reason);
         };
       });
 
@@ -966,16 +954,17 @@
       companion.realtimeConnected = true;
       companion.realtimeConnecting = false;
       companion.realtimeFailures = 0;
+      companion.realtimeAvailable = true;
       setStatus("listening","ouvindo");
-      pushRealtimeContext();
+      syncRealtimeContext(true);
       return true;
     } catch (error) {
-      console.warn("PP Gemini Live indisponível:",error.message);
+      console.warn("PP Live indisponível:",error.message);
       reportLiveIssue("connect_realtime_catch",error,{ failures:companion.realtimeFailures });
       closeRealtime();
       companion.realtimeConnecting = false;
       companion.realtimeFailures += 1;
-      if (companion.realtimeFailures >= 2) companion.realtimeAvailable = false;
+      if (companion.realtimeFailures >= 3) companion.realtimeAvailable = false;
       return false;
     }
   }
