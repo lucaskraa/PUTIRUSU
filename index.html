@@ -102,9 +102,20 @@
         <div id="writingProgressOverview" class="alphabet-progress-grid"></div>
       </section>
 
-      <section id="screen-course" class="screen">
-        <div class="head"><div><h1>Curso por unidades</h1><p>Do A1 ao C2, com explicação, áudio, escrita e exercícios.</p></div><select id="levelFilter"><option value="all">Todos</option><option>A1</option><option>A2</option><option>B1</option><option>B2</option><option>C1</option><option>C2</option></select></div>
-        <div id="courseGrid" class="grid"></div><div id="lessonView" class="lesson-view hidden"></div>
+      <section id="screen-course" class="screen course-screen">
+        <div class="course-top">
+          <div>
+            <p class="eyebrow">CAMINHO DE APRENDIZADO</p>
+            <h1>Seu curso de russo</h1>
+            <p>Avance uma aula por vez. Cada etapa mistura compreensão, fala, escrita e uso real.</p>
+          </div>
+          <label class="course-level-filter">Nível
+            <select id="levelFilter"><option value="all">Todos</option><option>A1</option><option>A2</option><option>B1</option><option>B2</option><option>C1</option><option>C2</option></select>
+          </label>
+        </div>
+        <div id="courseOverview" class="course-overview" aria-live="polite"></div>
+        <div id="courseGrid" class="course-path"></div>
+        <div id="lessonView" class="lesson-view hidden"></div>
       </section>
 
       <section id="screen-alphabet" class="screen">
