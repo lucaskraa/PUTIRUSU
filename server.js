@@ -5,6 +5,7 @@ const path = require("path");
 const fs = require("fs");
 const crypto = require("crypto");
 const bcrypt = require("bcryptjs");
+const installCompanion = require("./companion-server");
 
 const app = express();
 const PORT = Number(process.env.PORT || 3000);
@@ -23,7 +24,7 @@ function defaultDatabase() {
   return {
     users: [{ id: "demo-user", name: "Aluno", email: "aluno@putirusu.com", passwordHash, level: "A1", minutes: 20, createdAt: new Date().toISOString() }],
     progress: [{ userId: "demo-user", xp: 0, streak: 1, lessons: 0, letters: {}, updatedAt: new Date().toISOString() }],
-    writingAttempts: [], chats: [], examResults: [], reviewEvents: [], notes: [], audit: []
+    writingAttempts: [], chats: [], examResults: [], reviewEvents: [], notes: [], audit: [], aiProfiles: [], activityEvents: []
   };
 }
 function ensureDatabase() {
@@ -52,7 +53,7 @@ function findProgress(db,userId) { let progress=db.progress.find(p=>p.userId===u
 function validateEmail(email) { return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(email||"").toLowerCase()); }
 function normalizeText(text) { return String(text||"").trim().toLowerCase().replace(/ё/g,"е").replace(/\s+/g," "); }
 
-app.get("/api/health", (req,res)=>res.json({ok:true,app:"PUTIRUSU",version:"15.0.0",time:new Date().toISOString()}));
+app.get("/api/health", (req,res)=>res.json({ok:true,app:"PUTIRUSU",version:"16.0.0",time:new Date().toISOString()}));
 app.post("/api/auth/register", (req,res)=>{
   const db=readDatabase(); const name=String(req.body.name||"").trim(); const email=String(req.body.email||"").trim().toLowerCase(); const password=String(req.body.password||"");
   if(name.length<2)return res.status(400).json({error:"Informe um nome válido."}); if(!validateEmail(email))return res.status(400).json({error:"E-mail inválido."}); if(password.length<4)return res.status(400).json({error:"A senha precisa ter pelo menos 4 caracteres."}); if(db.users.some(u=>u.email===email))return res.status(409).json({error:"Este e-mail já está cadastrado."});
@@ -65,10 +66,10 @@ app.get("/api/me",auth,(req,res)=>{const db=readDatabase();const user=db.users.f
 app.put("/api/profile",auth,(req,res)=>{const db=readDatabase();const user=db.users.find(u=>u.id===req.userId);if(!user)return res.status(404).json({error:"Usuário não encontrado."});if(req.body.name)user.name=String(req.body.name).trim().slice(0,80);if(req.body.level)user.level=String(req.body.level).slice(0,2);if(req.body.minutes)user.minutes=Math.max(5,Math.min(180,Number(req.body.minutes)));user.updatedAt=new Date().toISOString();audit(db,req.userId,"profile_update");writeDatabase(db);res.json({user:safeUser(user)});});
 app.get("/api/progress",auth,(req,res)=>{const db=readDatabase();res.json(findProgress(db,req.userId));});
 app.put("/api/progress",auth,(req,res)=>{const db=readDatabase();const p=findProgress(db,req.userId);["xp","streak","lessons"].forEach(k=>{if(Number.isFinite(Number(req.body[k])))p[k]=Number(req.body[k]);});if(req.body.letters&&typeof req.body.letters==="object")p.letters=req.body.letters;p.updatedAt=new Date().toISOString();audit(db,req.userId,"progress_update");writeDatabase(db);res.json(p);});
-app.post("/api/writing/attempts",(req,res)=>{const token=(req.headers.authorization||"").replace(/^Bearer\s+/i,"");const userId=verifyToken(token)||"local-demo";const db=readDatabase();const letter=String(req.body.letter||"").slice(0,2);const score=Math.max(0,Math.min(100,Number(req.body.score)||0));const attempt={id:id("write"),userId,letter,mode:req.body.mode==="print"?"print":"cursive",score,strokes:Math.max(0,Number(req.body.strokes)||0),createdAt:new Date().toISOString()};db.writingAttempts.push(attempt);if(userId!=="local-demo"){const p=findProgress(db,userId);const old=p.letters[letter]||{score:0,attempts:0};p.letters[letter]={score:Math.max(old.score||0,score),attempts:(old.attempts||0)+1,mode:attempt.mode,updatedAt:attempt.createdAt};p.xp+=(score>=75?15:5);p.updatedAt=attempt.createdAt;}writeDatabase(db);res.status(201).json(attempt);});
+app.post("/api/writing/attempts",auth,(req,res)=>{const userId=req.userId;const db=readDatabase();const letter=String(req.body.letter||"").slice(0,2);const score=Math.max(0,Math.min(100,Number(req.body.score)||0));const attempt={id:id("write"),userId,letter,mode:req.body.mode==="print"?"print":"cursive",score,strokes:Math.max(0,Number(req.body.strokes)||0),createdAt:new Date().toISOString()};db.writingAttempts.push(attempt);if(userId!=="local-demo"){const p=findProgress(db,userId);const old=p.letters[letter]||{score:0,attempts:0};p.letters[letter]={score:Math.max(old.score||0,score),attempts:(old.attempts||0)+1,mode:attempt.mode,updatedAt:attempt.createdAt};p.xp+=(score>=75?15:5);p.updatedAt=attempt.createdAt;}writeDatabase(db);res.status(201).json(attempt);});
 app.get("/api/writing/attempts",auth,(req,res)=>{const db=readDatabase();res.json(db.writingAttempts.filter(a=>a.userId===req.userId).slice(-200).reverse());});
 app.get("/api/writing/stats",auth,(req,res)=>{const db=readDatabase();const attempts=db.writingAttempts.filter(a=>a.userId===req.userId);const byLetter={};attempts.forEach(a=>{byLetter[a.letter]||={attempts:0,best:0,average:0,total:0};const x=byLetter[a.letter];x.attempts++;x.best=Math.max(x.best,a.score);x.total+=a.score;x.average=Math.round(x.total/x.attempts);});res.json({total:attempts.length,byLetter});});
-app.post("/api/chat",async(req,res)=>{const token=(req.headers.authorization||"").replace(/^Bearer\s+/i,"");const userId=verifyToken(token)||"local-demo";const message=String(req.body.message||"").trim();const scenario=String(req.body.scenario||"professor");let answer=null;let provider="local";try{answer=await realTeacherAnswer(message,scenario);if(answer)provider="openai";}catch(error){console.error("Falha na IA externa:",error.message);}if(!answer)answer=teacherAnswer(message,scenario);const db=readDatabase();db.chats.push({id:id("chat"),userId,message,scenario,answer,provider,createdAt:new Date().toISOString()});if(db.chats.length>10000)db.chats=db.chats.slice(-10000);writeDatabase(db);res.json({answer,provider});});
+app.post("/api/chat",auth,async(req,res)=>{const userId=req.userId;const message=String(req.body.message||"").trim();const scenario=String(req.body.scenario||"professor");let answer=null;let provider="local";try{answer=await realTeacherAnswer(message,scenario);if(answer)provider="openai";}catch(error){console.error("Falha na IA externa:",error.message);}if(!answer)answer=teacherAnswer(message,scenario);const db=readDatabase();db.chats.push({id:id("chat"),userId,message,scenario,answer,provider,createdAt:new Date().toISOString()});if(db.chats.length>10000)db.chats=db.chats.slice(-10000);writeDatabase(db);res.json({answer,provider});});
 function teacherAnswer(message,scenario){const m=normalizeText(message);if(!m)return "Escreva uma pergunta sobre russo.";if(m.includes("я есть студент"))return "Correção: Я студент. No presente, o verbo быть normalmente é omitido. Tradução: Eu sou estudante.";if(m.includes("т")&&m.includes("curs"))return "Т т: a letra de forma lembra T. A minúscula cursiva escolar frequentemente parece um m latino. Treine ттт e depois escreva там.";if(m.includes("ж")&&(m.includes("escre")||m.includes("curs")))return "Ж ж: faça um centro firme e abra os braços com simetria. Som parecido com o j francês. Pratique: жа, же, жи, жизнь.";if(m.includes("obrigad"))return "Спасибо — obrigado. Pronúncia aproximada: spa-sí-ba. Copie três vezes em cursiva.";if(scenario==="writing")return "Envie a letra que deseja treinar. Eu explicarei forma, cursiva, direção, ligação e uma palavra.";if(scenario==="market")return "No mercado: Сколько это стоит? — Quanto isso custa?";if(scenario==="airport")return "No aeroporto: Где выход на посадку? — Onde fica o portão de embarque?";if(scenario==="restaurant")return "No restaurante: Я хотел бы чай, пожалуйста. — Eu gostaria de chá, por favor.";return "Professor PUTIRUSU: diga qual palavra, letra ou frase você quer aprender. Eu mostrarei russo, tradução, pronúncia, explicação e exercício.";}
 async function realTeacherAnswer(message,scenario){
   const apiKey=process.env.OPENAI_API_KEY;
@@ -84,6 +85,8 @@ async function realTeacherAnswer(message,scenario){
   return parts.join("\n").trim()||null;
 }
 
+installCompanion({ app, auth, readDatabase, writeDatabase, id, findProgress, audit });
+
 app.post("/api/exams",auth,(req,res)=>{const db=readDatabase();const result={id:id("exam"),userId:req.userId,score:Number(req.body.score)||0,total:Number(req.body.total)||0,answers:req.body.answers||[],createdAt:new Date().toISOString()};db.examResults.push(result);audit(db,req.userId,"exam_submit",{score:result.score,total:result.total});writeDatabase(db);res.status(201).json(result);});
 app.get("/api/exams",auth,(req,res)=>{const db=readDatabase();res.json(db.examResults.filter(x=>x.userId===req.userId).reverse());});
 app.post("/api/review",auth,(req,res)=>{const db=readDatabase();const event={id:id("review"),userId:req.userId,item:String(req.body.item||"").slice(0,200),result:req.body.result==="correct"?"correct":"wrong",createdAt:new Date().toISOString()};db.reviewEvents.push(event);writeDatabase(db);res.status(201).json(event);});
@@ -93,7 +96,7 @@ app.get("/api/export",auth,(req,res)=>{const db=readDatabase();const user=db.use
 app.use("/api",(req,res)=>res.status(404).json({error:"Rota da API não encontrada."}));
 app.get("*",(req,res)=>res.sendFile(path.join(ROOT,"index.html")));
 app.use((error,req,res,next)=>{console.error(error);res.status(500).json({error:"Erro interno do servidor."});});
-if(require.main===module){ensureDatabase();app.listen(PORT,()=>console.log(`PUTIRUSU 15 rodando em http://localhost:${PORT}`));}
+if(require.main===module){ensureDatabase();app.listen(PORT,()=>console.log(`PUTIRUSU 16 rodando em http://localhost:${PORT}`));}
 module.exports={app,readDatabase,writeDatabase,teacherAnswer,verifyToken};
 
 const PUTIRUSU_WRITING_CURRICULUM = [
