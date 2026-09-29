@@ -681,11 +681,11 @@
       utter.volume = 1;
 
       if (item.lang === "ru-RU") {
-        utter.rate = 0.72;
-        utter.pitch = 0.72;
+        utter.rate = 0.9;
+        utter.pitch = 0.94;
       } else {
-        utter.rate = 0.98;
-        utter.pitch = 0.96;
+        utter.rate = 1.08;
+        utter.pitch = 1.08;
       }
 
       const selected = voiceFor(item.lang);
@@ -718,9 +718,9 @@
 
     if (/^(oi|olá|ola|eae|e aí|ei|opa|salve|привет)[!. ]*$/.test(m)) {
       const lines = [
-        "Oi. Eu ouvi. Então o sistema ainda está vivo.",
-        "E aí. Eu estava quieta, não desligada.",
-        "Olá. Finalmente resolveu testar se eu estava acordada."
+        "Oi. Tô aqui.",
+        "E aí. O que foi?",
+        "Olá. Você me chamou?"
       ];
       return lines[Math.floor(Math.random() * lines.length)];
     }
@@ -736,7 +736,9 @@
       if (answer && !answer.startsWith("Vamos estudar.")) return answer;
     }
 
-    return "Eu ouvi “" + raw + "”. Meu cérebro remoto não respondeu agora, então prefiro não inventar. " + (focus ? "Mas eu ainda sei que você está em “" + focus + "”." : "Eu continuo acompanhando a tela.");
+    return focus
+      ? "Tá. Eu ouvi. Ainda estou com “" + focus + "” na tela — fala mais um pouco que eu pego a ideia."
+      : "Tá, ouvi. Continua.";
   }
 
   function cleanCompanionSpeech(text) {
@@ -861,7 +863,7 @@
     companion.profile.ambientListening = Boolean(withVoice);
 
     const name = state.user && state.user.name ? state.user.name.split(" ")[0] : "";
-    const intro = (name ? name + ". " : "") + "Eu sou o PUTIRUSU. Não precisa me procurar em lugar nenhum; eu já estou vendo o que acontece aqui. Fala comigo normalmente. Se você disser qualquer coisa, eu respondo.";
+    const intro = (name ? name + ". " : "") + "Eu sou o PUTIRUSU. Eu fico por aqui, observo o que você está fazendo e aprendo o seu jeito de estudar. Pode falar comigo normal.";
 
     companion.lastAnswer = intro;
     showBubble(intro, true);
