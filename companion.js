@@ -561,15 +561,26 @@
       await pc.setLocalDescription(offer);
       await waitForIceComplete(pc);
 
-      const endpoint = state.token && state.token !== "local-demo"
-        ? "/api/ai/realtime/session"
-        : "/api/ai/realtime/guest-session";
+      const authenticated = Boolean(state.token && state.token !== "local-demo");
+      let response = null;
 
-      const response = await companionFetch(endpoint.replace(/^\/api/,""),{
-        method:"POST",
-        headers:{ "Content-Type":"application/sdp" },
-        body:pc.localDescription.sdp
-      });
+      if (authenticated) {
+        try {
+          response = await companionFetch("/ai/realtime/session",{
+            method:"POST",
+            headers:{ "Content-Type":"application/sdp" },
+            body:pc.localDescription.sdp
+          });
+        } catch (_) {}
+      }
+
+      if (!response) {
+        response = await companionFetch("/ai/realtime/guest-session",{
+          method:"POST",
+          headers:{ "Content-Type":"application/sdp" },
+          body:pc.localDescription.sdp
+        });
+      }
 
       const answerSdp = await response.text();
 
@@ -868,14 +879,27 @@
 
   async function callBrain(message) {
     const authenticated = Boolean(state.token && state.token !== "local-demo");
-    const response = await companionFetch(authenticated ? "/ai/respond" : "/ai/guest/respond", {
+    const body = JSON.stringify({
+      message:String(message).slice(0,1600),
+      context:currentContext(),
+      history:companion.history.slice(-14)
+    });
+
+    if (authenticated) {
+      try {
+        const response = await companionFetch("/ai/respond", {
+          method:"POST",
+          headers:{ "Content-Type":"application/json" },
+          body
+        });
+        return response.json();
+      } catch (_) {}
+    }
+
+    const response = await companionFetch("/ai/guest/respond", {
       method:"POST",
       headers:{ "Content-Type":"application/json" },
-      body:JSON.stringify({
-        message:String(message).slice(0,1600),
-        context:currentContext(),
-        history:companion.history.slice(-14)
-      })
+      body
     });
     return response.json();
   }
@@ -1257,12 +1281,17 @@
     }, true);
   }
 
+  function warmCompanionBackend() {
+    companionFetch("/health",{ method:"GET" }).catch(()=>{});
+  }
+
   async function init() {
     if (companion.initialized) return;
     companion.initialized = true;
     createUi();
     installHooks();
     scheduleIdleLife();
+    warmCompanionBackend();
 
     companion.profile = {
       onboarded:false,
