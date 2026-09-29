@@ -1116,7 +1116,7 @@ function renderCourse() {
   const overview = byId("courseOverview");
   if (overview) {
     overview.innerHTML = `
-      <span><strong>${completedLessons}</strong> de ${totalLessons} aulas</span>
+      <span><strong>${completedLessons}</strong> de ${totalLessons} partes</span>
       <div><i style="width:${percent}%"></i></div>
       <b>${percent}%</b>`;
   }
@@ -1135,7 +1135,7 @@ function renderCourse() {
         ${unlocked ? "" : "disabled"}>
         <span class="unit-number">${String(courseIndex + 1).padStart(2,"0")}</span>
         <span class="unit-copy">
-          <small>${course.level} • ${course.lessons.length} aulas</small>
+          <small>${course.level} • ${course.lessons.length} partes</small>
           <strong>${course.title}</strong>
           <em>${course.desc}</em>
         </span>
@@ -1173,8 +1173,11 @@ function openUnit(id) {
         data-unit-lesson="${lessonIndex}"
         ${unlocked ? "" : "disabled"}>
         <span>${done ? "✓" : lessonIndex + 1}</span>
-        <strong>${lesson}</strong>
-        <small>${done ? "Concluída" : unlocked ? "Começar" : "Bloqueada"}</small>
+        <span class="unit-part-copy">
+          <small class="unit-part-label">PARTE ${lessonIndex + 1}</small>
+          <strong>${lesson}</strong>
+        </span>
+        <small class="unit-part-status">${done ? "Concluída" : unlocked ? "Abrir parte" : "Bloqueada"}</small>
         <b>›</b>
       </button>`;
   }).join("");
@@ -1189,7 +1192,7 @@ function openUnit(id) {
           <p>${course.desc}</p>
           <button type="button" class="unit-workbook-btn" id="openUnitWorkbook">📘 Abrir apostila da unidade</button>
         </div>
-        <div class="unit-page-progress"><strong>${progress}%</strong><span>${completed.length}/${course.lessons.length} aulas</span></div>
+        <div class="unit-page-progress"><strong>${progress}%</strong><span>${completed.length}/${course.lessons.length} partes</span></div>
       </div>
       <div class="unit-page-bar"><span style="width:${progress}%"></span></div>
       <div class="unit-lesson-list">${lessons}</div>
@@ -1271,7 +1274,7 @@ function openUnitWorkbook(id) {
           <p>${course.desc}</p>
           <nav>
             <a href="#wb-start">Visão geral</a>
-            ${workbook.sections.map((section,index)=>`<a href="#wb-${index}">${index+1}. ${section.lesson}</a>`).join("")}
+            ${workbook.sections.map((section,index)=>`<a href="#wb-${index}">Parte ${index+1} · ${section.lesson}</a>`).join("")}
             <a href="#wb-vocab">Vocabulário</a>
           </nav>
         </aside>
@@ -1282,7 +1285,7 @@ function openUnitWorkbook(id) {
             <h1>${course.title}</h1>
             <p>${course.desc}</p>
             <div class="workbook-cover-meta">
-              <div><strong>${course.lessons.length}</strong><small>aulas</small></div>
+              <div><strong>${course.lessons.length}</strong><small>partes</small></div>
               <div><strong>${workbook.vocabulary.length}</strong><small>palavras e exemplos</small></div>
               <div><strong>4</strong><small>habilidades: ler, ouvir, falar, escrever</small></div>
             </div>
@@ -1294,7 +1297,7 @@ function openUnitWorkbook(id) {
               <section id="wb-${index}" class="workbook-chapter">
                 <div class="workbook-chapter-number">${String(index+1).padStart(2,"0")}</div>
                 <div class="workbook-chapter-head">
-                  <small>AULA ${index+1}</small>
+                  <small>PARTE ${index+1}</small>
                   <h2>${section.lesson}</h2>
                   <p class="workbook-objective">${pack.objective}</p>
                 </div>
@@ -1332,7 +1335,7 @@ function openUnitWorkbook(id) {
                     ${pack.type ? `<li>Escrever sem copiar: ${pack.type.answer}</li>` : ""}
                     ${pack.speak ? `<li>Falar: ${pack.speak.target}</li>` : ""}
                   </ul>
-                  <button type="button" data-workbook-lesson="${index}">Praticar esta aula</button>
+                  <button type="button" data-workbook-lesson="${index}">Praticar Parte ${index+1}</button>
                 </div>
               </section>`;
           }).join("")}
@@ -1688,7 +1691,7 @@ function renderLessonActivity() {
 
       <main class="v20-main">
         <div class="v20-context">
-          <small>${session.course.level} • Unidade ${session.courseIndex+1}</small>
+          <small>${session.course.level} • Unidade ${session.courseIndex+1} • Parte ${session.lessonIndex+1}</small>
           <strong>${session.course.lessons[session.lessonIndex]}</strong>
         </div>
         <div class="v20-body">${body}</div>
@@ -1935,7 +1938,7 @@ function finishLessonSession() {
       </header>
       <main class="v20-finish">
         <span class="v20-finish-icon">✓</span>
-        <small>AULA CONCLUÍDA</small>
+        <small>PARTE CONCLUÍDA</small>
         <h1>${session.course.lessons[session.lessonIndex]}</h1>
         <p>${session.pack.objective}</p>
         <div class="v20-finish-stats">
@@ -1946,7 +1949,7 @@ function finishLessonSession() {
       </main>
       <footer class="v20-footer">
         <button type="button" class="ghost" id="lessonBackUnit">Voltar à unidade</button>
-        <button type="button" id="lessonNextAction">${nextLesson?"Próxima aula":"Concluir unidade"}</button>
+        <button type="button" id="lessonNextAction">${nextLesson?"Próxima parte":"Concluir unidade"}</button>
       </footer>
     </div>`;
 
