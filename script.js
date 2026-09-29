@@ -1063,7 +1063,8 @@ function firstPendingCourseLesson() {
       }
     }
   }
-  return { course: COURSE[COURSE.length - 1], courseIndex: COURSE.length - 1, lessonIndex: COURSE[COURSE.length - 1].lessons.length - 1 };
+  const last = COURSE[COURSE.length - 1];
+  return { course:last, courseIndex:COURSE.length - 1, lessonIndex:last.lessons.length - 1 };
 }
 
 function renderCourse() {
@@ -1071,86 +1072,96 @@ function renderCourse() {
   const filter = byId("levelFilter")?.value || "all";
   const indexed = COURSE.map((course, courseIndex) => ({ course, courseIndex }));
   const items = indexed.filter(({ course }) => filter === "all" || course.level === filter);
+
   const totalLessons = COURSE.reduce((sum, course) => sum + course.lessons.length, 0);
-  const completedLessons = COURSE.reduce((sum, course) => sum + Math.min(course.lessons.length, completedCourseLessons(course.id).length), 0);
+  const completedLessons = COURSE.reduce(
+    (sum, course) => sum + Math.min(course.lessons.length, completedCourseLessons(course.id).length),
+    0
+  );
   const percent = totalLessons ? Math.round((completedLessons / totalLessons) * 100) : 0;
   const next = firstPendingCourseLesson();
 
   const overview = byId("courseOverview");
   if (overview) {
     overview.innerHTML = `
-      <article class="course-progress-card">
-        <div class="course-progress-copy">
-          <span class="course-kicker">AGORA</span>
+      <section class="course-focus">
+        <div class="course-focus-main">
+          <span class="course-overline">CONTINUE AGORA</span>
+          <div class="course-focus-level">${next.course.level}</div>
           <h2>${next.course.title}</h2>
-          <p>${next.course.level} • Aula ${next.lessonIndex + 1} de ${next.course.lessons.length}: <strong>${next.course.lessons[next.lessonIndex]}</strong></p>
-          <button type="button" data-course-continue>Continuar aprendendo</button>
+          <p>${next.course.lessons[next.lessonIndex]}</p>
+          <button type="button" data-course-continue>Continuar aula</button>
         </div>
-        <div class="course-progress-ring" style="--course-progress:${percent * 3.6}deg" aria-label="${percent}% do caminho concluído">
-          <strong>${percent}%</strong>
-          <span>concluído</span>
+        <div class="course-focus-progress">
+          <div class="course-percentage">${percent}%</div>
+          <span>do curso concluído</span>
+          <div class="course-progress-line"><span style="width:${percent}%"></span></div>
+          <div class="course-progress-numbers">
+            <strong>${completedLessons}</strong>
+            <span>de ${totalLessons} aulas</span>
+          </div>
         </div>
-      </article>
-      <div class="course-mini-stats">
-        <span><strong>${completedLessons}</strong> aulas concluídas</span>
-        <span><strong>${Math.max(0, totalLessons - completedLessons)}</strong> pela frente</span>
-        <span><strong>${next.course.level}</strong> nível atual</span>
-      </div>`;
-    overview.querySelector("[data-course-continue]")?.addEventListener("click", () => openCourse(next.course.id, next.lessonIndex));
+      </section>`;
+    overview.querySelector("[data-course-continue]")?.addEventListener("click", () => {
+      openCourse(next.course.id, next.lessonIndex);
+    });
   }
 
-  const path = byId("courseGrid");
-  path.innerHTML = items.map(({ course, courseIndex }) => {
+  const catalog = byId("courseGrid");
+  catalog.innerHTML = items.map(({ course, courseIndex }) => {
     const completed = completedCourseLessons(course.id);
-    const unitUnlocked = isCourseUnlocked(courseIndex);
-    const unitDone = isCourseComplete(course);
+    const unlocked = isCourseUnlocked(courseIndex);
+    const complete = isCourseComplete(course);
     const progress = Math.round((Math.min(completed.length, course.lessons.length) / course.lessons.length) * 100);
-    const positions = ["left", "center", "right", "center"];
 
-    const lessons = course.lessons.map((lesson, lessonIndex) => {
+    const lessonRows = course.lessons.map((lesson, lessonIndex) => {
       const done = isCourseLessonComplete(course.id, lessonIndex);
       const previousDone = lessonIndex === 0 || isCourseLessonComplete(course.id, lessonIndex - 1);
-      const unlocked = unitUnlocked && previousDone;
-      const stateClass = done ? "done" : unlocked ? "current" : "locked";
-      const position = positions[lessonIndex % positions.length];
-      const icon = done ? "✓" : unlocked ? String(lessonIndex + 1) : "🔒";
+      const lessonUnlocked = unlocked && previousDone;
+      const status = done ? "Concluída" : lessonUnlocked ? "Disponível" : "Bloqueada";
+
       return `
-        <div class="course-step course-step-${position}">
-          <button
-            type="button"
-            class="course-node ${stateClass}"
-            data-course="${course.id}"
-            data-lesson="${lessonIndex}"
-            ${unlocked ? "" : "disabled"}
-            aria-label="${done ? "Concluída" : unlocked ? "Disponível" : "Bloqueada"}: ${lesson}"
-          ><span>${icon}</span></button>
-          <div class="course-node-copy">
+        <button
+          type="button"
+          class="curriculum-lesson ${done ? "done" : ""} ${lessonUnlocked ? "" : "locked"}"
+          data-course="${course.id}"
+          data-lesson="${lessonIndex}"
+          ${lessonUnlocked ? "" : "disabled"}
+        >
+          <span class="curriculum-lesson-number">${String(lessonIndex + 1).padStart(2,"0")}</span>
+          <span class="curriculum-lesson-copy">
             <strong>${lesson}</strong>
-            <small>${done ? "Concluída" : unlocked ? "Pronta para começar" : "Conclua a aula anterior"}</small>
-          </div>
-        </div>`;
+            <small>${status}</small>
+          </span>
+          <span class="curriculum-lesson-action">${done ? "✓" : lessonUnlocked ? "→" : "—"}</span>
+        </button>`;
     }).join("");
 
     return `
-      <section class="course-unit ${unitDone ? "complete" : ""} ${unitUnlocked ? "" : "locked"}">
-        <div class="course-unit-head">
-          <div>
-            <span class="course-unit-level">${course.level}</span>
-            <p>UNIDADE ${courseIndex + 1}</p>
-            <h2>${course.title}</h2>
-            <span>${course.desc}</span>
-          </div>
-          <div class="course-unit-progress">
-            <strong>${completed.length}/${course.lessons.length}</strong>
-            <span>aulas</span>
-          </div>
+      <article class="curriculum-unit ${unlocked ? "" : "locked"} ${complete ? "complete" : ""}">
+        <div class="curriculum-unit-side">
+          <span>NÍVEL ${course.level}</span>
+          <strong>${String(courseIndex + 1).padStart(2,"0")}</strong>
         </div>
-        <div class="course-unit-bar"><span style="width:${progress}%"></span></div>
-        <div class="course-steps">${lessons}</div>
-      </section>`;
+        <div class="curriculum-unit-body">
+          <div class="curriculum-unit-head">
+            <div>
+              <p>UNIDADE ${courseIndex + 1}</p>
+              <h2>${course.title}</h2>
+              <span>${course.desc}</span>
+            </div>
+            <div class="curriculum-unit-meta">
+              <strong>${progress}%</strong>
+              <span>${completed.length}/${course.lessons.length} aulas</span>
+            </div>
+          </div>
+          <div class="curriculum-unit-progress"><span style="width:${progress}%"></span></div>
+          <div class="curriculum-lessons">${lessonRows}</div>
+        </div>
+      </article>`;
   }).join("");
 
-  path.querySelectorAll("[data-course][data-lesson]:not([disabled])").forEach(button => {
+  catalog.querySelectorAll("[data-course][data-lesson]:not([disabled])").forEach(button => {
     button.addEventListener("click", () => openCourse(button.dataset.course, Number(button.dataset.lesson)));
   });
 }
@@ -1173,29 +1184,26 @@ function openCourse(id, lessonIndex = 0) {
   const view = byId("lessonView");
   view.classList.remove("hidden");
   view.innerHTML = `
-    <article class="course-lesson-panel">
-      <div class="course-lesson-top">
-        <button type="button" class="course-close" id="closeCourseLesson" aria-label="Fechar aula">×</button>
+    <article class="lesson-workspace">
+      <div class="lesson-workspace-head">
         <div>
-          <span class="course-unit-level">${course.level} • Unidade ${courseIndex + 1}</span>
-          <p>AULA ${lessonIndex + 1} DE ${course.lessons.length}</p>
+          <span class="lesson-breadcrumb">${course.level} / Unidade ${courseIndex + 1} / Aula ${lessonIndex + 1}</span>
           <h2>${title}</h2>
-          <span>${course.desc}</span>
+          <p>${course.desc}</p>
         </div>
+        <button type="button" class="lesson-close" id="closeCourseLesson" aria-label="Fechar aula">×</button>
       </div>
-      <div class="course-lesson-goal">
-        <span>OBJETIVO</span>
-        <strong>Entender, produzir e usar este conteúdo sem depender de alternativas.</strong>
+
+      <div class="lesson-method">
+        <div><span>01</span><strong>Contexto</strong><p>Veja a língua sendo usada antes da regra.</p></div>
+        <div><span>02</span><strong>Entenda</strong><p>Explicação curta, direta e com exemplos.</p></div>
+        <div><span>03</span><strong>Produza</strong><p>Fale e escreva sem depender de alternativas.</p></div>
+        <div><span>04</span><strong>Use</strong><p>Feche com uma situação real e revisão.</p></div>
       </div>
-      <div class="course-activity-preview">
-        <div><span>01</span><strong>Entender</strong><small>Explicação curta + exemplo real</small></div>
-        <div><span>02</span><strong>Ouvir e falar</strong><small>Áudio + resposta pelo microfone</small></div>
-        <div><span>03</span><strong>Produzir</strong><small>Escrever ou responder sem dica</small></div>
-        <div><span>04</span><strong>Usar</strong><small>Mini situação com o professor</small></div>
-      </div>
-      <div class="course-lesson-actions">
-        <button type="button" class="ghost" id="courseLessonListen">🔊 Ouvir objetivo</button>
-        <button type="button" id="completeCourse">${alreadyDone ? "Revisar e continuar" : "Concluir e continuar"}</button>
+
+      <div class="lesson-workspace-footer">
+        <button type="button" class="ghost" id="courseLessonListen">Ouvir título</button>
+        <button type="button" id="completeCourse">${alreadyDone ? "Revisar próxima etapa" : "Marcar aula como concluída"}</button>
       </div>
     </article>`;
 
@@ -1206,7 +1214,7 @@ function openCourse(id, lessonIndex = 0) {
     const completed = completedCourseLessons(course.id);
     if (!completed.includes(lessonIndex)) {
       completed.push(lessonIndex);
-      completed.sort((a, b) => a - b);
+      completed.sort((a,b) => a - b);
       state.progress.courseLessons[course.id] = completed;
       state.progress.lessons = (state.progress.lessons || 0) + 1;
       addXP(25, "aula concluída");
@@ -1224,15 +1232,15 @@ function openCourse(id, lessonIndex = 0) {
 
     const nextCourse = COURSE[courseIndex + 1];
     if (nextCourse && isCourseUnlocked(courseIndex + 1)) {
-      openCourse(nextCourse.id, 0);
-      toast("Nova unidade desbloqueada!");
+      view.classList.add("hidden");
+      toast("Próxima unidade liberada.");
       return;
     }
 
     view.classList.add("hidden");
   });
 
-  view.scrollIntoView({ behavior: "smooth", block: "center" });
+  view.scrollIntoView({ behavior:"smooth", block:"center" });
 }
 
 function newAudioQuestion() { state.audioItem=sample(WORDS); byId("audioRu").textContent="🔊"; byId("audioPron").textContent="Ouça antes de responder"; const options=shuffle([state.audioItem,...shuffle(WORDS.filter(w=>w!==state.audioItem)).slice(0,3)]);byId("audioOptions").innerHTML=options.map(w=>`<button data-audio-answer="${w.pt}">${w.pt}</button>`).join("");$$('[data-audio-answer]').forEach(b=>b.addEventListener("click",()=>{const ok=b.dataset.audioAnswer===state.audioItem.pt;showFeedback("audioFeedback",ok?`Correto: ${state.audioItem.ru} — ${state.audioItem.pt}`:"Tente ouvir novamente.",ok?"ok":"bad");if(ok)addXP(7,"escuta");})); setTimeout(()=>speak(state.audioItem.ru),200); }
