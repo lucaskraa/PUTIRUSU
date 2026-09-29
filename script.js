@@ -1026,8 +1026,214 @@ function newCopyExercise(announce=true) {
 function checkCopy() { const typed=normalize(byId("copyInput").value),target=normalize(state.copyItem); const ok=typed===target; showFeedback("copyFeedback",ok?"Cópia correta. Agora escreva a mesma coisa à mão.":`Ainda não. Compare com: ${state.copyItem}`,ok?"ok":"bad"); if(ok)addXP(10,"cópia correta"); }
 function renderKeyboard() { byId("russianKeyboard").innerHTML=CYRILLIC_KEYS.map(k=>`<button type="button" data-key="${k}">${k}</button>`).join("")+`<button type="button" data-key=" ">␠</button><button type="button" data-backspace="1">⌫</button>`; $$('[data-key]').forEach(b=>b.addEventListener("click",()=>{const input=byId("copyInput");input.setRangeText(b.dataset.key,input.selectionStart,input.selectionEnd,"end");input.focus();})); $('[data-backspace]').addEventListener("click",()=>{const input=byId("copyInput");const pos=input.selectionStart;if(pos>0)input.setRangeText("",pos-1,pos,"end");input.focus();}); }
 
-function renderCourse() { const filter=byId("levelFilter")?.value||"all"; const items=COURSE.filter(c=>filter==="all"||c.level===filter); byId("courseGrid").innerHTML=items.map(c=>`<article class="course-card"><span class="level-badge">${c.level}</span><h3>${c.title}</h3><p>${c.desc}</p><button data-course="${c.id}">Abrir unidade</button></article>`).join(""); $$('[data-course]').forEach(b=>b.addEventListener("click",()=>openCourse(b.dataset.course))); }
-function openCourse(id) { const c=COURSE.find(x=>x.id===id),view=byId("lessonView");view.classList.remove("hidden");view.innerHTML=`<article class="panel"><div class="head compact"><div><span class="level-badge">${c.level}</span><h2>${c.title}</h2><p>${c.desc}</p></div><button id="completeCourse">Concluir aula</button></div>${c.lessons.map((l,i)=>`<div class="lesson-block"><strong>${i+1}. ${l}</strong><p>Leia o exemplo, ouça a pronúncia, copie em cirílico e responda ao exercício.</p></div>`).join("")}</article>`;byId("completeCourse").addEventListener("click",()=>{state.progress.lessons=(state.progress.lessons||0)+1;addXP(25,"aula concluída");});view.scrollIntoView({behavior:"smooth"}); }
+function ensureCourseProgress() {
+  if (!state.progress.courseLessons || typeof state.progress.courseLessons !== "object") {
+    state.progress.courseLessons = {};
+  }
+}
+
+function completedCourseLessons(courseId) {
+  ensureCourseProgress();
+  const completed = state.progress.courseLessons[courseId];
+  return Array.isArray(completed) ? completed : [];
+}
+
+function isCourseLessonComplete(courseId, lessonIndex) {
+  return completedCourseLessons(courseId).includes(lessonIndex);
+}
+
+function isCourseComplete(course) {
+  return completedCourseLessons(course.id).length >= course.lessons.length;
+}
+
+function isCourseUnlocked(courseIndex) {
+  if (courseIndex <= 0) return true;
+  return isCourseComplete(COURSE[courseIndex - 1]);
+}
+
+function firstPendingCourseLesson() {
+  ensureCourseProgress();
+  for (let courseIndex = 0; courseIndex < COURSE.length; courseIndex++) {
+    if (!isCourseUnlocked(courseIndex)) break;
+    const course = COURSE[courseIndex];
+    for (let lessonIndex = 0; lessonIndex < course.lessons.length; lessonIndex++) {
+      const previousDone = lessonIndex === 0 || isCourseLessonComplete(course.id, lessonIndex - 1);
+      if (previousDone && !isCourseLessonComplete(course.id, lessonIndex)) {
+        return { course, courseIndex, lessonIndex };
+      }
+    }
+  }
+  return { course: COURSE[COURSE.length - 1], courseIndex: COURSE.length - 1, lessonIndex: COURSE[COURSE.length - 1].lessons.length - 1 };
+}
+
+function renderCourse() {
+  ensureCourseProgress();
+  const filter = byId("levelFilter")?.value || "all";
+  const indexed = COURSE.map((course, courseIndex) => ({ course, courseIndex }));
+  const items = indexed.filter(({ course }) => filter === "all" || course.level === filter);
+  const totalLessons = COURSE.reduce((sum, course) => sum + course.lessons.length, 0);
+  const completedLessons = COURSE.reduce((sum, course) => sum + Math.min(course.lessons.length, completedCourseLessons(course.id).length), 0);
+  const percent = totalLessons ? Math.round((completedLessons / totalLessons) * 100) : 0;
+  const next = firstPendingCourseLesson();
+
+  const overview = byId("courseOverview");
+  if (overview) {
+    overview.innerHTML = `
+      <article class="course-progress-card">
+        <div class="course-progress-copy">
+          <span class="course-kicker">AGORA</span>
+          <h2>${next.course.title}</h2>
+          <p>${next.course.level} • Aula ${next.lessonIndex + 1} de ${next.course.lessons.length}: <strong>${next.course.lessons[next.lessonIndex]}</strong></p>
+          <button type="button" data-course-continue>Continuar aprendendo</button>
+        </div>
+        <div class="course-progress-ring" style="--course-progress:${percent * 3.6}deg" aria-label="${percent}% do caminho concluído">
+          <strong>${percent}%</strong>
+          <span>concluído</span>
+        </div>
+      </article>
+      <div class="course-mini-stats">
+        <span><strong>${completedLessons}</strong> aulas concluídas</span>
+        <span><strong>${Math.max(0, totalLessons - completedLessons)}</strong> pela frente</span>
+        <span><strong>${next.course.level}</strong> nível atual</span>
+      </div>`;
+    overview.querySelector("[data-course-continue]")?.addEventListener("click", () => openCourse(next.course.id, next.lessonIndex));
+  }
+
+  const path = byId("courseGrid");
+  path.innerHTML = items.map(({ course, courseIndex }) => {
+    const completed = completedCourseLessons(course.id);
+    const unitUnlocked = isCourseUnlocked(courseIndex);
+    const unitDone = isCourseComplete(course);
+    const progress = Math.round((Math.min(completed.length, course.lessons.length) / course.lessons.length) * 100);
+    const positions = ["left", "center", "right", "center"];
+
+    const lessons = course.lessons.map((lesson, lessonIndex) => {
+      const done = isCourseLessonComplete(course.id, lessonIndex);
+      const previousDone = lessonIndex === 0 || isCourseLessonComplete(course.id, lessonIndex - 1);
+      const unlocked = unitUnlocked && previousDone;
+      const stateClass = done ? "done" : unlocked ? "current" : "locked";
+      const position = positions[lessonIndex % positions.length];
+      const icon = done ? "✓" : unlocked ? String(lessonIndex + 1) : "🔒";
+      return `
+        <div class="course-step course-step-${position}">
+          <button
+            type="button"
+            class="course-node ${stateClass}"
+            data-course="${course.id}"
+            data-lesson="${lessonIndex}"
+            ${unlocked ? "" : "disabled"}
+            aria-label="${done ? "Concluída" : unlocked ? "Disponível" : "Bloqueada"}: ${lesson}"
+          ><span>${icon}</span></button>
+          <div class="course-node-copy">
+            <strong>${lesson}</strong>
+            <small>${done ? "Concluída" : unlocked ? "Pronta para começar" : "Conclua a aula anterior"}</small>
+          </div>
+        </div>`;
+    }).join("");
+
+    return `
+      <section class="course-unit ${unitDone ? "complete" : ""} ${unitUnlocked ? "" : "locked"}">
+        <div class="course-unit-head">
+          <div>
+            <span class="course-unit-level">${course.level}</span>
+            <p>UNIDADE ${courseIndex + 1}</p>
+            <h2>${course.title}</h2>
+            <span>${course.desc}</span>
+          </div>
+          <div class="course-unit-progress">
+            <strong>${completed.length}/${course.lessons.length}</strong>
+            <span>aulas</span>
+          </div>
+        </div>
+        <div class="course-unit-bar"><span style="width:${progress}%"></span></div>
+        <div class="course-steps">${lessons}</div>
+      </section>`;
+  }).join("");
+
+  path.querySelectorAll("[data-course][data-lesson]:not([disabled])").forEach(button => {
+    button.addEventListener("click", () => openCourse(button.dataset.course, Number(button.dataset.lesson)));
+  });
+}
+
+function openCourse(id, lessonIndex = 0) {
+  ensureCourseProgress();
+  const courseIndex = COURSE.findIndex(course => course.id === id);
+  const course = COURSE[courseIndex];
+  if (!course || !isCourseUnlocked(courseIndex)) return;
+
+  lessonIndex = Math.max(0, Math.min(course.lessons.length - 1, Number(lessonIndex) || 0));
+  const previousDone = lessonIndex === 0 || isCourseLessonComplete(course.id, lessonIndex - 1);
+  if (!previousDone) {
+    toast("Conclua a aula anterior primeiro.", "info");
+    return;
+  }
+
+  const title = course.lessons[lessonIndex];
+  const alreadyDone = isCourseLessonComplete(course.id, lessonIndex);
+  const view = byId("lessonView");
+  view.classList.remove("hidden");
+  view.innerHTML = `
+    <article class="course-lesson-panel">
+      <div class="course-lesson-top">
+        <button type="button" class="course-close" id="closeCourseLesson" aria-label="Fechar aula">×</button>
+        <div>
+          <span class="course-unit-level">${course.level} • Unidade ${courseIndex + 1}</span>
+          <p>AULA ${lessonIndex + 1} DE ${course.lessons.length}</p>
+          <h2>${title}</h2>
+          <span>${course.desc}</span>
+        </div>
+      </div>
+      <div class="course-lesson-goal">
+        <span>OBJETIVO</span>
+        <strong>Entender, produzir e usar este conteúdo sem depender de alternativas.</strong>
+      </div>
+      <div class="course-activity-preview">
+        <div><span>01</span><strong>Entender</strong><small>Explicação curta + exemplo real</small></div>
+        <div><span>02</span><strong>Ouvir e falar</strong><small>Áudio + resposta pelo microfone</small></div>
+        <div><span>03</span><strong>Produzir</strong><small>Escrever ou responder sem dica</small></div>
+        <div><span>04</span><strong>Usar</strong><small>Mini situação com o professor</small></div>
+      </div>
+      <div class="course-lesson-actions">
+        <button type="button" class="ghost" id="courseLessonListen">🔊 Ouvir objetivo</button>
+        <button type="button" id="completeCourse">${alreadyDone ? "Revisar e continuar" : "Concluir e continuar"}</button>
+      </div>
+    </article>`;
+
+  byId("closeCourseLesson").addEventListener("click", () => view.classList.add("hidden"));
+  byId("courseLessonListen").addEventListener("click", () => speak(title));
+
+  byId("completeCourse").addEventListener("click", () => {
+    const completed = completedCourseLessons(course.id);
+    if (!completed.includes(lessonIndex)) {
+      completed.push(lessonIndex);
+      completed.sort((a, b) => a - b);
+      state.progress.courseLessons[course.id] = completed;
+      state.progress.lessons = (state.progress.lessons || 0) + 1;
+      addXP(25, "aula concluída");
+    } else {
+      saveLocal();
+    }
+
+    renderStats();
+    renderCourse();
+
+    if (lessonIndex + 1 < course.lessons.length) {
+      openCourse(course.id, lessonIndex + 1);
+      return;
+    }
+
+    const nextCourse = COURSE[courseIndex + 1];
+    if (nextCourse && isCourseUnlocked(courseIndex + 1)) {
+      openCourse(nextCourse.id, 0);
+      toast("Nova unidade desbloqueada!");
+      return;
+    }
+
+    view.classList.add("hidden");
+  });
+
+  view.scrollIntoView({ behavior: "smooth", block: "center" });
+}
 
 function newAudioQuestion() { state.audioItem=sample(WORDS); byId("audioRu").textContent="🔊"; byId("audioPron").textContent="Ouça antes de responder"; const options=shuffle([state.audioItem,...shuffle(WORDS.filter(w=>w!==state.audioItem)).slice(0,3)]);byId("audioOptions").innerHTML=options.map(w=>`<button data-audio-answer="${w.pt}">${w.pt}</button>`).join("");$$('[data-audio-answer]').forEach(b=>b.addEventListener("click",()=>{const ok=b.dataset.audioAnswer===state.audioItem.pt;showFeedback("audioFeedback",ok?`Correto: ${state.audioItem.ru} — ${state.audioItem.pt}`:"Tente ouvir novamente.",ok?"ok":"bad");if(ok)addXP(7,"escuta");})); setTimeout(()=>speak(state.audioItem.ru),200); }
 function newSpeaking() { state.speakingItem=sample(PHRASES); byId("speakRu").textContent=state.speakingItem.ru;byId("speakPt").textContent=state.speakingItem.pt;byId("speakPron").textContent=state.speakingItem.pron;byId("speakResult").className="feedback";byId("speakResult").textContent=""; }
