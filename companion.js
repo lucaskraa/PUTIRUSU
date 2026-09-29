@@ -852,8 +852,8 @@
     }
 
     return focus
-      ? "Tá. Eu ouvi. Ainda estou com “" + focus + "” na tela — fala mais um pouco que eu pego a ideia."
-      : "Tá, ouvi. Continua.";
+      ? "Peguei. Eu ainda estou vendo “" + focus + "”."
+      : "Te ouvi. Minha conversa completa falhou por um instante; tenta mais uma vez.";
   }
 
   function cleanCompanionSpeech(text) {
@@ -885,23 +885,32 @@
       history:companion.history.slice(-14)
     });
 
-    if (authenticated) {
-      try {
-        const response = await companionFetch("/ai/respond", {
-          method:"POST",
-          headers:{ "Content-Type":"application/json" },
-          body
-        });
-        return response.json();
-      } catch (_) {}
-    }
+    const attempt = async () => {
+      if (authenticated) {
+        try {
+          const response = await companionFetch("/ai/respond", {
+            method:"POST",
+            headers:{ "Content-Type":"application/json" },
+            body
+          });
+          return response.json();
+        } catch (_) {}
+      }
 
-    const response = await companionFetch("/ai/guest/respond", {
-      method:"POST",
-      headers:{ "Content-Type":"application/json" },
-      body
-    });
-    return response.json();
+      const response = await companionFetch("/ai/guest/respond", {
+        method:"POST",
+        headers:{ "Content-Type":"application/json" },
+        body
+      });
+      return response.json();
+    };
+
+    try {
+      return await attempt();
+    } catch (firstError) {
+      await new Promise(resolve=>setTimeout(resolve,240));
+      return attempt();
+    }
   }
 
   async function respondTo(message, options) {
@@ -917,7 +926,15 @@
     setStatus("thinking", "pensando");
     setMood("focused");
 
-    if (!(options && options.silentUi)) showBubble("Hm…", true, options && options.heard ? options.heard : "");
+    if (!(options && options.silentUi)) {
+      const bubble = document.getElementById("putiCompanionBubble");
+      const heardBox = document.getElementById("putiHeard");
+      if (bubble) bubble.classList.remove("hidden");
+      if (heardBox && options && options.heard) {
+        heardBox.textContent = "você: " + options.heard;
+        heardBox.classList.remove("hidden");
+      }
+    }
 
     try {
       const data = await callBrain(message);
