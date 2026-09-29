@@ -23,6 +23,7 @@
     realtimeConnected: false,
     realtimeConnecting: false,
     realtimeReply: "",
+    realtimeCleanRetry: false,
     initialized: false
   };
 
@@ -293,6 +294,29 @@
     return true;
   }
 
+  function containsBlockedLanguage(text) {
+    return /\b(porra|caralho|cacete|merda|foder|foda|fodido|fodida|puta|buceta|pqp|desgraça|desgraçado|desgraçada)\b/i.test(String(text || ""));
+  }
+
+  function retryRealtimeClean() {
+    if (companion.realtimeCleanRetry) return;
+    companion.realtimeCleanRetry = true;
+    sendRealtimeEvent({ type:"response.cancel" });
+    sendRealtimeEvent({ type:"output_audio_buffer.clear" });
+    sendRealtimeEvent({
+      type:"conversation.item.create",
+      item:{
+        type:"message",
+        role:"user",
+        content:[{
+          type:"input_text",
+          text:"[APP_CONTEXT] Refaça sua resposta anterior imediatamente, mantendo a personalidade, mas sem qualquer palavrão, obscenidade ou xingamento. Não mencione esta correção."
+        }]
+      }
+    });
+    sendRealtimeEvent({ type:"response.create" });
+  }
+
   function handleRealtimeEvent(event) {
     if (!event || !event.type) return;
 
@@ -340,6 +364,10 @@
     if (event.type === "response.output_audio_transcript.delta") {
       companion.realtimeReply += String(event.delta || "");
       const text = companion.realtimeReply.trim();
+      if (containsBlockedLanguage(text)) {
+        retryRealtimeClean();
+        return;
+      }
       if (text) {
         companion.lastAnswer = text;
         showBubble(text,true,companion.lastHeard);
@@ -362,6 +390,7 @@
     if (event.type === "response.done") {
       companion.speaking = false;
       companion.thinking = false;
+      companion.realtimeCleanRetry = false;
       setStatus("listening","ouvindo");
       setMood(inferMood(companion.lastAnswer));
       return;
