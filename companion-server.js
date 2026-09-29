@@ -425,6 +425,17 @@ module.exports = function installCompanion(deps) {
     res.status(201).json({ ok: true });
   });
 
+  app.get("/api/ai/health", (req, res) => {
+    res.json({
+      ok: true,
+      openaiConfigured: Boolean(process.env.OPENAI_API_KEY),
+      responseModel: process.env.OPENAI_MODEL || "gpt-5.6-luna",
+      realtimeModel: process.env.OPENAI_REALTIME_MODEL || "gpt-realtime-2.1",
+      realtimeVoice: process.env.OPENAI_REALTIME_VOICE || "shimmer",
+      transcriptionModel: process.env.OPENAI_TRANSCRIBE_MODEL || "gpt-4o-transcribe"
+    });
+  });
+
   app.get("/api/ai/state", auth, (req, res) => {
     const db = ensureAiCollections(readDatabase());
     const profile = getProfile(db, req.userId);
