@@ -208,23 +208,20 @@ module.exports = function installCompanion(deps) {
     const apiKey = process.env.GEMINI_API_KEY;
     if (!apiKey) return null;
 
-    const preferred = process.env.GEMINI_MODEL || "gemini-2.5-flash";
-    const models = [...new Set([preferred, "gemini-2.5-flash", "gemini-2.5-flash-lite"])];
+    const preferred = process.env.GEMINI_MODEL || "gemini-3.5-flash";
+    const models = [...new Set([
+      preferred,
+      "gemini-3.5-flash",
+      "gemini-3.5-flash-lite",
+      "gemini-3.6-flash",
+      "gemini-3.8-flash"
+    ])];
     let lastError = null;
 
     for (const model of models) {
       const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 5500);
+      const timeout = setTimeout(() => controller.abort(), 5000);
       try {
-        const generationConfig = {
-          temperature:0.78,
-          topP:0.92,
-          maxOutputTokens:260
-        };
-        if (model.startsWith("gemini-2.5-")) {
-          generationConfig.thinkingConfig = { thinkingBudget:0 };
-        }
-
         const response = await fetch(
           "https://generativelanguage.googleapis.com/v1beta/models/" + encodeURIComponent(model) + ":generateContent",
           {
@@ -240,7 +237,11 @@ module.exports = function installCompanion(deps) {
                 role:"user",
                 parts:[{ text:buildBrainInput(payload) }]
               }],
-              generationConfig
+              generationConfig:{
+                temperature:0.78,
+                topP:0.92,
+                maxOutputTokens:260
+              }
             })
           }
         );
@@ -252,12 +253,14 @@ module.exports = function installCompanion(deps) {
         }
 
         lastError = new Error("Gemini " + model + " respondeu " + response.status + ": " + body.slice(0,220));
-        if (![429,500,502,503,504].includes(response.status)) throw lastError;
+        if (![404,429,500,502,503,504].includes(response.status)) throw lastError;
       } catch (error) {
         lastError = error;
-        if (error && error.name !== "AbortError" && !/429|500|502|503|504|high demand|UNAVAILABLE/i.test(String(error.message || ""))) {
-          throw error;
-        }
+        const recoverable = error && (
+          error.name === "AbortError" ||
+          /404|429|500|502|503|504|high demand|UNAVAILABLE|not available/i.test(String(error.message || ""))
+        );
+        if (!recoverable) throw error;
       } finally {
         clearTimeout(timeout);
       }
