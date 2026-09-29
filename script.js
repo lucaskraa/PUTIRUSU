@@ -1187,6 +1187,7 @@ function openUnit(id) {
           <small>${course.level} • Unidade ${courseIndex + 1}</small>
           <h1>${course.title}</h1>
           <p>${course.desc}</p>
+          <button type="button" class="unit-workbook-btn" id="openUnitWorkbook">📘 Abrir apostila da unidade</button>
         </div>
         <div class="unit-page-progress"><strong>${progress}%</strong><span>${completed.length}/${course.lessons.length} aulas</span></div>
       </div>
@@ -1204,11 +1205,184 @@ function openUnit(id) {
     renderCourse();
   });
 
+  byId("openUnitWorkbook")?.addEventListener("click", () => openUnitWorkbook(course.id));
+
   unitView.querySelectorAll("[data-unit-lesson]:not([disabled])").forEach(button => {
     button.addEventListener("click", () => openCourse(course.id, Number(button.dataset.unitLesson)));
   });
 
   window.scrollTo({top:0, behavior:"smooth"});
+}
+
+function getUnitWorkbook(course) {
+  const courseIndex=COURSE.findIndex(item=>item.id===course.id);
+  const sections=course.lessons.map((lesson,lessonIndex)=>{
+    const pack=getLessonPack(course,lessonIndex);
+    return {lesson,lessonIndex,pack};
+  });
+
+  const vocabulary=[];
+  const seen=new Set();
+  sections.forEach(({pack})=>{
+    (pack.teach||[]).forEach(item=>{
+      const key=item.example;
+      if(key && !seen.has(key)) {
+        seen.add(key);
+        vocabulary.push({ru:item.example,pt:item.translation||"",note:item.sound||item.note||""});
+      }
+    });
+    (pack.examples||[]).forEach(item=>{
+      const key=item.ru;
+      if(key && !seen.has(key)) {
+        seen.add(key);
+        vocabulary.push({ru:item.ru,pt:item.pt||"",note:item.note||""});
+      }
+    });
+  });
+
+  return {course,courseIndex,sections,vocabulary};
+}
+
+function openUnitWorkbook(id) {
+  const course=COURSE.find(item=>item.id===id);
+  if(!course) return;
+  const workbook=getUnitWorkbook(course);
+  const existing=byId("unitWorkbookOverlay");
+  if(existing) existing.remove();
+
+  const overlay=document.createElement("div");
+  overlay.id="unitWorkbookOverlay";
+  overlay.className="workbook-overlay";
+  overlay.innerHTML=`
+    <div class="workbook-shell">
+      <header class="workbook-topbar">
+        <button type="button" id="closeWorkbook" class="workbook-close">×</button>
+        <div>
+          <small>APOSTILA INTERATIVA • ${course.level}</small>
+          <strong>${course.title}</strong>
+        </div>
+        <button type="button" id="printWorkbook" class="workbook-print">Imprimir</button>
+      </header>
+
+      <div class="workbook-layout">
+        <aside class="workbook-toc">
+          <span>UNIDADE ${workbook.courseIndex+1}</span>
+          <h2>${course.title}</h2>
+          <p>${course.desc}</p>
+          <nav>
+            <a href="#wb-start">Visão geral</a>
+            ${workbook.sections.map((section,index)=>`<a href="#wb-${index}">${index+1}. ${section.lesson}</a>`).join("")}
+            <a href="#wb-vocab">Vocabulário</a>
+          </nav>
+        </aside>
+
+        <main class="workbook-content">
+          <section id="wb-start" class="workbook-cover">
+            <span>${course.level} • UNIDADE ${workbook.courseIndex+1}</span>
+            <h1>${course.title}</h1>
+            <p>${course.desc}</p>
+            <div class="workbook-cover-meta">
+              <div><strong>${course.lessons.length}</strong><small>aulas</small></div>
+              <div><strong>${workbook.vocabulary.length}</strong><small>palavras e exemplos</small></div>
+              <div><strong>4</strong><small>habilidades: ler, ouvir, falar, escrever</small></div>
+            </div>
+          </section>
+
+          ${workbook.sections.map((section,index)=>{
+            const pack=section.pack;
+            return `
+              <section id="wb-${index}" class="workbook-chapter">
+                <div class="workbook-chapter-number">${String(index+1).padStart(2,"0")}</div>
+                <div class="workbook-chapter-head">
+                  <small>AULA ${index+1}</small>
+                  <h2>${section.lesson}</h2>
+                  <p class="workbook-objective">${pack.objective}</p>
+                </div>
+
+                <article class="workbook-theory">
+                  <h3>Entenda</h3>
+                  <p>${pack.concept}</p>
+                  <div class="workbook-tip"><b>Dica importante</b><span>${pack.tip}</span></div>
+                </article>
+
+                ${Array.isArray(pack.teach)&&pack.teach.length ? `
+                  <div class="workbook-teach-grid">
+                    ${pack.teach.map((item,itemIndex)=>`
+                      <button type="button" class="workbook-symbol" data-workbook-audio="${index}:${itemIndex}">
+                        <strong>${item.glyph}</strong>
+                        <span>${item.sound}</span>
+                        <p>${item.note}</p>
+                        <small>🔊 ${item.example} • ${item.translation}</small>
+                      </button>`).join("")}
+                  </div>` : ""}
+
+                ${Array.isArray(pack.examples)&&pack.examples.length ? `
+                  <div class="workbook-examples">
+                    <h3>Exemplos</h3>
+                    ${pack.examples.map((item,itemIndex)=>`
+                      <button type="button" data-workbook-example="${index}:${itemIndex}">
+                        <span>🔊</span><strong>${item.ru}</strong><em>${item.pt}</em><small>${item.note||""}</small>
+                      </button>`).join("")}
+                  </div>` : ""}
+
+                <div class="workbook-practice-box">
+                  <h3>Você deve conseguir</h3>
+                  <ul>
+                    <li>${pack.objective}</li>
+                    ${pack.type ? `<li>Escrever sem copiar: ${pack.type.answer}</li>` : ""}
+                    ${pack.speak ? `<li>Falar: ${pack.speak.target}</li>` : ""}
+                  </ul>
+                  <button type="button" data-workbook-lesson="${index}">Praticar esta aula</button>
+                </div>
+              </section>`;
+          }).join("")}
+
+          <section id="wb-vocab" class="workbook-vocab">
+            <span>CONSULTA RÁPIDA</span>
+            <h2>Vocabulário e exemplos da unidade</h2>
+            <div>
+              ${workbook.vocabulary.map(item=>`
+                <article><strong>${item.ru}</strong><span>${item.pt}</span><small>${item.note}</small></article>
+              `).join("")}
+            </div>
+          </section>
+        </main>
+      </div>
+    </div>`;
+
+  document.body.appendChild(overlay);
+  document.body.classList.add("workbook-mode");
+
+  byId("closeWorkbook").addEventListener("click",closeUnitWorkbook);
+  byId("printWorkbook").addEventListener("click",()=>window.print());
+
+  overlay.querySelectorAll("[data-workbook-audio]").forEach(button=>{
+    button.addEventListener("click",()=>{
+      const [sectionIndex,itemIndex]=button.dataset.workbookAudio.split(":").map(Number);
+      const item=workbook.sections[sectionIndex].pack.teach[itemIndex];
+      speak(item.example||item.glyph,.72);
+    });
+  });
+  overlay.querySelectorAll("[data-workbook-example]").forEach(button=>{
+    button.addEventListener("click",()=>{
+      const [sectionIndex,itemIndex]=button.dataset.workbookExample.split(":").map(Number);
+      speak(workbook.sections[sectionIndex].pack.examples[itemIndex].ru,.72);
+    });
+  });
+  overlay.querySelectorAll("[data-workbook-lesson]").forEach(button=>{
+    button.addEventListener("click",()=>{
+      const lessonIndex=Number(button.dataset.workbookLesson);
+      closeUnitWorkbook();
+      const unlocked=lessonIndex===0 || isCourseLessonComplete(course.id,lessonIndex-1);
+      if(unlocked) openCourse(course.id,lessonIndex);
+      else toast("Conclua a aula anterior primeiro.","info");
+    });
+  });
+}
+
+function closeUnitWorkbook() {
+  byId("unitWorkbookOverlay")?.remove();
+  document.body.classList.remove("workbook-mode");
 }
 
 function getLessonPack(course, lessonIndex) {
@@ -1226,16 +1400,51 @@ function getLessonPack(course, lessonIndex) {
 
 function buildLessonSteps(pack) {
   const steps = [
-    {type:"intro",title:"Antes de começar",objective:pack.objective,concept:pack.concept,tip:pack.tip}
+    {type:"goal", objective:pack.objective},
+    {type:"explain", concept:pack.concept, tip:pack.tip}
   ];
-  if (Array.isArray(pack.teach) && pack.teach.length) steps.push({type:"teach",title:"Aprenda",items:pack.teach});
-  if (Array.isArray(pack.examples) && pack.examples.length) steps.push({type:"examples",title:"Veja e escute",examples:pack.examples});
-  if (pack.listen) steps.push({type:"listen",...pack.listen});
+
+  if (Array.isArray(pack.teach) && pack.teach.length) {
+    pack.teach.forEach((item,index) => steps.push({
+      type:"teachItem",
+      item,
+      number:index+1,
+      total:pack.teach.length
+    }));
+  }
+
+  if (Array.isArray(pack.examples) && pack.examples.length) {
+    steps.push({type:"examples",title:"Leia em contexto",examples:pack.examples});
+  }
+
+  if (pack.listen) {
+    steps.push({type:"listen",...pack.listen});
+  } else if (Array.isArray(pack.examples) && pack.examples.length >= 2) {
+    const target=pack.examples[0];
+    steps.push({
+      type:"listen",
+      prompt:"Ouça e escolha o que foi dito.",
+      target:target.ru,
+      options:pack.examples.slice(0,3).map(item=>item.ru),
+      answer:target.ru,
+      explain:`Você ouviu “${target.ru}” — ${target.pt}.`
+    });
+  }
+
   if (pack.choice) steps.push({type:"choice",...pack.choice});
   if (pack.type) steps.push({type:"type",...pack.type});
   if (pack.arrange) steps.push({type:"arrange",...pack.arrange});
   if (pack.speak) steps.push({type:"speak",...pack.speak});
-  if (Array.isArray(pack.recap) && pack.recap.length) steps.push({type:"recap",title:"Fechando a aula",items:pack.recap});
+
+  const recap = Array.isArray(pack.recap) && pack.recap.length
+    ? pack.recap
+    : [
+        pack.objective,
+        pack.tip,
+        ...(pack.examples || []).slice(0,2).map(item=>`${item.ru} = ${item.pt}`)
+      ].filter(Boolean);
+
+  steps.push({type:"recap",title:"O que você leva desta aula",items:recap});
   return steps;
 }
 
@@ -1321,34 +1530,46 @@ function renderLessonActivity() {
   let primaryDisabled=false;
   let primaryMode="advance";
 
-  if (step.type==="intro") {
+  if (step.type==="goal") {
     body=`
-      <section class="v20-copy">
-        <span class="v20-kicker">O QUE VOCÊ VAI APRENDER</span>
+      <section class="v21-goal">
+        <span class="v20-kicker">META DA AULA</span>
+        <div class="v21-goal-mark">✦</div>
         <h1>${step.objective}</h1>
-        <p>${step.concept}</p>
-        <aside class="v20-note"><b>Dica</b><span>${step.tip}</span></aside>
+        <p>Você vai aprender em etapas curtas e depois usar o conteúdo sem ajuda.</p>
       </section>`;
     primaryLabel="Começar";
   }
 
-  if (step.type==="teach") {
+  if (step.type==="explain") {
     body=`
-      <section class="v20-copy">
-        <span class="v20-kicker">APRENDA</span>
-        <h1>${step.title}</h1>
-        <p>Toque em cada cartão para ouvir um exemplo. Leia o som e a observação antes de avançar.</p>
-      </section>
-      <div class="v20-teach-grid">
-        ${step.items.map((item,index)=>`
-          <button type="button" class="v20-teach-card" data-teach-audio="${index}">
-            <span class="v20-glyph">${item.glyph}</span>
-            <span class="v20-sound">${item.sound}</span>
-            <strong>${item.name}</strong>
-            <p>${item.note}</p>
-            <small>🔊 ${item.example} <em>• ${item.translation}</em></small>
-          </button>`).join("")}
-      </div>`;
+      <section class="v21-explain">
+        <span class="v20-kicker">ENTENDA PRIMEIRO</span>
+        <h1>Antes de praticar</h1>
+        <p>${step.concept}</p>
+        <aside class="v21-tip">
+          <span>💡</span>
+          <div><b>Dica</b><p>${step.tip}</p></div>
+        </aside>
+      </section>`;
+  }
+
+  if (step.type==="teachItem") {
+    const item=step.item;
+    body=`
+      <section class="v21-symbol-lesson">
+        <span class="v20-kicker">APRENDA • ${step.number} DE ${step.total}</span>
+        <button type="button" class="v21-symbol-audio" id="teachItemAudio" aria-label="Ouvir exemplo">🔊</button>
+        <div class="v21-symbol">${item.glyph}</div>
+        <div class="v21-symbol-sound">${item.sound}</div>
+        <h1>${item.name}</h1>
+        <p>${item.note}</p>
+        <div class="v21-symbol-example">
+          <small>EXEMPLO</small>
+          <strong>${item.example}</strong>
+          <span>${item.translation}</span>
+        </div>
+      </section>`;
   }
 
   if (step.type==="examples") {
@@ -1481,12 +1702,9 @@ function renderLessonActivity() {
 
   byId("lessonExit").addEventListener("click",()=>closeLessonToUnit());
 
-  $$("[data-teach-audio]",view).forEach(button=>{
-    button.addEventListener("click",()=>{
-      const item=step.items[Number(button.dataset.teachAudio)];
-      speak(item.example || item.glyph,.72);
-    });
-  });
+  if (step.type==="teachItem") {
+    byId("teachItemAudio").addEventListener("click",()=>speak(step.item.example || step.item.glyph,.7));
+  }
 
   $$("[data-example-audio]",view).forEach(button=>{
     button.addEventListener("click",()=>{
