@@ -5,6 +5,7 @@ const crypto = require("crypto");
 
 module.exports = function installCompanion(deps) {
   const { app, auth, readDatabase, writeDatabase, id, findProgress, audit } = deps;
+  console.log("PUTIRUSU companion Gemini configured:", Boolean(process.env.GEMINI_API_KEY));
   console.log("PUTIRUSU companion OpenAI configured:", Boolean(process.env.OPENAI_API_KEY));
 
   const ALLOWED_EVENTS = new Set([
@@ -179,12 +180,15 @@ module.exports = function installCompanion(deps) {
     ].join("\n");
   }
 
-  async function generateAnswer(payload) {
-    const apiKey = process.env.OPENAI_API_KEY;
-    const model = process.env.OPENAI_MODEL || "gpt-5.6-luna";
-    if (!apiKey) return null;
+  function geminiOutputText(data) {
+    const parts = data && data.candidates && data.candidates[0] && data.candidates[0].content
+      ? data.candidates[0].content.parts || []
+      : [];
+    return parts.map(part => part && part.text ? part.text : "").join("\n").trim();
+  }
 
-    const input = [
+  function buildBrainInput(payload) {
+    return [
       "MODO: " + (payload.guest ? "conversa temporária sem memória persistente" : "conta autenticada com memória pedagógica privada"),
       "ALUNO: " + JSON.stringify(payload.user || {}),
       "PROGRESSO: " + JSON.stringify(payload.progress || {}),
@@ -193,6 +197,43 @@ module.exports = function installCompanion(deps) {
       "CONVERSA RECENTE: " + JSON.stringify(payload.history || []),
       "FALA/MENSAGEM ATUAL: " + payload.message
     ].join("\n\n");
+  }
+
+  async function generateGeminiAnswer(payload) {
+    const apiKey = process.env.GEMINI_API_KEY;
+    if (!apiKey) return null;
+    const model = process.env.GEMINI_MODEL || "gemini-2.5-flash";
+    const response = await fetch(
+      "https://generativelanguage.googleapis.com/v1beta/models/" + encodeURIComponent(model) + ":generateContent",
+      {
+        method:"POST",
+        headers:{
+          "x-goog-api-key":apiKey,
+          "Content-Type":"application/json"
+        },
+        body:JSON.stringify({
+          systemInstruction:{ parts:[{ text:personalityInstructions() }] },
+          contents:[{
+            role:"user",
+            parts:[{ text:buildBrainInput(payload) }]
+          }],
+          generationConfig:{
+            temperature:0.82,
+            topP:0.92,
+            maxOutputTokens:420
+          }
+        })
+      }
+    );
+    const body = await response.text();
+    if (!response.ok) throw new Error("Gemini respondeu " + response.status + ": " + body.slice(0,220));
+    return geminiOutputText(JSON.parse(body)) || null;
+  }
+
+  async function generateOpenAIAnswer(payload) {
+    const apiKey = process.env.OPENAI_API_KEY;
+    if (!apiKey) return null;
+    const model = process.env.OPENAI_MODEL || "gpt-5.6-luna";
 
     const response = await fetch("https://api.openai.com/v1/responses", {
       method: "POST",
@@ -204,12 +245,27 @@ module.exports = function installCompanion(deps) {
         model,
         reasoning: { effort: "low" },
         instructions: personalityInstructions(),
-        input
+        input: buildBrainInput(payload)
       })
     });
 
     if (!response.ok) throw new Error("OpenAI respondeu " + response.status);
     return outputText(await response.json()) || null;
+  }
+
+  async function generateAnswer(payload) {
+    if (process.env.GEMINI_API_KEY) {
+      try {
+        const answer = await generateGeminiAnswer(payload);
+        if (answer) return answer;
+      } catch (error) {
+        console.error("Falha Gemini texto:", error.message);
+        if (!process.env.OPENAI_API_KEY) throw error;
+      }
+    }
+
+    if (process.env.OPENAI_API_KEY) return generateOpenAIAnswer(payload);
+    return null;
   }
 
   function localAnswer(message, context, snapshot) {
@@ -304,6 +360,55 @@ module.exports = function installCompanion(deps) {
     return bucket.count <= 30;
   }
 
+  async function createGeminiLiveToken(user, snapshot, history) {
+    const apiKey = process.env.GEMINI_API_KEY;
+    if (!apiKey) return null;
+
+    const model = process.env.GEMINI_LIVE_MODEL || "gemini-2.5-flash-native-audio-preview-12-2025";
+    const voice = process.env.GEMINI_LIVE_VOICE || "Leda";
+    const now = Date.now();
+    const payload = {
+      uses:1,
+      expireTime:new Date(now + 30 * 60 * 1000).toISOString(),
+      newSessionExpireTime:new Date(now + 2 * 60 * 1000).toISOString(),
+      liveConnectConstraints:{
+        model:"models/" + model,
+        config:{ responseModalities:["AUDIO"] }
+      }
+    };
+
+    const response = await fetch("https://generativelanguage.googleapis.com/v1beta/auth_tokens", {
+      method:"POST",
+      headers:{
+        "x-goog-api-key":apiKey,
+        "Content-Type":"application/json"
+      },
+      body:JSON.stringify(payload)
+    });
+    const body = await response.text();
+    if (!response.ok) throw new Error("Gemini token respondeu " + response.status + ": " + body.slice(0,260));
+    const data = JSON.parse(body);
+    if (!data.name) throw new Error("Gemini não retornou token temporário.");
+
+    return {
+      token:data.name,
+      model,
+      voice,
+      instructions:realtimeInstructions(user, snapshot, history)
+    };
+  }
+
+  async function issueGeminiToken(req, res, user, snapshot, history) {
+    try {
+      const session = await createGeminiLiveToken(user, snapshot, history);
+      if (!session) return res.status(503).json({ error:"Voz neural gratuita não configurada no servidor." });
+      res.json(session);
+    } catch (error) {
+      console.error("Falha ao criar token Gemini Live:", error.message);
+      res.status(502).json({ error:"Não foi possível abrir a conversa Gemini Live." });
+    }
+  }
+
   async function proxyRealtimeSession(req, res, user, snapshot, history, safetyId) {
     const apiKey = process.env.OPENAI_API_KEY;
     if (!apiKey) return res.status(503).json({ error: "Voz neural não configurada no servidor." });
@@ -362,6 +467,40 @@ module.exports = function installCompanion(deps) {
   }
 
   const sdpParser = express.text({ type: ["application/sdp", "text/plain"], limit: "256kb" });
+
+  app.get("/api/ai/live/token", auth, async (req, res) => {
+    const db = ensureAiCollections(readDatabase());
+    const profile = getProfile(db, req.userId);
+    const user = db.users.find(item => item.id === req.userId);
+    if (!user) return res.status(404).json({ error:"Usuário não encontrado." });
+
+    const snapshot = profile.memoryEnabled !== false
+      ? learningSnapshot(db, req.userId)
+      : { recentActivity:[], repeatedDifficulties:[], weakWritingLetters:[] };
+    const recentHistory = profile.memoryEnabled !== false && profile.storeTranscripts !== false
+      ? db.chats.filter(item => item.userId === req.userId && (item.scope === "companion" || item.scope === "realtime"))
+          .slice(-12)
+          .map(item => ({
+            role:item.role || (item.message ? "user" : "assistant"),
+            message:item.message || item.text || "",
+            answer:item.answer || ""
+          }))
+      : [];
+
+    writeDatabase(db);
+    return issueGeminiToken(req, res, user, snapshot, recentHistory);
+  });
+
+  app.get("/api/ai/live/guest-token", async (req, res) => {
+    if (!allowGuest(req)) return res.status(429).json({ error:"Muitas tentativas em pouco tempo." });
+    return issueGeminiToken(
+      req,
+      res,
+      { name:"aluno", level:"A1" },
+      { recentActivity:[], repeatedDifficulties:[], weakWritingLetters:[] },
+      []
+    );
+  });
 
   app.post("/api/ai/realtime/session", sdpParser, auth, async (req, res) => {
     const db = ensureAiCollections(readDatabase());
@@ -429,13 +568,22 @@ module.exports = function installCompanion(deps) {
   });
 
   app.get("/api/ai/health", (req, res) => {
+    const geminiConfigured = Boolean(process.env.GEMINI_API_KEY);
+    const openaiConfigured = Boolean(process.env.OPENAI_API_KEY);
     res.json({
-      ok: true,
-      openaiConfigured: Boolean(process.env.OPENAI_API_KEY),
-      responseModel: process.env.OPENAI_MODEL || "gpt-5.6-luna",
-      realtimeModel: process.env.OPENAI_REALTIME_MODEL || "gpt-realtime-2.1",
-      realtimeVoice: process.env.OPENAI_REALTIME_VOICE || "marin",
-      transcriptionModel: process.env.OPENAI_TRANSCRIBE_MODEL || "gpt-4o-transcribe"
+      ok:true,
+      aiConfigured:geminiConfigured || openaiConfigured,
+      liveConfigured:geminiConfigured,
+      liveProvider:geminiConfigured ? "gemini" : "none",
+      geminiConfigured,
+      geminiModel:process.env.GEMINI_MODEL || "gemini-2.5-flash",
+      geminiLiveModel:process.env.GEMINI_LIVE_MODEL || "gemini-2.5-flash-native-audio-preview-12-2025",
+      geminiVoice:process.env.GEMINI_LIVE_VOICE || "Leda",
+      openaiConfigured,
+      responseModel:process.env.OPENAI_MODEL || "gpt-5.6-luna",
+      realtimeModel:process.env.OPENAI_REALTIME_MODEL || "gpt-realtime-2.1",
+      realtimeVoice:process.env.OPENAI_REALTIME_VOICE || "marin",
+      transcriptionModel:process.env.OPENAI_TRANSCRIBE_MODEL || "gpt-4o-transcribe"
     });
   });
 
