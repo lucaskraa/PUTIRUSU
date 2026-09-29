@@ -24,6 +24,8 @@
     realtimeConnecting: false,
     realtimeReply: "",
     realtimeCleanRetry: false,
+    realtimeAvailable: null,
+    realtimeFailures: 0,
     history: [],
     initialized: false
   };
@@ -266,6 +268,18 @@
     try {
       await request("/ai/event", { method:"POST", body:JSON.stringify({ type, details:details || {} }) });
     } catch (_) {}
+  }
+
+  async function probeAiCapability() {
+    try {
+      const response = await companionFetch("/ai/health",{ method:"GET" });
+      const data = await response.json();
+      companion.realtimeAvailable = Boolean(data && data.openaiConfigured);
+      return data || {};
+    } catch (_) {
+      companion.realtimeAvailable = false;
+      return {};
+    }
   }
 
   function setRealtimeMicEnabled(enabled) {
@@ -540,9 +554,11 @@
       });
       dc.addEventListener("close",()=>{
         companion.realtimeConnected = false;
-        if (companion.wantsListening) {
-          setStatus("idle","reconectando");
-          setTimeout(()=>connectRealtime().catch(()=>{}),900);
+        companion.realtimeConnecting = false;
+        if (companion.wantsListening && !companion.lessonMicBusy) {
+          companion.realtimeFailures += 1;
+          setStatus("listening","ouvindo");
+          if (!companion.recognition) startRecognitionLoop(false);
         }
       });
 
@@ -554,6 +570,7 @@
         }
         if (["failed","disconnected","closed"].includes(pc.connectionState)) {
           companion.realtimeConnected = false;
+          companion.realtimeConnecting = false;
         }
       });
 
@@ -587,12 +604,15 @@
       await pc.setRemoteDescription({ type:"answer", sdp:answerSdp });
       companion.realtimeConnected = true;
       companion.realtimeConnecting = false;
+      companion.realtimeFailures = 0;
       setStatus("listening","ouvindo");
       return true;
     } catch (error) {
       console.warn("PUTIRUSU voz neural indisponível:",error.message);
       closeRealtime();
       companion.realtimeConnecting = false;
+      companion.realtimeFailures += 1;
+      if (companion.realtimeFailures >= 2) companion.realtimeAvailable = false;
       return false;
     }
   }
@@ -715,12 +735,16 @@
     companion.profile.ambientListening = true;
     companion.profile.voiceEnabled = true;
     await savePrivacy({ ambientListening:true, voiceEnabled:true });
-    setStatus("thinking","conectando");
 
-    const neural = await connectRealtime();
-    if (neural) {
-      showBubble("Tô ouvindo.",true);
-      return;
+    if (companion.realtimeAvailable == null) await probeAiCapability();
+
+    if (companion.realtimeAvailable !== false) {
+      setStatus("thinking","conectando");
+      const neural = await connectRealtime();
+      if (neural) {
+        showBubble("Tô ouvindo.",true);
+        return;
+      }
     }
 
     setStatus("listening","ouvindo");
@@ -751,9 +775,13 @@
       return voices.find(v => String(v.lang || "").toLowerCase().startsWith("ru")) || null;
     }
 
-    return voices.find(v => String(v.lang || "").toLowerCase().startsWith("pt-br"))
-      || voices.find(v => String(v.lang || "").toLowerCase().startsWith("pt"))
-      || null;
+    const pt = voices.filter(v => String(v.lang || "").toLowerCase().startsWith("pt"));
+    const preferred = ["francisca","luciana","maria","natural","online","google português","google portugues","microsoft"];
+    for (const key of preferred) {
+      const hit = pt.find(v => String(v.name || "").toLowerCase().includes(key));
+      if (hit) return hit;
+    }
+    return pt.find(v => String(v.lang || "").toLowerCase().startsWith("pt-br")) || pt[0] || null;
   }
 
   function speechSegments(text) {
@@ -791,11 +819,11 @@
       utter.volume = 1;
 
       if (item.lang === "ru-RU") {
-        utter.rate = 0.9;
-        utter.pitch = 0.94;
+        utter.rate = 1.0;
+        utter.pitch = 0.98;
       } else {
-        utter.rate = 1.08;
-        utter.pitch = 1.08;
+        utter.rate = 1.14;
+        utter.pitch = 1.12;
       }
 
       const selected = voiceFor(item.lang);
@@ -1017,7 +1045,8 @@
 
     if (withVoice) {
       companion.wantsListening = true;
-      const neural = await connectRealtime();
+      if (companion.realtimeAvailable == null) await probeAiCapability();
+      const neural = companion.realtimeAvailable !== false ? await connectRealtime() : false;
       if (!neural) speakCompanion(intro);
     }
   }
@@ -1309,6 +1338,7 @@
     installHooks();
     scheduleIdleLife();
     warmCompanionBackend();
+    probeAiCapability();
 
     companion.profile = {
       onboarded:false,
@@ -1335,9 +1365,11 @@
       }, 550);
     } else if (companion.profile.ambientListening) {
       companion.wantsListening = true;
-      setTimeout(function () {
-        connectRealtime().then(ok=>{ if (!ok) startRecognitionLoop(false); });
-      },700);
+      setTimeout(async function () {
+        if (companion.realtimeAvailable == null) await probeAiCapability();
+        const ok = companion.realtimeAvailable !== false ? await connectRealtime() : false;
+        if (!ok) startRecognitionLoop(false);
+      },500);
     } else {
       setStatus("idle", "observando");
     }
