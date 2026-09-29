@@ -678,6 +678,8 @@ const COURSE = [
   { id:"c1-1", level:"C1", title:"Texto avançado", desc:"Notícia, ensaio e literatura.", lessons:["Estilo", "Nuance", "Expressões"] },
   { id:"c2-1", level:"C2", title:"Domínio natural", desc:"Ironia, ritmo e precisão.", lessons:["Colocações", "Regionalismos", "Reescrita"] }
 ];
+const LESSON_CONTENT = window.PUTIRUSU_LESSONS || {};
+
 const CULTURE = [
   { title:"Alfabeto e Pedro, o Grande", text:"O alfabeto russo moderno passou por reformas. Estudar a escrita ajuda a perceber como a língua mudou ao longo do tempo." },
   { title:"Caligrafia escolar", text:"Na escola russa, alunos praticam соединения: as ligações entre letras. A legibilidade vem antes da velocidade." },
@@ -758,6 +760,7 @@ function renderStats() {
 }
 
 function showScreen(name) {
+  document.body.classList.remove("lesson-mode");
   $$(".screen").forEach(el => el.classList.toggle("active", el.id === `screen-${name}`));
 
   const practiceChildren = new Set(["alphabet","handwriting","copybook","audio","speaking","review","exam","dictionary","culture","games"]);
@@ -1150,6 +1153,7 @@ function renderCourse() {
 }
 
 function openUnit(id) {
+  document.body.classList.remove("lesson-mode");
   ensureCourseProgress();
   const courseIndex = COURSE.findIndex(course => course.id === id);
   const course = COURSE[courseIndex];
@@ -1207,6 +1211,45 @@ function openUnit(id) {
   window.scrollTo({top:0, behavior:"smooth"});
 }
 
+function getLessonPack(course, lessonIndex) {
+  return LESSON_CONTENT[`${course.id}:${lessonIndex}`] || {
+    objective: course.desc,
+    concept: "Aprenda o conteúdo em contexto e use-o de forma ativa.",
+    tip: "Leia, escute, produza e revise.",
+    examples: [{ru:course.lessons[lessonIndex],pt:course.desc,note:"conteúdo da aula"}],
+    choice:{prompt:"Qual é o foco desta aula?",options:[course.lessons[lessonIndex],course.title,course.level],answer:course.lessons[lessonIndex],explain:"Este é o foco principal da aula."},
+    type:{prompt:"Digite o título da aula.",answer:course.lessons[lessonIndex]},
+    arrange:{prompt:"Organize o conteúdo principal.",words:[course.lessons[lessonIndex]],answer:course.lessons[lessonIndex]},
+    speak:{target:course.lessons[lessonIndex],pt:course.desc,hint:"Fale com calma e clareza."}
+  };
+}
+
+function buildLessonSteps(pack) {
+  return [
+    {type:"intro",title:"Antes de começar",objective:pack.objective,concept:pack.concept,tip:pack.tip},
+    {type:"examples",title:"Veja e escute",examples:pack.examples},
+    {type:"choice",...pack.choice},
+    {type:"type",...pack.type},
+    {type:"arrange",...pack.arrange},
+    {type:"speak",...pack.speak}
+  ];
+}
+
+function recordLessonMistake(session, step, expected, received="") {
+  if (!state.progress.lessonMistakes) state.progress.lessonMistakes = [];
+  state.progress.lessonMistakes.unshift({
+    courseId:session.course.id,
+    lessonIndex:session.lessonIndex,
+    type:step.type,
+    prompt:step.prompt || step.target || step.title || "",
+    expected,
+    received,
+    at:new Date().toISOString()
+  });
+  state.progress.lessonMistakes = state.progress.lessonMistakes.slice(0,100);
+  saveLocal();
+}
+
 function openCourse(id, lessonIndex = 0) {
   ensureCourseProgress();
   const courseIndex = COURSE.findIndex(course => course.id === id);
@@ -1217,67 +1260,444 @@ function openCourse(id, lessonIndex = 0) {
   const previousDone = lessonIndex === 0 || isCourseLessonComplete(course.id, lessonIndex - 1);
   if (!previousDone) return;
 
-  const title = course.lessons[lessonIndex];
-  const alreadyDone = isCourseLessonComplete(course.id, lessonIndex);
-  const view = byId("lessonView");
+  const pack = getLessonPack(course, lessonIndex);
+  state.lessonSession = {
+    course,
+    courseIndex,
+    lessonIndex,
+    pack,
+    steps:buildLessonSteps(pack),
+    stepIndex:0,
+    correct:0,
+    graded:0,
+    selected:null,
+    arranged:[],
+    attempted:false,
+    alreadyDone:isCourseLessonComplete(course.id, lessonIndex),
+    completedNow:false
+  };
 
+  document.body.classList.add("lesson-mode");
+  byId("courseListView").classList.add("hidden");
   byId("courseUnitView").classList.add("hidden");
-  view.classList.remove("hidden");
-  view.innerHTML = `
-    <div class="lesson-simple">
-      <button type="button" class="unit-back" id="backToUnit">← Unidade</button>
-      <div class="lesson-simple-head">
-        <small>${course.level} • Aula ${lessonIndex + 1} de ${course.lessons.length}</small>
-        <h1>${title}</h1>
-        <p>${course.desc}</p>
+  byId("lessonView").classList.remove("hidden");
+  renderLessonActivity();
+  window.scrollTo({top:0});
+}
+
+function lessonAdvance() {
+  const session=state.lessonSession;
+  if (!session) return;
+  session.stepIndex += 1;
+  session.selected=null;
+  session.arranged=[];
+  session.attempted=false;
+  renderLessonActivity();
+  window.scrollTo({top:0,behavior:"smooth"});
+}
+
+function renderLessonActivity() {
+  const session=state.lessonSession;
+  if (!session) return;
+  const view=byId("lessonView");
+  const total=session.steps.length;
+  const done=Math.min(session.stepIndex,total);
+  const percent=Math.round((done/total)*100);
+
+  if (session.stepIndex >= total) {
+    finishLessonSession();
+    return;
+  }
+
+  const step=session.steps[session.stepIndex];
+  let body="";
+  let primaryLabel="Continuar";
+  let primaryDisabled=false;
+  let primaryMode="advance";
+
+  if (step.type==="intro") {
+    body=`
+      <div class="lesson-copy-block">
+        <span class="lesson-type-label">OBJETIVO</span>
+        <h1>${step.objective}</h1>
+        <p>${step.concept}</p>
+        <div class="lesson-tip"><strong>Dica</strong><span>${step.tip}</span></div>
+      </div>`;
+    primaryLabel="Começar";
+  }
+
+  if (step.type==="examples") {
+    body=`
+      <div class="lesson-copy-block">
+        <span class="lesson-type-label">EXEMPLOS</span>
+        <h1>${step.title}</h1>
+        <p>Toque no áudio, escute e repita antes de continuar.</p>
       </div>
-      <div class="lesson-simple-body">
-        <p>O conteúdo completo desta aula entra na Parte 2. Nesta base, o fluxo e a progressão já estão prontos.</p>
+      <div class="lesson-example-list">
+        ${step.examples.map((item,index)=>`
+          <button type="button" class="lesson-example" data-example-audio="${index}">
+            <span class="lesson-audio-icon">🔊</span>
+            <span><strong>${item.ru}</strong><small>${item.pt}</small></span>
+            <em>${item.note || ""}</em>
+          </button>`).join("")}
+      </div>`;
+  }
+
+  if (step.type==="choice") {
+    body=`
+      <div class="lesson-question">
+        <span class="lesson-type-label">ESCOLHA</span>
+        <h1>${step.prompt}</h1>
       </div>
-      <div class="lesson-simple-actions">
-        <button type="button" id="courseLessonListen" class="ghost">Ouvir</button>
-        <button type="button" id="completeCourse">${alreadyDone ? "Continuar" : "Concluir aula"}</button>
+      <div class="lesson-choice-grid">
+        ${step.options.map((option,index)=>`<button type="button" class="lesson-option" data-choice="${index}">${option}</button>`).join("")}
+      </div>`;
+    primaryLabel="Verificar";
+    primaryDisabled=true;
+    primaryMode="check-choice";
+  }
+
+  if (step.type==="type") {
+    body=`
+      <div class="lesson-question">
+        <span class="lesson-type-label">ESCREVA</span>
+        <h1>${step.prompt}</h1>
       </div>
+      <div class="lesson-type-answer">
+        <input id="lessonTypeInput" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="Digite sua resposta em russo">
+      </div>`;
+    primaryLabel="Verificar";
+    primaryMode="check-type";
+  }
+
+  if (step.type==="arrange") {
+    const words=shuffle(step.words);
+    body=`
+      <div class="lesson-question">
+        <span class="lesson-type-label">MONTE A FRASE</span>
+        <h1>${step.prompt}</h1>
+      </div>
+      <div id="lessonArrangeAnswer" class="lesson-arrange-answer"><span>Toque nas palavras na ordem correta</span></div>
+      <div id="lessonWordBank" class="lesson-word-bank">
+        ${words.map((word,index)=>`<button type="button" data-word-index="${index}" data-word="${word}">${word}</button>`).join("")}
+      </div>`;
+    primaryLabel="Verificar";
+    primaryDisabled=true;
+    primaryMode="check-arrange";
+  }
+
+  if (step.type==="speak") {
+    body=`
+      <div class="lesson-question lesson-speak-question">
+        <span class="lesson-type-label">FALE</span>
+        <h1>${step.target}</h1>
+        <p>${step.pt}</p>
+      </div>
+      <div class="lesson-speak-box">
+        <button type="button" class="lesson-round-action" id="lessonHearModel">🔊<span>Ouvir modelo</span></button>
+        <button type="button" class="lesson-round-action primary" id="lessonRecordSpeech">●<span>Gravar minha fala</span></button>
+      </div>
+      <div id="lessonSpeechResult" class="lesson-inline-result">
+        <span>${step.hint || "Escute e tente reproduzir o ritmo."}</span>
+      </div>`;
+    primaryLabel="Continuar";
+    primaryDisabled=true;
+    primaryMode="advance";
+  }
+
+  view.innerHTML=`
+    <div class="duo-lesson-shell">
+      <header class="lesson-run-header">
+        <button type="button" class="lesson-exit" id="lessonExit" aria-label="Sair da aula">×</button>
+        <div class="lesson-run-progress"><span style="width:${percent}%"></span></div>
+        <div class="lesson-run-count">${session.stepIndex+1}/${total}</div>
+      </header>
+
+      <main class="lesson-run-main">
+        <div class="lesson-run-context">
+          <small>${session.course.level} • ${session.course.title}</small>
+          <strong>${session.course.lessons[session.lessonIndex]}</strong>
+        </div>
+        <div id="lessonActivityBody" class="lesson-activity-body">${body}</div>
+      </main>
+
+      <footer id="lessonRunFooter" class="lesson-run-footer">
+        <div id="lessonFeedback" class="lesson-feedback"></div>
+        <button type="button" id="lessonPrimary" data-mode="${primaryMode}" ${primaryDisabled?"disabled":""}>${primaryLabel}</button>
+      </footer>
     </div>`;
 
-  byId("backToUnit").addEventListener("click", () => {
-    view.classList.add("hidden");
-    openUnit(course.id);
+  byId("lessonExit").addEventListener("click",()=>closeLessonToUnit());
+
+  $$("[data-example-audio]",view).forEach(button=>{
+    button.addEventListener("click",()=>{
+      const item=step.examples[Number(button.dataset.exampleAudio)];
+      speak(item.ru,.75);
+    });
   });
-  byId("courseLessonListen").addEventListener("click", () => speak(title));
 
-  byId("completeCourse").addEventListener("click", () => {
-    const completed = completedCourseLessons(course.id);
-    if (!completed.includes(lessonIndex)) {
-      completed.push(lessonIndex);
-      completed.sort((a,b) => a-b);
-      state.progress.courseLessons[course.id] = completed;
-      state.progress.lessons = (state.progress.lessons || 0) + 1;
-      addXP(25, "aula concluída");
-    } else {
-      saveLocal();
+  if (step.type==="choice") {
+    $$("[data-choice]",view).forEach(button=>{
+      button.addEventListener("click",()=>{
+        if (session.attempted) return;
+        $$("[data-choice]",view).forEach(b=>b.classList.remove("selected"));
+        button.classList.add("selected");
+        session.selected=step.options[Number(button.dataset.choice)];
+        byId("lessonPrimary").disabled=false;
+      });
+    });
+  }
+
+  if (step.type==="type") {
+    const input=byId("lessonTypeInput");
+    input.focus();
+    input.addEventListener("input",()=>byId("lessonPrimary").disabled=!input.value.trim());
+    byId("lessonPrimary").disabled=true;
+    input.addEventListener("keydown",event=>{
+      if(event.key==="Enter" && !byId("lessonPrimary").disabled) byId("lessonPrimary").click();
+    });
+  }
+
+  if (step.type==="arrange") {
+    const answer=byId("lessonArrangeAnswer");
+    const bank=byId("lessonWordBank");
+    bank.querySelectorAll("[data-word]").forEach(button=>{
+      button.addEventListener("click",()=>{
+        if(session.attempted) return;
+        const word=button.dataset.word;
+        session.arranged.push(word);
+        button.disabled=true;
+        answer.innerHTML=session.arranged.map((w,index)=>`<button type="button" data-arranged-index="${index}">${w}</button>`).join("");
+        answer.querySelectorAll("[data-arranged-index]").forEach(answerButton=>{
+          answerButton.addEventListener("click",()=>{
+            if(session.attempted) return;
+            const removed=session.arranged.splice(Number(answerButton.dataset.arrangedIndex),1)[0];
+            const source=[...bank.querySelectorAll("[data-word]")].find(b=>b.dataset.word===removed && b.disabled);
+            if(source) source.disabled=false;
+            answer.innerHTML=session.arranged.length?session.arranged.map((w,index)=>`<button type="button" data-arranged-index="${index}">${w}</button>`).join(""):"<span>Toque nas palavras na ordem correta</span>";
+            byId("lessonPrimary").disabled=session.arranged.length===0;
+            renderLessonArrangeRemovalHandlers();
+          });
+        });
+        byId("lessonPrimary").disabled=session.arranged.length===0;
+      });
+    });
+  }
+
+  if (step.type==="speak") {
+    byId("lessonHearModel").addEventListener("click",()=>speak(step.target,.72));
+    byId("lessonRecordSpeech").addEventListener("click",()=>startLessonRecognition(step));
+  }
+
+  byId("lessonPrimary").addEventListener("click",handleLessonPrimary);
+}
+
+function renderLessonArrangeRemovalHandlers() {
+  const session=state.lessonSession;
+  const answer=byId("lessonArrangeAnswer");
+  const bank=byId("lessonWordBank");
+  if(!session||!answer||!bank) return;
+  answer.querySelectorAll("[data-arranged-index]").forEach(answerButton=>{
+    answerButton.addEventListener("click",()=>{
+      if(session.attempted) return;
+      const index=Number(answerButton.dataset.arrangedIndex);
+      const removed=session.arranged.splice(index,1)[0];
+      const source=[...bank.querySelectorAll("[data-word]")].find(b=>b.dataset.word===removed && b.disabled);
+      if(source) source.disabled=false;
+      answer.innerHTML=session.arranged.length?session.arranged.map((w,i)=>`<button type="button" data-arranged-index="${i}">${w}</button>`).join(""):"<span>Toque nas palavras na ordem correta</span>";
+      byId("lessonPrimary").disabled=session.arranged.length===0;
+      renderLessonArrangeRemovalHandlers();
+    });
+  });
+}
+
+function handleLessonPrimary() {
+  const session=state.lessonSession;
+  if(!session) return;
+  const step=session.steps[session.stepIndex];
+  const primary=byId("lessonPrimary");
+  const mode=primary.dataset.mode;
+
+  if(mode==="advance") {
+    lessonAdvance();
+    return;
+  }
+
+  if(session.attempted) {
+    lessonAdvance();
+    return;
+  }
+
+  let ok=false;
+  let received="";
+  let expected="";
+  session.graded += 1;
+
+  if(mode==="check-choice") {
+    received=session.selected || "";
+    expected=step.answer;
+    ok=normalize(received)===normalize(expected);
+    $$("[data-choice]").forEach(button=>{
+      const option=step.options[Number(button.dataset.choice)];
+      if(normalize(option)===normalize(expected)) button.classList.add("correct");
+      else if(button.classList.contains("selected")) button.classList.add("wrong");
+      button.disabled=true;
+    });
+  }
+
+  if(mode==="check-type") {
+    const input=byId("lessonTypeInput");
+    received=input.value;
+    expected=step.answer;
+    const accepted=[step.answer,...(step.accepted||[])].map(normalize);
+    ok=accepted.includes(normalize(received));
+    input.disabled=true;
+    input.classList.add(ok?"correct":"wrong");
+  }
+
+  if(mode==="check-arrange") {
+    received=session.arranged.join(" ");
+    expected=step.answer;
+    ok=normalize(received)===normalize(expected);
+    byId("lessonArrangeAnswer").classList.add(ok?"correct":"wrong");
+    byId("lessonWordBank").querySelectorAll("button").forEach(button=>button.disabled=true);
+  }
+
+  session.attempted=true;
+  if(ok) session.correct += 1;
+  else recordLessonMistake(session,step,expected,received);
+
+  const feedback=byId("lessonFeedback");
+  feedback.className=`lesson-feedback ${ok?"ok":"bad"}`;
+  feedback.innerHTML=ok
+    ? `<strong>Boa!</strong><span>${step.explain || "Resposta correta."}</span>`
+    : `<strong>Quase.</strong><span>Resposta: <b>${expected}</b>${step.explain?" — "+step.explain:""}</span>`;
+
+  const footer=byId("lessonRunFooter");
+  footer.classList.add(ok?"is-correct":"is-wrong");
+  primary.textContent="Continuar";
+  primary.dataset.mode="advance";
+  primary.disabled=false;
+}
+
+function startLessonRecognition(step) {
+  const Recognition=window.SpeechRecognition||window.webkitSpeechRecognition;
+  const button=byId("lessonRecordSpeech");
+  const result=byId("lessonSpeechResult");
+  const primary=byId("lessonPrimary");
+  const session=state.lessonSession;
+
+  if(!Recognition) {
+    result.className="lesson-inline-result info";
+    result.innerHTML="<strong>Microfone não disponível neste navegador.</strong><span>Ouça o modelo e repita em voz alta mesmo assim.</span>";
+    primary.disabled=false;
+    return;
+  }
+
+  const rec=new Recognition();
+  rec.lang="ru-RU";
+  rec.interimResults=false;
+  button.disabled=true;
+  button.classList.add("recording");
+  button.querySelector("span").textContent="Ouvindo...";
+
+  rec.onresult=event=>{
+    const heard=event.results[0][0].transcript;
+    const score=similarity(normalize(step.target),normalize(heard));
+    const ok=score>=72;
+    if(!session.attempted) session.graded += 1;
+    session.attempted=true;
+    if(ok) session.correct += 1;
+    else recordLessonMistake(session,step,step.target,heard);
+
+    result.className=`lesson-inline-result ${ok?"ok":"info"}`;
+    result.innerHTML=`<strong>Você falou: ${heard}</strong><span>Correspondência aproximada: ${score}%. ${ok?"A frase foi reconhecida com clareza.":"Ouça o modelo e tente aproximar palavras e ritmo."}</span>`;
+    primary.disabled=false;
+  };
+  rec.onerror=()=>{
+    result.className="lesson-inline-result info";
+    result.innerHTML="<strong>Não consegui reconhecer.</strong><span>Tente outra vez ou continue e volte na revisão.</span>";
+    primary.disabled=false;
+  };
+  rec.onend=()=>{
+    button.disabled=false;
+    button.classList.remove("recording");
+    button.querySelector("span").textContent="Gravar novamente";
+  };
+  rec.start();
+}
+
+function finishLessonSession() {
+  const session=state.lessonSession;
+  if(!session) return;
+  const view=byId("lessonView");
+
+  if(!session.alreadyDone && !session.completedNow) {
+    const completed=completedCourseLessons(session.course.id);
+    if(!completed.includes(session.lessonIndex)) {
+      completed.push(session.lessonIndex);
+      completed.sort((a,b)=>a-b);
+      state.progress.courseLessons[session.course.id]=completed;
+      state.progress.lessons=(state.progress.lessons||0)+1;
+      session.completedNow=true;
+      addXP(25,"aula concluída");
     }
-
     renderStats();
     renderCourse();
     renderHome();
+  }
 
-    if (lessonIndex + 1 < course.lessons.length) {
-      openCourse(course.id, lessonIndex + 1);
+  const score=session.graded?Math.round((session.correct/session.graded)*100):100;
+  const nextLesson=session.lessonIndex+1<session.course.lessons.length;
+
+  view.innerHTML=`
+    <div class="duo-lesson-shell lesson-finish-shell">
+      <header class="lesson-run-header">
+        <button type="button" class="lesson-exit" id="lessonFinishExit">×</button>
+        <div class="lesson-run-progress"><span style="width:100%"></span></div>
+        <div class="lesson-run-count">✓</div>
+      </header>
+      <main class="lesson-finish">
+        <span class="lesson-finish-mark">✓</span>
+        <small>AULA CONCLUÍDA</small>
+        <h1>${session.course.lessons[session.lessonIndex]}</h1>
+        <p>${session.pack.objective}</p>
+        <div class="lesson-finish-stats">
+          <div><strong>${score}%</strong><span>acertos</span></div>
+          <div><strong>+25</strong><span>XP</span></div>
+          <div><strong>${session.correct}/${session.graded}</strong><span>atividades</span></div>
+        </div>
+      </main>
+      <footer class="lesson-run-footer">
+        <button type="button" class="ghost" id="lessonBackUnit">Voltar à unidade</button>
+        <button type="button" id="lessonNextAction">${nextLesson?"Próxima aula":"Concluir unidade"}</button>
+      </footer>
+    </div>`;
+
+  byId("lessonFinishExit").addEventListener("click",()=>closeLessonToUnit());
+  byId("lessonBackUnit").addEventListener("click",()=>closeLessonToUnit());
+  byId("lessonNextAction").addEventListener("click",()=>{
+    if(nextLesson) {
+      openCourse(session.course.id,session.lessonIndex+1);
       return;
     }
-
+    document.body.classList.remove("lesson-mode");
     view.classList.add("hidden");
-    const nextCourse = COURSE[courseIndex + 1];
-    if (nextCourse && isCourseUnlocked(courseIndex + 1)) {
+    const nextCourse=COURSE[session.courseIndex+1];
+    if(nextCourse && isCourseUnlocked(session.courseIndex+1)) {
       openUnit(nextCourse.id);
       toast("Próxima unidade liberada.");
     } else {
-      openUnit(course.id);
+      openUnit(session.course.id);
     }
   });
+}
 
-  window.scrollTo({top:0, behavior:"smooth"});
+function closeLessonToUnit() {
+  const session=state.lessonSession;
+  document.body.classList.remove("lesson-mode");
+  byId("lessonView").classList.add("hidden");
+  if(session) openUnit(session.course.id);
 }
 
 function newAudioQuestion() { state.audioItem=sample(WORDS); byId("audioRu").textContent="🔊"; byId("audioPron").textContent="Ouça antes de responder"; const options=shuffle([state.audioItem,...shuffle(WORDS.filter(w=>w!==state.audioItem)).slice(0,3)]);byId("audioOptions").innerHTML=options.map(w=>`<button data-audio-answer="${w.pt}">${w.pt}</button>`).join("");$$('[data-audio-answer]').forEach(b=>b.addEventListener("click",()=>{const ok=b.dataset.audioAnswer===state.audioItem.pt;showFeedback("audioFeedback",ok?`Correto: ${state.audioItem.ru} — ${state.audioItem.pt}`:"Tente ouvir novamente.",ok?"ok":"bad");if(ok)addXP(7,"escuta");})); setTimeout(()=>speak(state.audioItem.ru),200); }
