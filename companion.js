@@ -745,7 +745,7 @@
                 speechConfig:{
                   voiceConfig:{
                     prebuiltVoiceConfig:{
-                      voiceName:session.voice || "Leda"
+                      voiceName:session.voice || "Achird"
                     }
                   }
                 }
@@ -758,8 +758,8 @@
                   disabled:false,
                   startOfSpeechSensitivity:"START_SENSITIVITY_HIGH",
                   endOfSpeechSensitivity:"END_SENSITIVITY_HIGH",
-                  prefixPaddingMs:80,
-                  silenceDurationMs:360
+                  prefixPaddingMs:40,
+                  silenceDurationMs:180
                 },
                 activityHandling:"START_OF_ACTIVITY_INTERRUPTS",
                 turnCoverage:"TURN_INCLUDES_ONLY_ACTIVITY"
