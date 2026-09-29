@@ -1298,7 +1298,7 @@ function openUnitWorkbook(id) {
           <p>${course.desc}</p>
           <nav>
             <a href="#wb-start">Visão geral</a>
-            ${workbook.sections.map((section,index)=>`<a href="#wb-${index}">Parte ${index+1} · ${section.lesson}</a>`).join("")}
+            ${workbook.sections.map((section,index)=>`<a href="#wb-${index}">Aula ${index+1} · ${section.lesson}</a>`).join("")}
             <a href="#wb-vocab">Vocabulário</a>
           </nav>
         </aside>
@@ -1309,7 +1309,7 @@ function openUnitWorkbook(id) {
             <h1>${course.title}</h1>
             <p>${course.desc}</p>
             <div class="workbook-cover-meta">
-              <div><strong>${course.lessons.length}</strong><small>partes</small></div>
+              <div><strong>${course.lessons.length}</strong><small>aulas</small></div>
               <div><strong>${workbook.vocabulary.length}</strong><small>palavras e exemplos</small></div>
               <div><strong>4</strong><small>habilidades: ler, ouvir, falar, escrever</small></div>
             </div>
