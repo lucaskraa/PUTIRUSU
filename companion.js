@@ -15,6 +15,11 @@
     recentMistakes: 0,
     lastAppEvent: null,
     contextFingerprint: "",
+    activityBrief: "",
+    briefFingerprint: "",
+    briefTimer: null,
+    noticedActivityKey: "",
+    lastUserAt: Date.now(),
     lastAutonomyAt: 0,
     autonomyTimer: null,
     contextSyncTimer: null,
@@ -54,8 +59,25 @@
   function rememberTurn(role, text) {
     const value = String(text || "").trim();
     if (!value) return;
-    companion.history.push({ role: role === "assistant" ? "assistant" : "user", text: value });
-    companion.history = companion.history.slice(-18);
+    const normalizedRole = role === "assistant" ? "assistant" : "user";
+    if (normalizedRole === "user") companion.lastUserAt = Date.now();
+    companion.history.push({ role:normalizedRole, text:value });
+    companion.history = companion.history.slice(-24);
+    try {
+      localStorage.setItem("ppRecentConversation",JSON.stringify(companion.history.slice(-24)));
+    } catch (_) {}
+  }
+
+  function restoreRecentConversation() {
+    try {
+      const data = JSON.parse(localStorage.getItem("ppRecentConversation") || "[]");
+      if (Array.isArray(data)) {
+        companion.history = data
+          .filter(item => item && (item.role === "user" || item.role === "assistant") && item.text)
+          .slice(-24)
+          .map(item => ({ role:item.role, text:String(item.text).slice(0,1800) }));
+      }
+    } catch (_) {}
   }
 
   async function companionFetch(path, options) {
@@ -100,7 +122,8 @@
     const context = {
       screen: activeScreen ? activeScreen.id.replace("screen-", "") : (lessonMode ? "course" : "unknown"),
       title: document.getElementById("screenTitle") ? compactText(document.getElementById("screenTitle").textContent,120) : "",
-      lastEvent: companion.lastAppEvent || null
+      lastEvent: companion.lastAppEvent || null,
+      activityBrief: companion.activityBrief || ""
     };
 
     const session = state.lessonSession;
@@ -538,11 +561,104 @@
     sendGeminiClientContent("[APP_CONTEXT] " + JSON.stringify(currentContext()), false);
   }
 
+  function activityKey(context) {
+    if (!context || !context.activity) return "";
+    return [
+      context.courseId || "",
+      context.lessonIndex == null ? "" : context.lessonIndex,
+      context.stepIndex == null ? "" : context.stepIndex,
+      context.activity.type || "",
+      context.activity.prompt || "",
+      context.activity.target || "",
+      context.attempted ? "attempted" : "fresh",
+      context.feedback || ""
+    ].join("|").slice(0,1800);
+  }
+
+  async function preAnalyzeActivity(context, key) {
+    const authenticated = Boolean(state.token && state.token !== "local-demo");
+    const body = JSON.stringify({ context });
+    try {
+      let response;
+      if (authenticated) {
+        try {
+          response = await companionFetch("/ai/context/analyze",{
+            method:"POST",
+            headers:{ "Content-Type":"application/json" },
+            body
+          });
+        } catch (_) {}
+      }
+      if (!response) {
+        response = await companionFetch("/ai/guest/context/analyze",{
+          method:"POST",
+          headers:{ "Content-Type":"application/json" },
+          body
+        });
+      }
+      const data = await response.json();
+      if (key !== companion.briefFingerprint) return;
+      companion.activityBrief = String(data && data.brief || "").slice(0,1800);
+      if (companion.realtimeConnected && companion.activityBrief) {
+        sendGeminiClientContent("[ACTIVITY_BRIEF] " + companion.activityBrief,false);
+        sendGeminiClientContent("[APP_CONTEXT] " + JSON.stringify(currentContext()),false);
+      }
+      scheduleAliveObservation(context,key);
+    } catch (_) {}
+  }
+
+  function scheduleActivityPreAnalysis(context) {
+    const key = activityKey(context);
+    if (!key) {
+      companion.activityBrief = "";
+      companion.briefFingerprint = "";
+      return;
+    }
+    if (key === companion.briefFingerprint) return;
+
+    companion.briefFingerprint = key;
+    companion.activityBrief = "";
+    if (companion.briefTimer) clearTimeout(companion.briefTimer);
+    companion.briefTimer = setTimeout(() => {
+      preAnalyzeActivity(context,key);
+    },520);
+  }
+
+  function scheduleAliveObservation(context,key) {
+    if (!key || companion.noticedActivityKey === key) return;
+    companion.noticedActivityKey = key;
+    const started = Date.now();
+
+    setTimeout(() => {
+      if (!companion.wantsListening || companion.speaking || companion.thinking) return;
+      if (Date.now() - companion.lastUserAt < 5000) return;
+      if (companion.briefFingerprint !== key) return;
+      const fresh = currentContext();
+      if (!fresh.activity) return;
+
+      const prompt =
+        "Você percebeu silenciosamente uma nova atividade. Faça UMA observação curta e espontânea sobre algo concreto dela, ou uma pergunta curta que ajude o aluno a começar. " +
+        "Não dê a resposta pronta e não diga que recebeu contexto do aplicativo. Soe como alguém ao lado dele que acabou de olhar a tela.";
+
+      if (companion.realtimeConnected) {
+        sendGeminiClientContent(
+          "[AUTONOMOUS_REACTION]\n" + prompt +
+          "\n[ACTIVITY_BRIEF]\n" + String(companion.activityBrief || "") +
+          "\n[APP_CONTEXT]\n" + JSON.stringify(fresh),
+          true
+        );
+      } else if (companion.aiAvailable !== false && Date.now() - started > 3500) {
+        respondTo(prompt,{ silentUi:true });
+      }
+    },6500);
+  }
+
   function syncRealtimeContext(force) {
     const context = currentContext();
     const fingerprint = JSON.stringify(context);
     if (!force && fingerprint === companion.contextFingerprint) return;
     companion.contextFingerprint = fingerprint;
+    scheduleActivityPreAnalysis(context);
     if (companion.realtimeConnected) {
       sendGeminiClientContent("[APP_CONTEXT] " + fingerprint, false);
     }
@@ -550,7 +666,7 @@
 
   function scheduleContextSync() {
     if (companion.contextSyncTimer) clearTimeout(companion.contextSyncTimer);
-    companion.contextSyncTimer = setTimeout(() => syncRealtimeContext(false), 160);
+    companion.contextSyncTimer = setTimeout(() => syncRealtimeContext(false), 140);
   }
 
   function startContextObserver() {
@@ -1293,6 +1409,11 @@
     if (m.includes("obrigad")) return "De nada. Registre este raro momento de educação digital.";
     if (m.includes("tchau") || m.includes("falou")) return "Vai lá. Eu continuo aqui. Vantagens de não ter pernas.";
 
+    if (/^[\p{L}\p{N}][\p{L}\p{N}\-]{0,28}$/u.test(raw)) {
+      const word = raw.charAt(0).toUpperCase() + raw.slice(1);
+      return word + "? Do nada assim? Tô ouvindo. Isso veio de algum contexto ou você só tá testando se eu acompanho qualquer coisa?";
+    }
+
     if (typeof localTeacher === "function") {
       const answer = localTeacher(raw, "professor");
       if (answer && !answer.startsWith("Vamos estudar.")) return answer;
@@ -1754,6 +1875,7 @@
   async function init() {
     if (companion.initialized) return;
     companion.initialized = true;
+    restoreRecentConversation();
     createUi();
     installHooks();
     startContextObserver();
