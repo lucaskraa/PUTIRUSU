@@ -15209,3 +15209,101 @@ body.workbook-mode {
     border-radius: 14px;
   }
 }
+
+
+/* === PUTIRUSU V22 — LESSON VIEWPORT / SCROLL FIX === */
+/*
+  The lesson runner used a fixed-height CSS grid with a minmax(0,1fr)
+  middle row. On shorter desktop viewports that row could become smaller
+  than the activity content, so the next row (footer) visually cut the text.
+  Keep the same visual structure, but let the activity keep its natural
+  height and scroll the fullscreen overlay when necessary.
+*/
+.v20-lesson-overlay {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  height: 100dvh;
+  min-height: 100vh;
+  min-height: 100dvh;
+  overflow-x: hidden;
+  overflow-y: auto !important;
+}
+
+.v20-header {
+  flex: 0 0 auto;
+}
+
+.v20-main {
+  flex: 1 0 auto;
+  min-height: 0;
+  padding-top: 30px;
+  padding-bottom: 38px;
+}
+
+.v20-footer {
+  position: relative !important;
+  bottom: auto !important;
+  flex: 0 0 auto;
+  z-index: 2;
+}
+
+/* Make the first screens fit comfortably on common 720–800px-tall laptops,
+   while still allowing full-page scrolling for longer activities. */
+@media (max-height: 800px) and (min-width: 641px) {
+  .v20-header {
+    min-height: 64px;
+  }
+
+  .v20-main {
+    padding-top: 22px;
+    padding-bottom: 28px;
+  }
+
+  .v20-context {
+    margin-bottom: 20px;
+  }
+
+  .v21-goal-mark {
+    width: 52px;
+    height: 52px;
+    margin: 16px 0 16px;
+  }
+
+  .v21-goal h1,
+  .v21-explain h1 {
+    font-size: clamp(1.95rem, 4vw, 2.8rem);
+  }
+
+  .v21-goal > p,
+  .v21-explain > p {
+    margin-top: 13px;
+    line-height: 1.58;
+  }
+
+  .v20-footer {
+    min-height: 88px;
+    padding-top: 12px;
+    padding-bottom: 12px;
+  }
+}
+
+/* Extra safety for very short browser windows. */
+@media (max-height: 650px) and (min-width: 641px) {
+  .v20-main {
+    padding-top: 16px;
+    padding-bottom: 22px;
+  }
+
+  .v20-context {
+    margin-bottom: 14px;
+  }
+
+  .v21-goal-mark {
+    margin: 10px 0 12px;
+  }
+
+  .v20-footer {
+    min-height: 76px;
+  }
+}
