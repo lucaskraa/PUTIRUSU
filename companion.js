@@ -24,10 +24,49 @@
     realtimeConnecting: false,
     realtimeReply: "",
     realtimeCleanRetry: false,
+    history: [],
     initialized: false
   };
 
   state.companion = companion;
+
+  const PUTIRUSU_REMOTE_API = "https://putirusu-dev.onrender.com/api";
+
+  function rememberTurn(role, text) {
+    const value = String(text || "").trim();
+    if (!value) return;
+    companion.history.push({ role: role === "assistant" ? "assistant" : "user", text: value });
+    companion.history = companion.history.slice(-18);
+  }
+
+  async function companionFetch(path, options) {
+    const opts = Object.assign({}, options || {});
+    opts.headers = Object.assign({}, opts.headers || {});
+    const token = state.token && state.token !== "local-demo" ? state.token : "";
+    if (token) opts.headers.Authorization = "Bearer " + token;
+
+    const localUrl = (typeof API === "string" ? API : "/api") + path;
+    const candidates = [localUrl];
+    if (!String(location.origin || "").includes("putirusu-dev.onrender.com")) {
+      candidates.push(PUTIRUSU_REMOTE_API + path);
+    }
+
+    let lastError = null;
+    for (const url of candidates) {
+      try {
+        const response = await fetch(url, opts);
+        if (!response.ok) {
+          const message = await response.text().catch(()=>"");
+          lastError = new Error(message || ("HTTP " + response.status));
+          continue;
+        }
+        return response;
+      } catch (error) {
+        lastError = error;
+      }
+    }
+    throw lastError || new Error("Servidor da IA indisponível.");
+  }
 
   function currentContext() {
     const activeScreen = document.querySelector(".screen.active");
@@ -86,8 +125,21 @@
     root.innerHTML =
       '<button id="putiCompanionOrb" class="puti-companion-orb" type="button" aria-label="Abrir PUTIRUSU">' +
         '<span class="puti-orb-ring"></span>' +
-        '<span class="puti-face" aria-hidden="true"><i class="eye left"></i><i class="eye right"></i><b class="mouth"></b></span>' +
-        '<span class="puti-orb-core">П</span>' +
+        '<svg class="puti-avatar-svg" viewBox="0 0 96 82" aria-hidden="true">' +
+          '<path class="puti-helmet-shadow" d="M13 29 25 13 43 7 48 2l5 5 18 6 12 16-4 31-14 15H31L17 60Z"/>' +
+          '<path class="puti-helmet" d="M16 30 27 16 43 11 48 5l5 6 16 5 11 14-4 28-13 13H33L20 58Z"/>' +
+          '<path class="puti-crest" d="M45 11 48 3l5 8 2 43h-12Z"/>' +
+          '<path class="puti-brow left" d="M24 28 42 24l-3 9-14 3Z"/>' +
+          '<path class="puti-brow right" d="m72 28-18-4 3 9 14 3Z"/>' +
+          '<path class="puti-eye left" d="M26 31 41 28l-3 9-11 2Z"/>' +
+          '<path class="puti-eye right" d="m70 31-15-3 3 9 11 2Z"/>' +
+          '<path class="puti-cheek left" d="m19 41 18 2-3 8-13-1Z"/>' +
+          '<path class="puti-cheek right" d="m77 41-18 2 3 8 13-1Z"/>' +
+          '<path class="puti-grill-shell" d="M29 49h38l-3 15-10 6H42l-10-6Z"/>' +
+          '<g class="puti-grill-lines"><path d="M35 52v10M41 51v14M47 51v15M53 51v15M59 51v14M65 52v10"/></g>' +
+          '<circle class="puti-cheek-dot left" cx="23" cy="47" r="2.2"/>' +
+          '<circle class="puti-cheek-dot right" cx="73" cy="47" r="2.2"/>' +
+        '</svg>' +
       '</button>' +
       '<div id="putiCompanionBubble" class="puti-companion-bubble hidden">' +
         '<div class="puti-companion-head">' +
@@ -264,6 +316,21 @@
     }
   }
 
+  function pushRealtimeAppEvent(type, details) {
+    if (!companion.realtimeConnected) return;
+    sendRealtimeEvent({
+      type:"conversation.item.create",
+      item:{
+        type:"message",
+        role:"user",
+        content:[{
+          type:"input_text",
+          text:"[APP_EVENT] " + JSON.stringify({ type, details:details || {}, at:new Date().toISOString() })
+        }]
+      }
+    });
+  }
+
   function pushRealtimeContext() {
     if (!companion.realtimeConnected) return;
     const context = currentContext();
@@ -345,6 +412,7 @@
       const heard = String(event.transcript || "").trim();
       if (heard) {
         companion.lastHeard = heard;
+        rememberTurn("user", heard);
         const heardBox = document.getElementById("putiHeard");
         if (heardBox) {
           heardBox.textContent = "você: " + heard;
@@ -382,6 +450,7 @@
         companion.lastAnswer = text;
         companion.realtimeReply = text;
         showBubble(text,true,companion.lastHeard);
+        rememberTurn("assistant", text);
         logRealtime("assistant",text);
       }
       return;
@@ -496,17 +565,13 @@
         ? "/api/ai/realtime/session"
         : "/api/ai/realtime/guest-session";
 
-      const headers = { "Content-Type":"application/sdp" };
-      if (state.token && state.token !== "local-demo") headers.Authorization = "Bearer " + state.token;
-
-      const response = await fetch(endpoint,{
+      const response = await companionFetch(endpoint.replace(/^\/api/,""),{
         method:"POST",
-        headers,
+        headers:{ "Content-Type":"application/sdp" },
         body:pc.localDescription.sdp
       });
 
       const answerSdp = await response.text();
-      if (!response.ok) throw new Error(answerSdp || "Realtime indisponível");
 
       await pc.setRemoteDescription({ type:"answer", sdp:answerSdp });
       companion.realtimeConnected = true;
@@ -802,25 +867,17 @@
   }
 
   async function callBrain(message) {
-    const payload = {
+    const authenticated = Boolean(state.token && state.token !== "local-demo");
+    const response = await companionFetch(authenticated ? "/ai/respond" : "/ai/guest/respond", {
       method:"POST",
+      headers:{ "Content-Type":"application/json" },
       body:JSON.stringify({
         message:String(message).slice(0,1600),
-        context:currentContext()
+        context:currentContext(),
+        history:companion.history.slice(-14)
       })
-    };
-
-    if (state.token && state.token !== "local-demo") {
-      try {
-        return await request("/ai/respond", payload);
-      } catch (_) {}
-    }
-
-    try {
-      return await request("/ai/guest/respond", payload);
-    } catch (_) {
-      return { answer:localBrain(message), provider:"local" };
-    }
+    });
+    return response.json();
   }
 
   async function respondTo(message, options) {
@@ -842,6 +899,8 @@
       const data = await callBrain(message);
       const answer = cleanCompanionSpeech(String(data && data.answer || "").trim() || localBrain(message));
 
+      rememberTurn("user", message);
+      rememberTurn("assistant", answer);
       companion.lastAnswer = answer;
       companion.thinking = false;
       showBubble(answer, true, options && options.heard ? options.heard : "");
@@ -849,6 +908,8 @@
     } catch (_) {
       companion.thinking = false;
       const fallback = cleanCompanionSpeech(localBrain(message));
+      rememberTurn("user", message);
+      rememberTurn("assistant", fallback);
       companion.lastAnswer = fallback;
       showBubble(fallback, true, options && options.heard ? options.heard : "");
       speakCompanion(fallback);
@@ -1049,7 +1110,7 @@
 
       if (session && step && modeBefore.indexOf("check-") === 0) {
         const footer = document.getElementById("lessonRunFooter");
-        track("lesson_answer", {
+        const eventDetails = {
           courseId:session.course.id,
           lesson:session.course.lessons[session.lessonIndex],
           stepType:step.type,
@@ -1057,7 +1118,9 @@
           expected:step.answer || step.target || "",
           received,
           correct:Boolean(footer && footer.classList.contains("is-correct"))
-        });
+        };
+        track("lesson_answer", eventDetails);
+        pushRealtimeAppEvent("lesson_answer", eventDetails);
       }
       return result;
     };
@@ -1066,14 +1129,16 @@
     recordLessonMistake = function (session, step, expected, received) {
       const result = oldMistake.apply(this, arguments);
       companion.recentMistakes += 1;
-      track("lesson_mistake", {
+      const mistakeDetails = {
         courseId:session.course.id,
         lesson:session.course.lessons[session.lessonIndex],
         stepType:step.type,
         prompt:step.prompt || step.target || step.title || "",
         expected,
         received:received || ""
-      });
+      };
+      track("lesson_mistake", mistakeDetails);
+      pushRealtimeAppEvent("lesson_mistake", mistakeDetails);
       if (companion.recentMistakes >= 2) maybeNudge("repeated_lesson_error");
       return result;
     };
@@ -1083,13 +1148,15 @@
       const session = state.lessonSession;
       if (session) {
         const score = session.graded ? Math.round((session.correct / session.graded) * 100) : 100;
-        track("lesson_complete", {
+        const completeDetails = {
           courseId:session.course.id,
           lesson:session.course.lessons[session.lessonIndex],
           score,
           correct:session.correct,
           graded:session.graded
-        });
+        };
+        track("lesson_complete", completeDetails);
+        pushRealtimeAppEvent("lesson_complete", completeDetails);
       }
       return oldFinishLesson.apply(this, arguments);
     };
@@ -1100,7 +1167,9 @@
       const result = oldScoreTrace.apply(this, arguments);
       if (letter && state.progress.letters && state.progress.letters[letter.lower]) {
         const info = state.progress.letters[letter.lower];
-        track("writing_score", { letter:letter.lower, mode:state.writingMode, score:info.score, attempts:info.attempts });
+        const writingDetails = { letter:letter.lower, mode:state.writingMode, score:info.score, attempts:info.attempts };
+        track("writing_score", writingDetails);
+        pushRealtimeAppEvent("writing_score", writingDetails);
       }
       return result;
     };
@@ -1110,7 +1179,9 @@
       const typed = normalize(document.getElementById("copyInput").value);
       const target = normalize(state.copyItem);
       const result = oldCheckCopy.apply(this, arguments);
-      track("copy_answer", { target:state.copyItem, received:typed, correct:typed === target });
+      const copyDetails = { target:state.copyItem, received:typed, correct:typed === target };
+      track("copy_answer", copyDetails);
+      pushRealtimeAppEvent("copy_answer", copyDetails);
       return result;
     };
 
@@ -1123,7 +1194,9 @@
       });
       const total = state.exam.length || 1;
       const result = oldFinishExam.apply(this, arguments);
-      track("exam_complete", { score, total:state.exam.length, percent:Math.round(score / total * 100) });
+      const examDetails = { score, total:state.exam.length, percent:Math.round(score / total * 100) };
+      track("exam_complete", examDetails);
+      pushRealtimeAppEvent("exam_complete", examDetails);
       return result;
     };
 
