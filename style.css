@@ -14316,3 +14316,626 @@ body.lesson-mode #lessonView {
     border-top:1px solid #d9dcdf;
   }
 }
+
+
+/* === PUTIRUSU V21 — DEEP LESSONS + WORKBOOKS === */
+
+/* Fix: footer no longer covers the hint/content */
+.v20-lesson-overlay {
+  overflow-y: auto;
+}
+.v20-main {
+  padding-bottom: 54px;
+}
+.v20-footer {
+  position: static !important;
+  flex: 0 0 auto;
+}
+
+/* Short goal screen */
+.v21-goal {
+  max-width: 690px;
+}
+.v21-goal-mark {
+  width: 58px;
+  height: 58px;
+  margin: 24px 0 20px;
+  display: grid;
+  place-items: center;
+  border-radius: 16px;
+  background: #eaf0f6;
+  color: #274c77;
+  font-size: 1.35rem;
+}
+.v21-goal h1,
+.v21-explain h1 {
+  margin: 0;
+  font-size: clamp(2rem,4.5vw,3.25rem);
+  line-height: 1.07;
+  letter-spacing: -.038em;
+}
+.v21-goal > p,
+.v21-explain > p {
+  max-width: 650px;
+  margin: 18px 0 0;
+  color: #6d747b;
+  font-size: 1rem;
+  line-height: 1.7;
+}
+
+/* Tip gets its own readable screen */
+.v21-tip {
+  max-width: 650px;
+  margin-top: 30px;
+  padding: 18px;
+  display: grid;
+  grid-template-columns: 38px minmax(0,1fr);
+  gap: 12px;
+  border: 1px solid #dfd9ce;
+  border-radius: 14px;
+  background: #f5f1e9;
+}
+.v21-tip > span {
+  width: 34px;
+  height: 34px;
+  display: grid;
+  place-items: center;
+  border-radius: 9px;
+  background: #fff;
+}
+.v21-tip b {
+  display: block;
+  margin-bottom: 4px;
+  color: #333a42;
+  font-size: .82rem;
+}
+.v21-tip p {
+  margin: 0;
+  color: #6c737a;
+  font-size: .86rem;
+  line-height: 1.55;
+}
+
+/* One symbol/rule per screen */
+.v21-symbol-lesson {
+  max-width: 620px;
+  margin: 0 auto;
+  text-align: center;
+}
+.v21-symbol-audio {
+  width: 58px;
+  height: 58px;
+  margin: 16px auto 18px;
+  padding: 0;
+  border-radius: 50%;
+  background: #edf2f7;
+  color: #274c77;
+  font-size: 1.3rem;
+}
+.v21-symbol-audio:hover {
+  background: #e3ebf3;
+}
+.v21-symbol {
+  margin-top: 4px;
+  font-size: clamp(5.2rem,14vw,8.4rem);
+  font-weight: 850;
+  line-height: .95;
+  letter-spacing: -.07em;
+}
+.v21-symbol-sound {
+  margin-top: 14px;
+  color: #274c77;
+  font-size: 1.1rem;
+  font-weight: 900;
+}
+.v21-symbol-lesson h1 {
+  margin: 7px 0 0;
+  color: #626971;
+  font-size: .82rem;
+  font-weight: 850;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+}
+.v21-symbol-lesson > p {
+  max-width: 500px;
+  margin: 18px auto 0;
+  color: #6d747b;
+  font-size: .94rem;
+  line-height: 1.6;
+}
+.v21-symbol-example {
+  max-width: 480px;
+  margin: 28px auto 0;
+  padding: 16px 18px;
+  border: 2px solid #dadddf;
+  border-bottom-width: 5px;
+  border-radius: 14px;
+  background: #fff;
+}
+.v21-symbol-example small,
+.v21-symbol-example strong,
+.v21-symbol-example span {
+  display: block;
+}
+.v21-symbol-example small {
+  color: #999fa4;
+  font-size: .64rem;
+  font-weight: 900;
+  letter-spacing: .12em;
+}
+.v21-symbol-example strong {
+  margin-top: 5px;
+  font-size: 1.45rem;
+}
+.v21-symbol-example span {
+  margin-top: 3px;
+  color: #767d84;
+  font-size: .78rem;
+}
+
+/* Unit workbook entry */
+.unit-workbook-btn {
+  margin-top: 22px;
+  padding: 10px 13px;
+  background: #fff;
+  color: #274c77;
+  border: 1px solid #cfd9e3;
+}
+.unit-workbook-btn:hover {
+  background: #f6f9fc;
+  border-color: #b9c9d8;
+}
+
+/* Full-screen interactive workbook */
+body.workbook-mode {
+  overflow: hidden;
+}
+.workbook-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 25000;
+  overflow: auto;
+  background: #f5f3ee;
+  color: #181d24;
+}
+.workbook-shell {
+  min-height: 100vh;
+}
+.workbook-topbar {
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  min-height: 70px;
+  padding: 10px max(18px,calc((100vw - 1180px)/2));
+  display: grid;
+  grid-template-columns: 42px minmax(0,1fr) auto;
+  gap: 14px;
+  align-items: center;
+  border-bottom: 1px solid #dedbd3;
+  background: rgba(250,249,246,.96);
+  backdrop-filter: blur(12px);
+}
+.workbook-close {
+  width: 38px;
+  height: 38px;
+  padding: 0;
+  border-radius: 50%;
+  background: transparent;
+  color: #737a81;
+  font-size: 1.5rem;
+}
+.workbook-topbar > div small,
+.workbook-topbar > div strong {
+  display: block;
+}
+.workbook-topbar > div small {
+  color: #9b625c;
+  font-size: .64rem;
+  font-weight: 900;
+  letter-spacing: .11em;
+}
+.workbook-topbar > div strong {
+  margin-top: 3px;
+  font-size: .9rem;
+}
+.workbook-print {
+  padding: 8px 11px;
+  background: transparent;
+  color: #274c77;
+  border: 1px solid #d0d7de;
+}
+.workbook-layout {
+  width: min(1180px,calc(100% - 34px));
+  margin: 0 auto;
+  display: grid;
+  grid-template-columns: 250px minmax(0,1fr);
+  gap: 48px;
+  align-items: start;
+}
+.workbook-toc {
+  position: sticky;
+  top: 92px;
+  padding: 34px 0 50px;
+}
+.workbook-toc > span {
+  color: #9a605b;
+  font-size: .65rem;
+  font-weight: 900;
+  letter-spacing: .12em;
+}
+.workbook-toc h2 {
+  margin: 6px 0 8px;
+  font-size: 1.5rem;
+}
+.workbook-toc > p {
+  margin: 0 0 24px;
+  color: #777d84;
+  font-size: .8rem;
+  line-height: 1.5;
+}
+.workbook-toc nav {
+  display: grid;
+  border-top: 1px solid #ddd9d0;
+}
+.workbook-toc a {
+  padding: 10px 4px;
+  border-bottom: 1px solid #ddd9d0;
+  color: #59616a;
+  font-size: .76rem;
+  text-decoration: none;
+}
+.workbook-toc a:hover {
+  color: #274c77;
+}
+.workbook-content {
+  min-width: 0;
+  padding: 34px 0 90px;
+}
+.workbook-cover {
+  min-height: 360px;
+  padding: 44px;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  border-radius: 22px;
+  background: #17283d;
+  color: #fff;
+  overflow: hidden;
+  position: relative;
+}
+.workbook-cover::after {
+  content: "П";
+  position: absolute;
+  right: 20px;
+  top: -60px;
+  color: rgba(255,255,255,.045);
+  font-family: Georgia,serif;
+  font-size: 300px;
+}
+.workbook-cover > * {
+  position: relative;
+  z-index: 1;
+}
+.workbook-cover > span {
+  color: #aeb9c7;
+  font-size: .7rem;
+  font-weight: 900;
+  letter-spacing: .13em;
+}
+.workbook-cover h1 {
+  max-width: 700px;
+  margin: 9px 0 10px;
+  font-size: clamp(2.8rem,6vw,5rem);
+  line-height: .94;
+  letter-spacing: -.055em;
+}
+.workbook-cover > p {
+  max-width: 600px;
+  margin: 0;
+  color: #c5ced8;
+  line-height: 1.6;
+}
+.workbook-cover-meta {
+  display: grid;
+  grid-template-columns: repeat(3,1fr);
+  gap: 1px;
+  margin-top: 34px;
+  overflow: hidden;
+  border-radius: 12px;
+  background: rgba(255,255,255,.12);
+}
+.workbook-cover-meta div {
+  padding: 14px;
+  background: rgba(0,0,0,.14);
+}
+.workbook-cover-meta strong,
+.workbook-cover-meta small {
+  display: block;
+}
+.workbook-cover-meta strong {
+  font-size: 1.2rem;
+}
+.workbook-cover-meta small {
+  margin-top: 3px;
+  color: #9eabb9;
+  font-size: .68rem;
+}
+.workbook-chapter {
+  scroll-margin-top: 90px;
+  padding: 64px 4px;
+  border-bottom: 1px solid #dcd8cf;
+}
+.workbook-chapter-number {
+  color: #c7c2b8;
+  font-family: Georgia,serif;
+  font-size: 3rem;
+}
+.workbook-chapter-head small {
+  color: #9a605b;
+  font-size: .66rem;
+  font-weight: 900;
+  letter-spacing: .12em;
+}
+.workbook-chapter-head h2 {
+  margin: 6px 0 9px;
+  font-size: clamp(2rem,4vw,3.2rem);
+  letter-spacing: -.04em;
+}
+.workbook-objective {
+  max-width: 720px;
+  margin: 0;
+  color: #697078;
+  line-height: 1.6;
+}
+.workbook-theory {
+  max-width: 740px;
+  margin-top: 32px;
+}
+.workbook-theory h3,
+.workbook-examples h3,
+.workbook-practice-box h3 {
+  margin: 0 0 8px;
+  font-size: .88rem;
+  letter-spacing: .02em;
+}
+.workbook-theory > p {
+  margin: 0;
+  color: #555e67;
+  font-size: .96rem;
+  line-height: 1.75;
+}
+.workbook-tip {
+  margin-top: 20px;
+  padding: 16px 18px;
+  display: grid;
+  gap: 5px;
+  border-left: 4px solid #c94b43;
+  background: #eeeae2;
+}
+.workbook-tip b {
+  font-size: .77rem;
+}
+.workbook-tip span {
+  color: #646b72;
+  font-size: .84rem;
+  line-height: 1.5;
+}
+.workbook-teach-grid {
+  display: grid;
+  grid-template-columns: repeat(2,minmax(0,1fr));
+  gap: 10px;
+  margin-top: 26px;
+}
+.workbook-symbol {
+  min-height: 160px;
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  border: 1px solid #d8d5ce;
+  border-radius: 14px;
+  background: #fff;
+  color: #1b222a;
+  text-align: left;
+}
+.workbook-symbol:hover {
+  background: #fff;
+  border-color: #bfc7cf;
+  transform: none;
+}
+.workbook-symbol > strong {
+  font-size: 2rem;
+}
+.workbook-symbol > span {
+  margin-top: 6px;
+  color: #274c77;
+  font-size: .78rem;
+  font-weight: 900;
+}
+.workbook-symbol > p {
+  margin: 8px 0 12px;
+  color: #70777e;
+  font-size: .76rem;
+  line-height: 1.45;
+}
+.workbook-symbol > small {
+  margin-top: auto;
+  color: #4c5660;
+  font-size: .72rem;
+}
+.workbook-examples {
+  margin-top: 28px;
+}
+.workbook-examples > button {
+  width: 100%;
+  min-height: 58px;
+  display: grid;
+  grid-template-columns: 30px 140px minmax(0,1fr) auto;
+  gap: 12px;
+  align-items: center;
+  padding: 10px 4px;
+  border-radius: 0;
+  border-top: 1px solid #ddd9d0;
+  background: transparent;
+  color: #20272e;
+  text-align: left;
+}
+.workbook-examples > button:last-child {
+  border-bottom: 1px solid #ddd9d0;
+}
+.workbook-examples > button:hover {
+  background: rgba(255,255,255,.4);
+  transform: none;
+}
+.workbook-examples strong {
+  font-size: .92rem;
+}
+.workbook-examples em {
+  color: #687078;
+  font-size: .8rem;
+  font-style: normal;
+}
+.workbook-examples small {
+  color: #969ba0;
+  font-size: .7rem;
+  text-align: right;
+}
+.workbook-practice-box {
+  margin-top: 28px;
+  padding: 20px;
+  border: 1px solid #d8d5ce;
+  border-radius: 14px;
+  background: #fbfaf7;
+}
+.workbook-practice-box ul {
+  margin: 0 0 18px;
+  padding-left: 20px;
+  color: #5f6770;
+  line-height: 1.7;
+  font-size: .82rem;
+}
+.workbook-practice-box button {
+  padding: 9px 12px;
+}
+.workbook-vocab {
+  scroll-margin-top: 90px;
+  padding: 64px 4px;
+}
+.workbook-vocab > span {
+  color: #9a605b;
+  font-size: .66rem;
+  font-weight: 900;
+  letter-spacing: .12em;
+}
+.workbook-vocab h2 {
+  margin: 6px 0 20px;
+  font-size: 2rem;
+}
+.workbook-vocab > div {
+  display: grid;
+  grid-template-columns: repeat(2,minmax(0,1fr));
+  gap: 8px;
+}
+.workbook-vocab article {
+  padding: 13px 15px;
+  border: 1px solid #ddd9d0;
+  border-radius: 11px;
+  background: #fff;
+}
+.workbook-vocab strong,
+.workbook-vocab span,
+.workbook-vocab small {
+  display: block;
+}
+.workbook-vocab strong {
+  font-size: 1rem;
+}
+.workbook-vocab span {
+  margin-top: 3px;
+  color: #59616a;
+  font-size: .78rem;
+}
+.workbook-vocab small {
+  margin-top: 4px;
+  color: #979ba0;
+  font-size: .68rem;
+}
+
+@media (max-width: 840px) {
+  .workbook-layout {
+    width: min(100% - 24px,760px);
+    grid-template-columns: 1fr;
+    gap: 0;
+  }
+  .workbook-toc {
+    position: static;
+    padding: 24px 0 0;
+  }
+  .workbook-toc nav {
+    display: none;
+  }
+  .workbook-content {
+    padding-top: 18px;
+  }
+  .workbook-cover {
+    min-height: 320px;
+    padding: 28px 22px;
+  }
+}
+@media (max-width: 620px) {
+  .v20-main {
+    padding-bottom: 36px;
+  }
+  .v20-footer {
+    padding: 12px 14px;
+  }
+  .workbook-topbar {
+    grid-template-columns: 38px minmax(0,1fr);
+  }
+  .workbook-print {
+    display: none;
+  }
+  .workbook-cover-meta {
+    grid-template-columns: 1fr;
+  }
+  .workbook-teach-grid,
+  .workbook-vocab > div {
+    grid-template-columns: 1fr;
+  }
+  .workbook-examples > button {
+    grid-template-columns: 30px minmax(0,1fr);
+  }
+  .workbook-examples em,
+  .workbook-examples small {
+    grid-column: 2;
+    text-align: left;
+  }
+}
+
+@media print {
+  body.workbook-mode * {
+    visibility: hidden;
+  }
+  body.workbook-mode .workbook-overlay,
+  body.workbook-mode .workbook-overlay * {
+    visibility: visible;
+  }
+  body.workbook-mode .workbook-overlay {
+    position: static;
+    overflow: visible;
+    background: #fff;
+  }
+  .workbook-topbar,
+  .workbook-toc,
+  .workbook-practice-box button {
+    display: none !important;
+  }
+  .workbook-layout {
+    display: block;
+    width: 100%;
+  }
+  .workbook-cover,
+  .workbook-chapter {
+    break-inside: avoid;
+  }
+}
