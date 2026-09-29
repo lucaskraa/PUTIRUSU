@@ -354,3 +354,214 @@
     align-items: flex-start;
   }
 }
+
+
+/* === PUTIRUSU V17 — MORE ALIVE PRESENCE === */
+
+.puti-companion-orb {
+  isolation: isolate;
+}
+
+.puti-face {
+  position: absolute;
+  inset: 0;
+  z-index: 3;
+  pointer-events: none;
+}
+
+.puti-face .eye {
+  position: absolute;
+  top: 18px;
+  width: 5px;
+  height: 7px;
+  border-radius: 999px;
+  background: rgba(255,255,255,.95);
+  box-shadow: 0 0 8px rgba(255,255,255,.38);
+  transform-origin: center;
+  animation: putiBlink 5.8s infinite;
+}
+
+.puti-face .eye.left { left: 20px; }
+.puti-face .eye.right { right: 20px; }
+
+.puti-face .mouth {
+  position: absolute;
+  left: 50%;
+  top: 33px;
+  width: 14px;
+  height: 5px;
+  margin-left: -7px;
+  border-bottom: 2px solid rgba(255,255,255,.9);
+  border-radius: 0 0 999px 999px;
+  transition: transform .18s ease, width .18s ease, height .18s ease;
+}
+
+.puti-orb-core {
+  opacity: .18;
+  transform: translateY(7px) scale(.82);
+}
+
+@keyframes putiBlink {
+  0%, 46%, 49%, 100% { transform: scaleY(1); }
+  47%, 48% { transform: scaleY(.08); }
+}
+
+.puti-companion[data-state="thinking"] .puti-face .eye.left {
+  transform: translateX(2px) scaleY(.82);
+}
+
+.puti-companion[data-state="thinking"] .puti-face .eye.right {
+  transform: translateX(2px) scaleY(.82);
+}
+
+.puti-companion[data-state="speaking"] .puti-face .mouth {
+  animation: putiMouth .24s ease-in-out infinite alternate;
+}
+
+.puti-companion[data-state="listening"] .puti-face .mouth {
+  width: 8px;
+  margin-left: -4px;
+  border-radius: 50%;
+}
+
+.puti-companion[data-mood="amused"] .puti-face .mouth {
+  width: 18px;
+  margin-left: -9px;
+  height: 8px;
+  border-bottom-width: 3px;
+}
+
+.puti-companion[data-mood="focused"] .puti-face .mouth {
+  width: 10px;
+  margin-left: -5px;
+  border-radius: 0;
+}
+
+.puti-companion[data-mood="pleased"] .puti-face .mouth {
+  width: 18px;
+  margin-left: -9px;
+  height: 8px;
+}
+
+@keyframes putiMouth {
+  from { transform: scaleY(.45); }
+  to { transform: scaleY(1.55); }
+}
+
+.puti-companion-orb::after {
+  content: "";
+  position: absolute;
+  inset: 8px;
+  z-index: -1;
+  border-radius: inherit;
+  background:
+    radial-gradient(circle at 50% 32%, rgba(255,255,255,.32), transparent 36%),
+    linear-gradient(160deg, rgba(255,255,255,.08), rgba(15,38,65,.16));
+}
+
+.puti-companion[data-state="idle"] .puti-companion-orb {
+  animation: putiBreathe 3.8s ease-in-out infinite;
+}
+
+@keyframes putiBreathe {
+  0%,100% { transform: translateY(0) scale(1); }
+  50% { transform: translateY(-2px) scale(1.018); }
+}
+
+.puti-wave {
+  margin-left: auto;
+  height: 22px;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  opacity: .24;
+}
+
+.puti-wave i {
+  display: block;
+  width: 3px;
+  height: 7px;
+  border-radius: 99px;
+  background: #274c77;
+}
+
+.puti-companion[data-state="listening"] .puti-wave {
+  opacity: 1;
+}
+
+.puti-companion[data-state="listening"] .puti-wave i {
+  animation: putiWave .72s ease-in-out infinite alternate;
+}
+
+.puti-companion[data-state="listening"] .puti-wave i:nth-child(2) { animation-delay: -.34s; }
+.puti-companion[data-state="listening"] .puti-wave i:nth-child(3) { animation-delay: -.18s; }
+.puti-companion[data-state="listening"] .puti-wave i:nth-child(4) { animation-delay: -.49s; }
+.puti-companion[data-state="listening"] .puti-wave i:nth-child(5) { animation-delay: -.09s; }
+
+@keyframes putiWave {
+  from { height: 5px; opacity: .48; }
+  to { height: 20px; opacity: 1; }
+}
+
+.puti-identity {
+  min-width: 0;
+}
+
+.puti-heard {
+  margin-top: 13px;
+  padding: 8px 10px;
+  overflow: hidden;
+  border-radius: 9px;
+  background: #eef3f7;
+  color: #73808b;
+  font-size: .72rem;
+  line-height: 1.35;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.puti-heard.hidden {
+  display: none;
+}
+
+.puti-companion-bubble > p {
+  min-height: 2.8em;
+  transition: opacity .15s ease;
+}
+
+.puti-companion[data-state="thinking"] .puti-companion-bubble > p {
+  opacity: .66;
+}
+
+.puti-onboarding-mark {
+  position: relative;
+  overflow: hidden;
+}
+
+.puti-onboarding-mark > span {
+  opacity: .22;
+  transform: translateY(6px);
+}
+
+.puti-onboarding-mark > i {
+  position: absolute;
+  top: 20px;
+  width: 6px;
+  height: 8px;
+  border-radius: 999px;
+  background: white;
+  animation: putiBlink 5.2s infinite;
+}
+
+.puti-onboarding-mark > i:nth-of-type(1) { left: 20px; }
+.puti-onboarding-mark > i:nth-of-type(2) { right: 20px; }
+
+@media (prefers-reduced-motion: reduce) {
+  .puti-companion-orb,
+  .puti-face .eye,
+  .puti-wave i,
+  .puti-face .mouth,
+  .puti-orb-ring {
+    animation: none !important;
+  }
+}
