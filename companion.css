@@ -565,3 +565,94 @@
     animation: none !important;
   }
 }
+
+
+/* === PUTIRUSU V21 — ANGULAR LIVING AVATAR === */
+.puti-companion-orb {
+  width: 70px;
+  height: 62px;
+  border-radius: 18px 18px 22px 22px;
+  clip-path: polygon(18% 8%, 50% 0, 82% 8%, 100% 32%, 93% 77%, 73% 100%, 27% 100%, 7% 77%, 0 32%);
+  background:
+    linear-gradient(180deg, rgba(255,255,255,.96), rgba(210,218,226,.96) 54%, rgba(140,153,166,.98));
+  border: 0;
+  box-shadow: 0 16px 36px rgba(30,42,55,.28), inset 0 0 0 2px rgba(55,67,79,.22);
+}
+
+.puti-companion-orb::before {
+  content:"";
+  position:absolute;
+  left:50%;
+  top:4px;
+  width:5px;
+  height:54px;
+  transform:translateX(-50%);
+  border-radius:99px;
+  background:linear-gradient(#7f8b96,#f7f9fb 36%,#7b8792);
+  opacity:.9;
+}
+
+.puti-companion-orb::after {
+  content:"";
+  position:absolute;
+  left:15px;
+  right:15px;
+  bottom:8px;
+  height:15px;
+  border-radius:5px 5px 9px 9px;
+  background:repeating-linear-gradient(90deg,#606b76 0 3px,#d9dfe4 3px 6px);
+  box-shadow:inset 0 0 0 2px rgba(42,53,64,.34);
+}
+
+.puti-face .eye {
+  top:20px;
+  width:15px;
+  height:9px;
+  border-radius:60% 40% 58% 42%;
+  background:#31d6ff;
+  box-shadow:0 0 7px rgba(49,214,255,.95), inset 0 0 0 2px rgba(8,76,103,.7);
+}
+.puti-face .eye.left { left:12px; transform:skewX(10deg); }
+.puti-face .eye.right { right:12px; transform:skewX(-10deg); }
+.puti-face .mouth { display:none; }
+.puti-orb-core { opacity:0; }
+
+.puti-companion[data-state="thinking"] .puti-companion-orb {
+  animation:putiThinkAngular .62s ease-in-out infinite alternate;
+}
+.puti-companion[data-state="speaking"] .puti-companion-orb::after {
+  animation:putiGrilleTalk .18s ease-in-out infinite alternate;
+}
+.puti-companion[data-state="listening"] .puti-face .eye {
+  filter:brightness(1.22);
+  box-shadow:0 0 12px rgba(49,214,255,1), inset 0 0 0 2px rgba(8,76,103,.72);
+}
+.puti-companion[data-state="idle"] .puti-companion-orb {
+  animation:putiHover 3.2s ease-in-out infinite;
+}
+
+@keyframes putiThinkAngular {
+  from { transform:translateY(0) rotate(-1.5deg); }
+  to { transform:translateY(-3px) rotate(1.5deg); }
+}
+@keyframes putiGrilleTalk {
+  from { filter:brightness(.9); }
+  to { filter:brightness(1.22); }
+}
+@keyframes putiHover {
+  0%,100% { transform:translateY(0); }
+  50% { transform:translateY(-3px); }
+}
+
+.puti-companion-bubble {
+  width:min(360px,calc(100vw - 28px));
+  border-radius:16px;
+  box-shadow:0 18px 48px rgba(19,31,44,.16);
+}
+.puti-companion-bubble > p {
+  font-size:.93rem;
+  line-height:1.48;
+}
+.puti-privacy-note {
+  opacity:.72;
+}
