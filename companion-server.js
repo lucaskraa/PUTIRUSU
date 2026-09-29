@@ -5,6 +5,7 @@ const crypto = require("crypto");
 
 module.exports = function installCompanion(deps) {
   const { app, auth, readDatabase, writeDatabase, id, findProgress, audit } = deps;
+  console.log("PUTIRUSU companion OpenAI configured:", Boolean(process.env.OPENAI_API_KEY));
 
   const ALLOWED_EVENTS = new Set([
     "screen_view","lesson_open","lesson_step","lesson_answer","lesson_mistake",
@@ -324,7 +325,7 @@ module.exports = function installCompanion(deps) {
           }
         },
         output: {
-          voice: process.env.OPENAI_REALTIME_VOICE || "shimmer"
+          voice: process.env.OPENAI_REALTIME_VOICE || "marin"
         }
       },
       reasoning: { effort: "low" },
@@ -431,7 +432,7 @@ module.exports = function installCompanion(deps) {
       openaiConfigured: Boolean(process.env.OPENAI_API_KEY),
       responseModel: process.env.OPENAI_MODEL || "gpt-5.6-luna",
       realtimeModel: process.env.OPENAI_REALTIME_MODEL || "gpt-realtime-2.1",
-      realtimeVoice: process.env.OPENAI_REALTIME_VOICE || "shimmer",
+      realtimeVoice: process.env.OPENAI_REALTIME_VOICE || "marin",
       transcriptionModel: process.env.OPENAI_TRANSCRIBE_MODEL || "gpt-4o-transcribe"
     });
   });
