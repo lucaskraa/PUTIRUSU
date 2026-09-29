@@ -1116,7 +1116,7 @@ function renderCourse() {
   const overview = byId("courseOverview");
   if (overview) {
     overview.innerHTML = `
-      <span><strong>${completedLessons}</strong> de ${totalLessons} partes</span>
+      <span><strong>${completedLessons}</strong> de ${totalLessons} aulas</span>
       <div><i style="width:${percent}%"></i></div>
       <b>${percent}%</b>`;
   }
@@ -1135,7 +1135,7 @@ function renderCourse() {
         ${unlocked ? "" : "disabled"}>
         <span class="unit-number">${String(courseIndex + 1).padStart(2,"0")}</span>
         <span class="unit-copy">
-          <small>${course.level} • ${course.lessons.length} partes</small>
+          <small>${course.level} • ${course.lessons.length} aulas</small>
           <strong>${course.title}</strong>
           <em>${course.desc}</em>
         </span>
@@ -1155,66 +1155,90 @@ function renderCourse() {
 function openUnit(id) {
   document.body.classList.remove("lesson-mode");
   ensureCourseProgress();
-  const courseIndex = COURSE.findIndex(course => course.id === id);
-  const course = COURSE[courseIndex];
-  if (!course || !isCourseUnlocked(courseIndex)) return;
 
-  const completed = completedCourseLessons(course.id);
-  const progress = Math.round((Math.min(completed.length, course.lessons.length) / course.lessons.length) * 100);
-  const unitView = byId("courseUnitView");
+  const courseIndex=COURSE.findIndex(course=>course.id===id);
+  const course=COURSE[courseIndex];
+  if(!course || !isCourseUnlocked(courseIndex)) return;
 
-  const lessons = course.lessons.map((lesson, lessonIndex) => {
-    const done = isCourseLessonComplete(course.id, lessonIndex);
-    const previousDone = lessonIndex === 0 || isCourseLessonComplete(course.id, lessonIndex - 1);
-    const unlocked = previousDone;
-    return `
-      <button type="button"
-        class="unit-lesson-simple ${done ? "done" : ""} ${unlocked ? "" : "locked"}"
-        data-unit-lesson="${lessonIndex}"
-        ${unlocked ? "" : "disabled"}>
-        <span>${done ? "✓" : lessonIndex + 1}</span>
-        <span class="unit-part-copy">
-          <small class="unit-part-label">PARTE ${lessonIndex + 1}</small>
-          <strong>${lesson}</strong>
-        </span>
-        <small class="unit-part-status">${done ? "Concluída" : unlocked ? "Abrir parte" : "Bloqueada"}</small>
-        <b>›</b>
-      </button>`;
+  const completed=completedCourseLessons(course.id);
+  const completedCount=Math.min(completed.length,course.lessons.length);
+  const progress=Math.round((completedCount/course.lessons.length)*100);
+
+  let currentLessonIndex=course.lessons.findIndex((_,index)=>!isCourseLessonComplete(course.id,index));
+  if(currentLessonIndex<0) currentLessonIndex=Math.max(0,course.lessons.length-1);
+
+  const currentTitle=course.lessons[currentLessonIndex];
+  const currentPack=getLessonPack(course,currentLessonIndex);
+  const unitComplete=isCourseComplete(course);
+  const unitView=byId("courseUnitView");
+
+  const dots=course.lessons.map((lesson,index)=>{
+    const done=isCourseLessonComplete(course.id,index);
+    const current=index===currentLessonIndex && !unitComplete;
+    return `<span class="lesson-dot ${done?"done":current?"current":"locked"}" title="Aula ${index+1}: ${lesson}">${done?"✓":index+1}</span>`;
   }).join("");
 
-  unitView.innerHTML = `
-    <div class="unit-page">
-      <button type="button" class="unit-back" id="backToUnits">← Voltar</button>
-      <div class="unit-page-head">
+  unitView.innerHTML=`
+    <div class="unit-page sequential-unit">
+      <div class="sequential-unit-top">
+        <button type="button" class="unit-back" id="backToUnits">← Voltar</button>
+        <button type="button" class="unit-workbook-link" id="openUnitWorkbook">📘 Apostila</button>
+      </div>
+
+      <div class="sequential-unit-header">
         <div>
-          <small>${course.level} • Unidade ${courseIndex + 1}</small>
+          <small>${course.level} • Unidade ${courseIndex+1}</small>
           <h1>${course.title}</h1>
           <p>${course.desc}</p>
-          <button type="button" class="unit-workbook-btn" id="openUnitWorkbook">📘 Abrir apostila da unidade</button>
         </div>
-        <div class="unit-page-progress"><strong>${progress}%</strong><span>${completed.length}/${course.lessons.length} partes</span></div>
+        <div class="sequential-unit-progress">
+          <strong>${progress}%</strong>
+          <span>${completedCount}/${course.lessons.length} aulas</span>
+        </div>
       </div>
-      <div class="unit-page-bar"><span style="width:${progress}%"></span></div>
-      <div class="unit-lesson-list">${lessons}</div>
+
+      <div class="sequential-progress-bar"><span style="width:${progress}%"></span></div>
+
+      <section class="current-lesson-card ${unitComplete?"complete":""}">
+        <div class="current-lesson-number">${unitComplete?"✓":String(currentLessonIndex+1).padStart(2,"0")}</div>
+        <div class="current-lesson-content">
+          <span class="current-lesson-kicker">${unitComplete?"UNIDADE CONCLUÍDA":`AULA ${currentLessonIndex+1} DE ${course.lessons.length}`}</span>
+          <h2>${unitComplete?"Você concluiu esta unidade":currentTitle}</h2>
+          <p>${unitComplete?"Você pode revisar qualquer aula pela apostila ou repetir a última aula.":currentPack.objective}</p>
+
+          <div class="current-lesson-skills">
+            <span>Leitura</span>
+            <span>Escuta</span>
+            <span>Escrita</span>
+            <span>Fala</span>
+          </div>
+
+          <button type="button" id="startCurrentLesson">
+            ${unitComplete?"Revisar última aula":completedCount>0?"Continuar":"Começar aula"}
+          </button>
+        </div>
+      </section>
+
+      <div class="lesson-sequence">
+        <div class="lesson-sequence-label"><span>PROGRESSO DA UNIDADE</span><strong>${unitComplete?"Completa":"Próxima aula: "+(currentLessonIndex+1)}</strong></div>
+        <div class="lesson-dots">${dots}</div>
+      </div>
     </div>`;
 
   byId("courseListView").classList.add("hidden");
   byId("lessonView").classList.add("hidden");
   unitView.classList.remove("hidden");
 
-  byId("backToUnits").addEventListener("click", () => {
+  byId("backToUnits").addEventListener("click",()=>{
     unitView.classList.add("hidden");
     byId("courseListView").classList.remove("hidden");
     renderCourse();
   });
 
-  byId("openUnitWorkbook")?.addEventListener("click", () => openUnitWorkbook(course.id));
+  byId("openUnitWorkbook").addEventListener("click",()=>openUnitWorkbook(course.id));
+  byId("startCurrentLesson").addEventListener("click",()=>openCourse(course.id,currentLessonIndex));
 
-  unitView.querySelectorAll("[data-unit-lesson]:not([disabled])").forEach(button => {
-    button.addEventListener("click", () => openCourse(course.id, Number(button.dataset.unitLesson)));
-  });
-
-  window.scrollTo({top:0, behavior:"smooth"});
+  window.scrollTo({top:0,behavior:"smooth"});
 }
 
 function getUnitWorkbook(course) {
@@ -1297,7 +1321,7 @@ function openUnitWorkbook(id) {
               <section id="wb-${index}" class="workbook-chapter">
                 <div class="workbook-chapter-number">${String(index+1).padStart(2,"0")}</div>
                 <div class="workbook-chapter-head">
-                  <small>PARTE ${index+1}</small>
+                  <small>Aula ${index+1}</small>
                   <h2>${section.lesson}</h2>
                   <p class="workbook-objective">${pack.objective}</p>
                 </div>
@@ -1335,7 +1359,7 @@ function openUnitWorkbook(id) {
                     ${pack.type ? `<li>Escrever sem copiar: ${pack.type.answer}</li>` : ""}
                     ${pack.speak ? `<li>Falar: ${pack.speak.target}</li>` : ""}
                   </ul>
-                  <button type="button" data-workbook-lesson="${index}">Praticar Parte ${index+1}</button>
+                  <button type="button" data-workbook-lesson="${index}">Praticar Aula ${index+1}</button>
                 </div>
               </section>`;
           }).join("")}
@@ -1447,7 +1471,7 @@ function buildLessonSteps(pack) {
         ...(pack.examples || []).slice(0,2).map(item=>`${item.ru} = ${item.pt}`)
       ].filter(Boolean);
 
-  steps.push({type:"recap",title:"O que você leva desta parte",items:recap});
+  steps.push({type:"recap",title:"O que você leva desta aula",items:recap});
   return steps;
 }
 
@@ -1536,10 +1560,10 @@ function renderLessonActivity() {
   if (step.type==="goal") {
     body=`
       <section class="v21-goal">
-        <span class="v20-kicker">META DA PARTE</span>
+        <span class="v20-kicker">META DA AULA</span>
         <div class="v21-goal-mark">✦</div>
         <h1>${step.objective}</h1>
-        <p>Esta parte é dividida em atividades curtas. Primeiro você entende, depois pratica e por fim usa sozinho.</p>
+        <p>Esta aula é dividida em atividades curtas. Primeiro você entende, depois pratica e por fim usa sozinho.</p>
       </section>`;
     primaryLabel="Começar";
   }
@@ -1671,9 +1695,9 @@ function renderLessonActivity() {
   if (step.type==="recap") {
     body=`
       <section class="v20-copy">
-        <span class="v20-kicker">FECHANDO A PARTE</span>
+        <span class="v20-kicker">FECHANDO A AULA</span>
         <h1>${step.title}</h1>
-        <p>Antes de avançar, confira o que você precisa dominar nesta parte.</p>
+        <p>Antes de avançar, confira o que você precisa dominar nesta aula.</p>
       </section>
       <div class="v20-recap">
         ${step.items.map(item=>`<div><span>✓</span><strong>${item}</strong></div>`).join("")}
@@ -1691,7 +1715,7 @@ function renderLessonActivity() {
 
       <main class="v20-main">
         <div class="v20-context">
-          <small>${session.course.level} • Unidade ${session.courseIndex+1} • Parte ${session.lessonIndex+1}</small>
+          <small>${session.course.level} • Unidade ${session.courseIndex+1} • Aula ${session.lessonIndex+1}</small>
           <strong>${session.course.lessons[session.lessonIndex]}</strong>
         </div>
         <div class="v20-body">${body}</div>
@@ -1919,7 +1943,7 @@ function finishLessonSession() {
       state.progress.courseLessons[session.course.id]=completed;
       state.progress.lessons=(state.progress.lessons||0)+1;
       session.completedNow=true;
-      addXP(25,"parte concluída");
+      addXP(25,"aula concluída");
     }
     renderStats();
     renderCourse();
@@ -1938,7 +1962,7 @@ function finishLessonSession() {
       </header>
       <main class="v20-finish">
         <span class="v20-finish-icon">✓</span>
-        <small>PARTE CONCLUÍDA</small>
+        <small>AULA CONCLUÍDA</small>
         <h1>${session.course.lessons[session.lessonIndex]}</h1>
         <p>${session.pack.objective}</p>
         <div class="v20-finish-stats">
@@ -1949,7 +1973,7 @@ function finishLessonSession() {
       </main>
       <footer class="v20-footer">
         <button type="button" class="ghost" id="lessonBackUnit">Voltar à unidade</button>
-        <button type="button" id="lessonNextAction">${nextLesson?"Próxima parte":"Concluir unidade"}</button>
+        <button type="button" id="lessonNextAction">${nextLesson?"Próxima aula":"Concluir unidade"}</button>
       </footer>
     </div>`;
 
