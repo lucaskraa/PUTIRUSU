@@ -14939,3 +14939,53 @@ body.workbook-mode {
     break-inside: avoid;
   }
 }
+
+
+/* === PUTIRUSU V22 — NUMBERED PARTS === */
+.unit-part-copy {
+  min-width: 0;
+  display: grid;
+  gap: 3px;
+}
+.unit-part-label {
+  color: #9a605b !important;
+  font-size: .62rem !important;
+  font-weight: 900 !important;
+  letter-spacing: .11em;
+  text-align: left !important;
+}
+.unit-part-copy strong {
+  display: block;
+  font-size: .95rem;
+}
+.unit-part-status {
+  color: #8d9298 !important;
+  font-size: .7rem !important;
+  text-align: right !important;
+}
+.unit-lesson-simple:not(.locked):not(.done) {
+  border-color: #b8c7d5;
+  background: linear-gradient(180deg,#fff 0%,#f8fbfd 100%);
+}
+.unit-lesson-simple:not(.locked):not(.done) > span {
+  background: #274c77;
+  color: #fff;
+}
+.workbook-chapter-head > small {
+  display: inline-flex;
+  padding: 5px 8px;
+  border-radius: 999px;
+  background: #eee7df;
+  color: #955c57;
+}
+.workbook-toc a {
+  line-height: 1.35;
+}
+.v20-context small {
+  color: #985b55;
+}
+.v20-context strong {
+  margin-top: 2px;
+  color: #333a42;
+  font-size: .95rem;
+}
