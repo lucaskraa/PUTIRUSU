@@ -1225,14 +1225,18 @@ function getLessonPack(course, lessonIndex) {
 }
 
 function buildLessonSteps(pack) {
-  return [
-    {type:"intro",title:"Antes de começar",objective:pack.objective,concept:pack.concept,tip:pack.tip},
-    {type:"examples",title:"Veja e escute",examples:pack.examples},
-    {type:"choice",...pack.choice},
-    {type:"type",...pack.type},
-    {type:"arrange",...pack.arrange},
-    {type:"speak",...pack.speak}
+  const steps = [
+    {type:"intro",title:"Antes de começar",objective:pack.objective,concept:pack.concept,tip:pack.tip}
   ];
+  if (Array.isArray(pack.teach) && pack.teach.length) steps.push({type:"teach",title:"Aprenda",items:pack.teach});
+  if (Array.isArray(pack.examples) && pack.examples.length) steps.push({type:"examples",title:"Veja e escute",examples:pack.examples});
+  if (pack.listen) steps.push({type:"listen",...pack.listen});
+  if (pack.choice) steps.push({type:"choice",...pack.choice});
+  if (pack.type) steps.push({type:"type",...pack.type});
+  if (pack.arrange) steps.push({type:"arrange",...pack.arrange});
+  if (pack.speak) steps.push({type:"speak",...pack.speak});
+  if (Array.isArray(pack.recap) && pack.recap.length) steps.push({type:"recap",title:"Fechando a aula",items:pack.recap});
+  return steps;
 }
 
 function recordLessonMistake(session, step, expected, received="") {
@@ -1300,6 +1304,7 @@ function lessonAdvance() {
 function renderLessonActivity() {
   const session=state.lessonSession;
   if (!session) return;
+
   const view=byId("lessonView");
   const total=session.steps.length;
   const done=Math.min(session.stepIndex,total);
@@ -1318,40 +1323,74 @@ function renderLessonActivity() {
 
   if (step.type==="intro") {
     body=`
-      <div class="lesson-copy-block">
-        <span class="lesson-type-label">OBJETIVO</span>
+      <section class="v20-copy">
+        <span class="v20-kicker">O QUE VOCÊ VAI APRENDER</span>
         <h1>${step.objective}</h1>
         <p>${step.concept}</p>
-        <div class="lesson-tip"><strong>Dica</strong><span>${step.tip}</span></div>
-      </div>`;
+        <aside class="v20-note"><b>Dica</b><span>${step.tip}</span></aside>
+      </section>`;
     primaryLabel="Começar";
+  }
+
+  if (step.type==="teach") {
+    body=`
+      <section class="v20-copy">
+        <span class="v20-kicker">APRENDA</span>
+        <h1>${step.title}</h1>
+        <p>Toque em cada cartão para ouvir um exemplo. Leia o som e a observação antes de avançar.</p>
+      </section>
+      <div class="v20-teach-grid">
+        ${step.items.map((item,index)=>`
+          <button type="button" class="v20-teach-card" data-teach-audio="${index}">
+            <span class="v20-glyph">${item.glyph}</span>
+            <span class="v20-sound">${item.sound}</span>
+            <strong>${item.name}</strong>
+            <p>${item.note}</p>
+            <small>🔊 ${item.example} <em>• ${item.translation}</em></small>
+          </button>`).join("")}
+      </div>`;
   }
 
   if (step.type==="examples") {
     body=`
-      <div class="lesson-copy-block">
-        <span class="lesson-type-label">EXEMPLOS</span>
-        <h1>${step.title}</h1>
-        <p>Toque no áudio, escute e repita antes de continuar.</p>
-      </div>
-      <div class="lesson-example-list">
+      <section class="v20-copy">
+        <span class="v20-kicker">LEITURA + ESCUTA</span>
+        <h1>Veja, ouça e repita</h1>
+        <p>Não leia letra por letra. Tente enxergar cada palavra como um bloco.</p>
+      </section>
+      <div class="v20-example-list">
         ${step.examples.map((item,index)=>`
-          <button type="button" class="lesson-example" data-example-audio="${index}">
-            <span class="lesson-audio-icon">🔊</span>
-            <span><strong>${item.ru}</strong><small>${item.pt}</small></span>
+          <button type="button" class="v20-example" data-example-audio="${index}">
+            <span class="v20-audio">🔊</span>
+            <span class="v20-example-main"><strong>${item.ru}</strong><small>${item.pt}</small></span>
             <em>${item.note || ""}</em>
           </button>`).join("")}
       </div>`;
   }
 
+  if (step.type==="listen") {
+    body=`
+      <section class="v20-question">
+        <span class="v20-kicker">ESCUTE</span>
+        <button type="button" class="v20-big-audio" id="lessonListenAgain">🔊</button>
+        <h1>${step.prompt}</h1>
+      </section>
+      <div class="v20-options">
+        ${step.options.map((option,index)=>`<button type="button" class="v20-option" data-choice="${index}">${option}</button>`).join("")}
+      </div>`;
+    primaryLabel="Verificar";
+    primaryDisabled=true;
+    primaryMode="check-choice";
+  }
+
   if (step.type==="choice") {
     body=`
-      <div class="lesson-question">
-        <span class="lesson-type-label">ESCOLHA</span>
+      <section class="v20-question">
+        <span class="v20-kicker">ENTENDA</span>
         <h1>${step.prompt}</h1>
-      </div>
-      <div class="lesson-choice-grid">
-        ${step.options.map((option,index)=>`<button type="button" class="lesson-option" data-choice="${index}">${option}</button>`).join("")}
+      </section>
+      <div class="v20-options">
+        ${step.options.map((option,index)=>`<button type="button" class="v20-option" data-choice="${index}">${option}</button>`).join("")}
       </div>`;
     primaryLabel="Verificar";
     primaryDisabled=true;
@@ -1360,26 +1399,27 @@ function renderLessonActivity() {
 
   if (step.type==="type") {
     body=`
-      <div class="lesson-question">
-        <span class="lesson-type-label">ESCREVA</span>
+      <section class="v20-question">
+        <span class="v20-kicker">ESCREVA SEM AJUDA</span>
         <h1>${step.prompt}</h1>
-      </div>
-      <div class="lesson-type-answer">
-        <input id="lessonTypeInput" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="Digite sua resposta em russo">
+      </section>
+      <div class="v20-type-box">
+        <input id="lessonTypeInput" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="Digite em russo">
       </div>`;
     primaryLabel="Verificar";
+    primaryDisabled=true;
     primaryMode="check-type";
   }
 
   if (step.type==="arrange") {
     const words=shuffle(step.words);
     body=`
-      <div class="lesson-question">
-        <span class="lesson-type-label">MONTE A FRASE</span>
+      <section class="v20-question">
+        <span class="v20-kicker">MONTE</span>
         <h1>${step.prompt}</h1>
-      </div>
-      <div id="lessonArrangeAnswer" class="lesson-arrange-answer"><span>Toque nas palavras na ordem correta</span></div>
-      <div id="lessonWordBank" class="lesson-word-bank">
+      </section>
+      <div id="lessonArrangeAnswer" class="v20-arrange-answer"><span>Toque nas partes abaixo</span></div>
+      <div id="lessonWordBank" class="v20-word-bank">
         ${words.map((word,index)=>`<button type="button" data-word-index="${index}" data-word="${word}">${word}</button>`).join("")}
       </div>`;
     primaryLabel="Verificar";
@@ -1389,55 +1429,78 @@ function renderLessonActivity() {
 
   if (step.type==="speak") {
     body=`
-      <div class="lesson-question lesson-speak-question">
-        <span class="lesson-type-label">FALE</span>
+      <section class="v20-question v20-speak-title">
+        <span class="v20-kicker">FALE</span>
         <h1>${step.target}</h1>
         <p>${step.pt}</p>
+      </section>
+      <div class="v20-speak-actions">
+        <button type="button" id="lessonHearModel"><b>🔊</b><span>Ouvir modelo</span></button>
+        <button type="button" class="record" id="lessonRecordSpeech"><b>●</b><span>Gravar minha fala</span></button>
       </div>
-      <div class="lesson-speak-box">
-        <button type="button" class="lesson-round-action" id="lessonHearModel">🔊<span>Ouvir modelo</span></button>
-        <button type="button" class="lesson-round-action primary" id="lessonRecordSpeech">●<span>Gravar minha fala</span></button>
-      </div>
-      <div id="lessonSpeechResult" class="lesson-inline-result">
-        <span>${step.hint || "Escute e tente reproduzir o ritmo."}</span>
-      </div>`;
+      <div id="lessonSpeechResult" class="v20-speech-result"><span>${step.hint || "Escute e repita."}</span></div>`;
     primaryLabel="Continuar";
     primaryDisabled=true;
     primaryMode="advance";
   }
 
+  if (step.type==="recap") {
+    body=`
+      <section class="v20-copy">
+        <span class="v20-kicker">REVISÃO RÁPIDA</span>
+        <h1>${step.title}</h1>
+        <p>Antes de terminar, confira o que precisa sair desta aula com você.</p>
+      </section>
+      <div class="v20-recap">
+        ${step.items.map(item=>`<div><span>✓</span><strong>${item}</strong></div>`).join("")}
+      </div>`;
+    primaryLabel="Finalizar aula";
+  }
+
   view.innerHTML=`
-    <div class="duo-lesson-shell">
-      <header class="lesson-run-header">
-        <button type="button" class="lesson-exit" id="lessonExit" aria-label="Sair da aula">×</button>
-        <div class="lesson-run-progress"><span style="width:${percent}%"></span></div>
-        <div class="lesson-run-count">${session.stepIndex+1}/${total}</div>
+    <div class="v20-lesson-overlay">
+      <header class="v20-header">
+        <button type="button" class="v20-close" id="lessonExit" aria-label="Sair da aula">×</button>
+        <div class="v20-progress"><span style="width:${percent}%"></span></div>
+        <span class="v20-count">${session.stepIndex+1}/${total}</span>
       </header>
 
-      <main class="lesson-run-main">
-        <div class="lesson-run-context">
-          <small>${session.course.level} • ${session.course.title}</small>
+      <main class="v20-main">
+        <div class="v20-context">
+          <small>${session.course.level} • Unidade ${session.courseIndex+1}</small>
           <strong>${session.course.lessons[session.lessonIndex]}</strong>
         </div>
-        <div id="lessonActivityBody" class="lesson-activity-body">${body}</div>
+        <div class="v20-body">${body}</div>
       </main>
 
-      <footer id="lessonRunFooter" class="lesson-run-footer">
-        <div id="lessonFeedback" class="lesson-feedback"></div>
+      <footer id="lessonRunFooter" class="v20-footer">
+        <div id="lessonFeedback" class="v20-feedback"></div>
         <button type="button" id="lessonPrimary" data-mode="${primaryMode}" ${primaryDisabled?"disabled":""}>${primaryLabel}</button>
       </footer>
     </div>`;
 
   byId("lessonExit").addEventListener("click",()=>closeLessonToUnit());
 
-  $$("[data-example-audio]",view).forEach(button=>{
+  $$("[data-teach-audio]",view).forEach(button=>{
     button.addEventListener("click",()=>{
-      const item=step.examples[Number(button.dataset.exampleAudio)];
-      speak(item.ru,.75);
+      const item=step.items[Number(button.dataset.teachAudio)];
+      speak(item.example || item.glyph,.72);
     });
   });
 
-  if (step.type==="choice") {
+  $$("[data-example-audio]",view).forEach(button=>{
+    button.addEventListener("click",()=>{
+      const item=step.examples[Number(button.dataset.exampleAudio)];
+      speak(item.ru,.72);
+    });
+  });
+
+  if (step.type==="listen") {
+    byId("lessonListenAgain").addEventListener("click",()=>speak(step.target,.7));
+    setTimeout(()=>speak(step.target,.7),250);
+  }
+
+  if (step.type==="choice" || step.type==="listen") {
     $$("[data-choice]",view).forEach(button=>{
       button.addEventListener("click",()=>{
         if (session.attempted) return;
@@ -1453,7 +1516,6 @@ function renderLessonActivity() {
     const input=byId("lessonTypeInput");
     input.focus();
     input.addEventListener("input",()=>byId("lessonPrimary").disabled=!input.value.trim());
-    byId("lessonPrimary").disabled=true;
     input.addEventListener("keydown",event=>{
       if(event.key==="Enter" && !byId("lessonPrimary").disabled) byId("lessonPrimary").click();
     });
@@ -1465,28 +1527,17 @@ function renderLessonActivity() {
     bank.querySelectorAll("[data-word]").forEach(button=>{
       button.addEventListener("click",()=>{
         if(session.attempted) return;
-        const word=button.dataset.word;
-        session.arranged.push(word);
+        session.arranged.push(button.dataset.word);
         button.disabled=true;
         answer.innerHTML=session.arranged.map((w,index)=>`<button type="button" data-arranged-index="${index}">${w}</button>`).join("");
-        answer.querySelectorAll("[data-arranged-index]").forEach(answerButton=>{
-          answerButton.addEventListener("click",()=>{
-            if(session.attempted) return;
-            const removed=session.arranged.splice(Number(answerButton.dataset.arrangedIndex),1)[0];
-            const source=[...bank.querySelectorAll("[data-word]")].find(b=>b.dataset.word===removed && b.disabled);
-            if(source) source.disabled=false;
-            answer.innerHTML=session.arranged.length?session.arranged.map((w,index)=>`<button type="button" data-arranged-index="${index}">${w}</button>`).join(""):"<span>Toque nas palavras na ordem correta</span>";
-            byId("lessonPrimary").disabled=session.arranged.length===0;
-            renderLessonArrangeRemovalHandlers();
-          });
-        });
         byId("lessonPrimary").disabled=session.arranged.length===0;
+        renderLessonArrangeRemovalHandlers();
       });
     });
   }
 
   if (step.type==="speak") {
-    byId("lessonHearModel").addEventListener("click",()=>speak(step.target,.72));
+    byId("lessonHearModel").addEventListener("click",()=>speak(step.target,.7));
     byId("lessonRecordSpeech").addEventListener("click",()=>startLessonRecognition(step));
   }
 
