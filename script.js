@@ -1621,7 +1621,7 @@ function handleLessonPrimary() {
   else recordLessonMistake(session,step,expected,received);
 
   const feedback=byId("lessonFeedback");
-  feedback.className=`lesson-feedback ${ok?"ok":"bad"}`;
+  feedback.className=`v20-feedback ${ok?"ok":"bad"}`;
   feedback.innerHTML=ok
     ? `<strong>Boa!</strong><span>${step.explain || "Resposta correta."}</span>`
     : `<strong>Quase.</strong><span>Resposta: <b>${expected}</b>${step.explain?" — "+step.explain:""}</span>`;
@@ -1641,7 +1641,7 @@ function startLessonRecognition(step) {
   const session=state.lessonSession;
 
   if(!Recognition) {
-    result.className="lesson-inline-result info";
+    result.className="v20-speech-result info";
     result.innerHTML="<strong>Microfone não disponível neste navegador.</strong><span>Ouça o modelo e repita em voz alta mesmo assim.</span>";
     primary.disabled=false;
     return;
@@ -1668,12 +1668,12 @@ function startLessonRecognition(step) {
     }
     if(!ok && !wasAttempted) recordLessonMistake(session,step,step.target,heard);
 
-    result.className=`lesson-inline-result ${ok?"ok":"info"}`;
+    result.className=`v20-speech-result ${ok?"ok":"info"}`;
     result.innerHTML=`<strong>Você falou: ${heard}</strong><span>Correspondência aproximada: ${score}%. ${ok?"A frase foi reconhecida com clareza.":"Ouça o modelo e tente aproximar palavras e ritmo."}</span>`;
     primary.disabled=false;
   };
   rec.onerror=()=>{
-    result.className="lesson-inline-result info";
+    result.className="v20-speech-result info";
     result.innerHTML="<strong>Não consegui reconhecer.</strong><span>Tente outra vez ou continue e volte na revisão.</span>";
     primary.disabled=false;
   };
@@ -1709,24 +1709,24 @@ function finishLessonSession() {
   const nextLesson=session.lessonIndex+1<session.course.lessons.length;
 
   view.innerHTML=`
-    <div class="duo-lesson-shell lesson-finish-shell">
-      <header class="lesson-run-header">
-        <button type="button" class="lesson-exit" id="lessonFinishExit">×</button>
-        <div class="lesson-run-progress"><span style="width:100%"></span></div>
-        <div class="lesson-run-count">✓</div>
+    <div class="v20-lesson-overlay">
+      <header class="v20-header">
+        <button type="button" class="v20-close" id="lessonFinishExit">×</button>
+        <div class="v20-progress"><span style="width:100%"></span></div>
+        <span class="v20-count">✓</span>
       </header>
-      <main class="lesson-finish">
-        <span class="lesson-finish-mark">✓</span>
+      <main class="v20-finish">
+        <span class="v20-finish-icon">✓</span>
         <small>AULA CONCLUÍDA</small>
         <h1>${session.course.lessons[session.lessonIndex]}</h1>
         <p>${session.pack.objective}</p>
-        <div class="lesson-finish-stats">
+        <div class="v20-finish-stats">
           <div><strong>${score}%</strong><span>acertos</span></div>
           <div><strong>+25</strong><span>XP</span></div>
           <div><strong>${session.correct}/${session.graded}</strong><span>atividades</span></div>
         </div>
       </main>
-      <footer class="lesson-run-footer">
+      <footer class="v20-footer">
         <button type="button" class="ghost" id="lessonBackUnit">Voltar à unidade</button>
         <button type="button" id="lessonNextAction">${nextLesson?"Próxima aula":"Concluir unidade"}</button>
       </footer>
