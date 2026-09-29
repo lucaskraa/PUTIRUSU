@@ -202,7 +202,7 @@ module.exports = function installCompanion(deps) {
   async function generateGeminiAnswer(payload) {
     const apiKey = process.env.GEMINI_API_KEY;
     if (!apiKey) return null;
-    const model = process.env.GEMINI_MODEL || "gemini-2.5-flash";
+    const model = process.env.GEMINI_MODEL || "gemini-3.8-flash";
     const response = await fetch(
       "https://generativelanguage.googleapis.com/v1beta/models/" + encodeURIComponent(model) + ":generateContent",
       {
@@ -364,7 +364,7 @@ module.exports = function installCompanion(deps) {
     const apiKey = process.env.GEMINI_API_KEY;
     if (!apiKey) return null;
 
-    const model = process.env.GEMINI_LIVE_MODEL || "gemini-2.5-flash-native-audio-preview-12-2025";
+    const model = process.env.GEMINI_LIVE_MODEL || "gemini-3.8-live";
     const voice = process.env.GEMINI_LIVE_VOICE || "Leda";
     const now = Date.now();
     const payload = {
@@ -576,8 +576,8 @@ module.exports = function installCompanion(deps) {
       liveConfigured:geminiConfigured,
       liveProvider:geminiConfigured ? "gemini" : "none",
       geminiConfigured,
-      geminiModel:process.env.GEMINI_MODEL || "gemini-2.5-flash",
-      geminiLiveModel:process.env.GEMINI_LIVE_MODEL || "gemini-2.5-flash-native-audio-preview-12-2025",
+      geminiModel:process.env.GEMINI_MODEL || "gemini-3.8-flash",
+      geminiLiveModel:process.env.GEMINI_LIVE_MODEL || "gemini-3.8-live",
       geminiVoice:process.env.GEMINI_LIVE_VOICE || "Leda",
       openaiConfigured,
       responseModel:process.env.OPENAI_MODEL || "gpt-5.6-luna",
