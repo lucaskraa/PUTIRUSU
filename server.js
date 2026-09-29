@@ -96,7 +96,7 @@ async function realTeacherAnswer(message,scenario){
   return parts.join("\n").trim()||null;
 }
 
-installCompanion({ app, auth, readDatabase, writeDatabase, id, findProgress, audit });
+const companionRuntime = installCompanion({ app, auth, readDatabase, writeDatabase, id, findProgress, audit });
 
 app.post("/api/exams",auth,(req,res)=>{const db=readDatabase();const result={id:id("exam"),userId:req.userId,score:Number(req.body.score)||0,total:Number(req.body.total)||0,answers:req.body.answers||[],createdAt:new Date().toISOString()};db.examResults.push(result);audit(db,req.userId,"exam_submit",{score:result.score,total:result.total});writeDatabase(db);res.status(201).json(result);});
 app.get("/api/exams",auth,(req,res)=>{const db=readDatabase();res.json(db.examResults.filter(x=>x.userId===req.userId).reverse());});
@@ -108,7 +108,7 @@ app.use("/api",(req,res)=>res.status(404).json({error:"Rota da API não encontra
 app.get("*",(req,res)=>res.sendFile(path.join(ROOT,"index.html")));
 app.use((error,req,res,next)=>{console.error(error);res.status(500).json({error:"Erro interno do servidor."});});
 if(require.main===module){ensureDatabase();app.listen(PORT,()=>console.log(`PUTIRUSU 16 rodando em http://localhost:${PORT}`));}
-module.exports={app,readDatabase,writeDatabase,teacherAnswer,verifyToken};
+module.exports={app,readDatabase,writeDatabase,teacherAnswer,verifyToken,companionRuntime};
 
 const PUTIRUSU_WRITING_CURRICULUM = [
   {
