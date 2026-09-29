@@ -3,9 +3,9 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <meta name="theme-color" content="#1d4ed8">
+  <meta name="theme-color" content="#111827">
   <meta name="description" content="PUTIRUSU: curso de russo com escrita cirílica, cursiva, áudio, fala e revisão.">
-  <title>PUTIRUSU 15 — Escrita Cirílica</title>
+  <title>PUTIRUSU — Curso de Russo</title>
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
@@ -59,23 +59,28 @@
     <aside id="sidebar" class="sidebar">
       <div class="brand">
         <div class="logo-mark mini">П</div>
-        <div><strong>PUTIRUSU</strong><span>Russian Learning Studio</span></div>
+        <div><strong>PUTIRUSU</strong><span>РУССКИЙ • A1—C2</span></div>
       </div>
       <nav id="nav" aria-label="Navegação principal">
-        <button data-screen="home" class="active">🏠 Início</button>
-        <button data-screen="course">🧭 Curso</button>
-        <button data-screen="alphabet">🔤 Alfabeto</button>
-        <button data-screen="handwriting">✍️ Escrita e cursiva</button>
-        <button data-screen="copybook">📓 Caderno de cópia</button>
-        <button data-screen="audio">🎧 Escuta</button>
-        <button data-screen="speaking">🎙️ Fala</button>
-        <button data-screen="chat">💬 Professor IA</button>
-        <button data-screen="review">🧠 Revisão</button>
-        <button data-screen="exam">📝 Provas</button>
-        <button data-screen="dictionary">📚 Dicionário</button>
-        <button data-screen="culture">🎭 Cultura</button>
-        <button data-screen="games">🎮 Jogos</button>
-        <button data-screen="profile">👤 Perfil</button>
+        <p class="nav-label">Aprender</p>
+        <button data-screen="home" class="active"><span class="nav-icon">⌂</span> Início</button>
+        <button data-screen="course"><span class="nav-icon">▦</span> Curso</button>
+        <button data-screen="review"><span class="nav-icon">↻</span> Revisão</button>
+
+        <p class="nav-label">Laboratório</p>
+        <button data-screen="alphabet"><span class="nav-icon">А</span> Alfabeto</button>
+        <button data-screen="handwriting"><span class="nav-icon">✎</span> Escrita e cursiva</button>
+        <button data-screen="copybook"><span class="nav-icon">▤</span> Caderno</button>
+        <button data-screen="audio"><span class="nav-icon">◉</span> Escuta</button>
+        <button data-screen="speaking"><span class="nav-icon">◌</span> Fala</button>
+
+        <p class="nav-label">Apoio</p>
+        <button data-screen="chat"><span class="nav-icon">✦</span> Professor IA</button>
+        <button data-screen="exam"><span class="nav-icon">✓</span> Provas</button>
+        <button data-screen="dictionary"><span class="nav-icon">Aa</span> Dicionário</button>
+        <button data-screen="culture"><span class="nav-icon">◈</span> Cultura</button>
+        <button data-screen="games"><span class="nav-icon">◇</span> Jogos</button>
+        <button data-screen="profile"><span class="nav-icon">○</span> Perfil</button>
       </nav>
       <button id="logoutBtn" class="ghost danger-outline" type="button">Sair</button>
     </aside>
@@ -87,34 +92,56 @@
         <div class="stats"><span id="xpStat">0 XP</span><span id="streakStat">0 dias</span><span id="lessonStat">0 aulas</span></div>
       </header>
 
-      <section id="screen-home" class="screen active">
-        <div class="hero">
-          <article class="panel hero-main">
-            <p class="tag">ПРИВЕТ • PRIVET</p>
-            <h1>Aprenda russo lendo, ouvindo, falando e escrevendo.</h1>
-            <p>Agora o PUTIRUSU ensina letra de forma e letra cursiva com treino por traçado.</p>
-            <div class="row"><button data-go="handwriting">Treinar cursiva</button><button data-go="course" class="ghost">Continuar curso</button></div>
+      <section id="screen-home" class="screen active home-screen">
+        <div class="home-dashboard">
+          <article class="home-welcome">
+            <div>
+              <p class="eyebrow">PUTIRUSU • RUSSO DO ZERO AO USO REAL</p>
+              <h1>Continue de onde você parou.</h1>
+              <p>Curso estruturado, fala, escuta, escrita e um professor IA que acompanha o que você está estudando.</p>
+            </div>
+            <div class="home-actions">
+              <button data-go="course">Continuar curso</button>
+              <button data-go="chat" class="ghost">Falar com professor</button>
+            </div>
+            <div class="home-capabilities">
+              <span>Leitura</span><span>Fala</span><span>Escuta</span><span>Cursiva</span><span>Gramática</span>
+            </div>
           </article>
-          <article class="panel daily-card"><h2>Missão de hoje</h2><div id="dailyMission"></div><button id="startDailyBtn">Começar missão</button></article>
+
+          <aside class="today-panel">
+            <div class="today-head"><span>HOJE</span><strong>Plano de estudo</strong></div>
+            <div id="dailyMission"></div>
+            <button id="startDailyBtn">Começar sessão</button>
+          </aside>
+        </div>
+
+        <div class="home-section-head">
+          <div><span>ATALHOS</span><h2>Pratique uma habilidade</h2></div>
+          <p>Entre direto no laboratório que você precisa agora.</p>
         </div>
         <div id="homeQuick" class="quick-grid"></div>
-        <div class="section-heading"><div><p class="eyebrow">SEU PROGRESSO</p><h2>Mapa de escrita</h2></div></div>
+
+        <div class="home-section-head">
+          <div><span>ESCRITA</span><h2>Seu domínio do alfabeto</h2></div>
+          <p>Veja quais letras ainda precisam de prática.</p>
+        </div>
         <div id="writingProgressOverview" class="alphabet-progress-grid"></div>
       </section>
 
       <section id="screen-course" class="screen course-screen">
-        <div class="course-top">
+        <div class="course-header">
           <div>
-            <p class="eyebrow">CAMINHO DE APRENDIZADO</p>
-            <h1>Seu curso de russo</h1>
-            <p>Avance uma aula por vez. Cada etapa mistura compreensão, fala, escrita e uso real.</p>
+            <p class="eyebrow">CURRÍCULO PUTIRUSU</p>
+            <h1>Russo por unidades.</h1>
+            <p>Uma sequência clara do A1 ao C2. Cada unidade combina teoria curta, prática, produção e conversa.</p>
           </div>
-          <label class="course-level-filter">Nível
-            <select id="levelFilter"><option value="all">Todos</option><option>A1</option><option>A2</option><option>B1</option><option>B2</option><option>C1</option><option>C2</option></select>
+          <label class="course-level-filter">Filtrar nível
+            <select id="levelFilter"><option value="all">Curso inteiro</option><option>A1</option><option>A2</option><option>B1</option><option>B2</option><option>C1</option><option>C2</option></select>
           </label>
         </div>
         <div id="courseOverview" class="course-overview" aria-live="polite"></div>
-        <div id="courseGrid" class="course-path"></div>
+        <div id="courseGrid" class="course-catalog"></div>
         <div id="lessonView" class="lesson-view hidden"></div>
       </section>
 
