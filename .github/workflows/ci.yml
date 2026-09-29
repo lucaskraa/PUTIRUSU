@@ -1,0 +1,32 @@
+name: PUTIRUSU CI
+
+on:
+  push:
+    branches:
+      - main
+      - part-1-foundation
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install
+        run: npm install --no-audit --no-fund
+
+      - name: Test
+        env:
+          TOKEN_SECRET: putirusu-ci-secret-only
+        run: npm test
