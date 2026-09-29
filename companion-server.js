@@ -264,7 +264,9 @@ module.exports = function installCompanion(deps) {
       if (answer && !answer.startsWith("Vamos estudar.")) return answer;
     }
 
-    return "Ouvi: “" + raw + "”. Meu cérebro remoto está fora do alcance agora, então não vou fingir que sei responder isso. Mas continuo vendo a atividade atual" + (focus ? " — “" + focus + "”." : ".");
+    return focus
+      ? "Te ouvi. Ainda estou vendo “" + focus + "” na tela."
+      : "Te ouvi.";
   }
 
   function sanitizeAnswer(text) {
