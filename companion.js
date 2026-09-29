@@ -447,6 +447,27 @@
     return "Eu ouvi “" + raw + "”. Meu cérebro remoto não respondeu agora, então prefiro não inventar. " + (focus ? "Mas eu ainda sei que você está em “" + focus + "”." : "Eu continuo acompanhando a tela.");
   }
 
+  function cleanCompanionSpeech(text) {
+    let value = String(text || "").trim();
+    const replacements = [
+      [/\bfilho\s+da\s+puta\b/gi, "chato"],
+      [/\bputa\s+que\s+pariu\b/gi, "poxa vida"],
+      [/\bvai\s+se\s+foder\b/gi, "melhor parar por aí"],
+      [/\bporra\b/gi, "poxa"],
+      [/\bcaralho\b/gi, "caramba"],
+      [/\bcacete\b/gi, "caramba"],
+      [/\bmerda\b/gi, "droga"],
+      [/\bfod(?:a|ido|ida|er|eu|endo)\b/gi, "complicado"],
+      [/\bpqp\b/gi, "poxa"],
+      [/\bdesgraçad[oa]\b/gi, "complicado"],
+      [/\bdesgraça\b/gi, "problema"],
+      [/\bputa\b/gi, "poxa"],
+      [/\bbuceta\b/gi, "isso"]
+    ];
+    for (const [pattern, replacement] of replacements) value = value.replace(pattern, replacement);
+    return value;
+  }
+
   async function callBrain(message) {
     const payload = {
       method:"POST",
@@ -481,7 +502,7 @@
 
     try {
       const data = await callBrain(message);
-      const answer = String(data && data.answer || "").trim() || localBrain(message);
+      const answer = cleanCompanionSpeech(String(data && data.answer || "").trim() || localBrain(message));
 
       companion.lastAnswer = answer;
       companion.thinking = false;
@@ -489,7 +510,7 @@
       speakCompanion(answer);
     } catch (_) {
       companion.thinking = false;
-      const fallback = localBrain(message);
+      const fallback = cleanCompanionSpeech(localBrain(message));
       companion.lastAnswer = fallback;
       showBubble(fallback, true, options && options.heard ? options.heard : "");
       speakCompanion(fallback);
