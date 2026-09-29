@@ -668,7 +668,7 @@ const PHRASES = [
 ];
 const COURSE = [
   { id:"a1-1", level:"A1", title:"Primeiros sons", desc:"Reconheça vogais e consoantes.", lessons:["А, О, М, Т", "Leitura de мама e там", "Primeira cópia guiada"] },
-  { id:"a1-2", level:"A1", title:"Alfabeto completo", desc:"As 33 letras, forma e cursiva.", lessons:["Letras familiares", "Letras falsas amigas", "Sinais ь e ъ"] },
+  { id:"a1-2", level:"A1", title:"Alfabeto completo", desc:"Domine as 33 letras, sons e armadilhas de leitura.", lessons:["Letras familiares", "Letras falsas amigas", "Novas letras I", "Novas letras II", "Vogais e Й", "Sinais ь e ъ"] },
   { id:"a1-3", level:"A1", title:"Apresentação", desc:"Nome, país, idade e profissão.", lessons:["Меня зовут", "Я из", "Я студент"] },
   { id:"a2-1", level:"A2", title:"Rotina", desc:"Fale do seu dia.", lessons:["Verbos no presente", "Horas", "Dias da semana"] },
   { id:"a2-2", level:"A2", title:"Cidade", desc:"Direções, transporte e compras.", lessons:["Onde fica?", "Quanto custa?", "Imperativo básico"] },
