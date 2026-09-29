@@ -226,12 +226,12 @@ module.exports = function installCompanion(deps) {
     const apiKey = process.env.GEMINI_API_KEY;
     if (!apiKey) return null;
 
-    const preferred = process.env.GEMINI_MODEL || "gemini-3.8-flash";
+    const preferred = process.env.GEMINI_MODEL || "gemini-3.7-flash";
     const models = [...new Set([
       preferred,
-      "gemini-3.8-flash",
       "gemini-3.7-flash",
       "gemini-3.6-flash",
+      "gemini-3.8-flash",
       "gemini-3.5-flash",
       "gemini-3.5-flash-lite"
     ])];
@@ -294,47 +294,55 @@ module.exports = function installCompanion(deps) {
     const apiKey = process.env.GEMINI_API_KEY;
     if (!apiKey || !context || typeof context !== "object") return "";
 
-    const model = "gemini-3.8-flash";
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 9000);
-    try {
-      const response = await fetch(
-        "https://generativelanguage.googleapis.com/v1beta/models/" + model + ":generateContent",
-        {
-          method:"POST",
-          signal:controller.signal,
-          headers:{
-            "x-goog-api-key":apiKey,
-            "Content-Type":"application/json"
-          },
-          body:JSON.stringify({
-            systemInstruction:{
-              parts:[{text:[
-                "Você prepara silenciosamente o contexto para PP, um companheiro de estudo por voz.",
-                "Analise a atividade atual antes de o aluno pedir ajuda.",
-                "Retorne um briefing compacto em português com: objetivo real, resposta/resultado esperado se existir, 2 erros prováveis, melhor pista sem entregar tudo, e ponto de pronúncia se houver russo.",
-                "Se não houver atividade concreta, descreva em uma linha o que está visível e útil.",
-                "Não fale com o aluno e não use introduções."
-              ].join("\n")}]
+    const models = ["gemini-3.7-flash","gemini-3.6-flash","gemini-3.8-flash"];
+    let lastError = null;
+
+    for (const model of models) {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 7500);
+      try {
+        const response = await fetch(
+          "https://generativelanguage.googleapis.com/v1beta/models/" + model + ":generateContent",
+          {
+            method:"POST",
+            signal:controller.signal,
+            headers:{
+              "x-goog-api-key":apiKey,
+              "Content-Type":"application/json"
             },
-            contents:[{
-              role:"user",
-              parts:[{text:JSON.stringify(cleanValue(context))}]
-            }],
-            generationConfig:{
-              temperature:0.25,
-              maxOutputTokens:260,
-              thinkingConfig:{thinkingLevel:"medium"}
-            }
-          })
-        }
-      );
-      const body = await response.text();
-      if (!response.ok) throw new Error("Activity brief " + response.status + ": " + body.slice(0,180));
-      return geminiOutputText(JSON.parse(body)).slice(0,1800);
-    } finally {
-      clearTimeout(timeout);
+            body:JSON.stringify({
+              systemInstruction:{
+                parts:[{text:[
+                  "Você prepara silenciosamente o contexto para PP, um companheiro de estudo por voz.",
+                  "Analise a atividade atual antes de o aluno pedir ajuda.",
+                  "Retorne um briefing compacto em português com: objetivo real, resposta/resultado esperado se existir, 2 erros prováveis, melhor pista sem entregar tudo, e ponto de pronúncia se houver russo.",
+                  "Se não houver atividade concreta, descreva em uma linha o que está visível e útil.",
+                  "Não fale com o aluno e não use introduções."
+                ].join("\n")}]
+              },
+              contents:[{
+                role:"user",
+                parts:[{text:JSON.stringify(cleanValue(context))}]
+              }],
+              generationConfig:{
+                temperature:0.25,
+                maxOutputTokens:260,
+                thinkingConfig:{thinkingLevel:"medium"}
+              }
+            })
+          }
+        );
+        const body = await response.text();
+        if (response.ok) return geminiOutputText(JSON.parse(body)).slice(0,1800);
+        lastError = new Error("Activity brief " + model + " " + response.status + ": " + body.slice(0,180));
+        if (![429,500,502,503,504].includes(response.status)) throw lastError;
+      } catch (error) {
+        lastError = error;
+      } finally {
+        clearTimeout(timeout);
+      }
     }
+    throw lastError || new Error("Activity brief unavailable");
   }
 
   async function generateOpenAIAnswer(payload) {
@@ -769,7 +777,7 @@ module.exports = function installCompanion(deps) {
       liveConfigured:geminiConfigured,
       liveProvider:geminiConfigured ? "gemini" : "none",
       geminiConfigured,
-      geminiModel:process.env.GEMINI_MODEL || "gemini-3.8-flash",
+      geminiModel:process.env.GEMINI_MODEL || "gemini-3.7-flash",
       geminiLiveModel:process.env.GEMINI_LIVE_MODEL || "gemini-3.8-live",
       geminiVoice:process.env.GEMINI_LIVE_VOICE || "Achird",
       ttsModel:process.env.GEMINI_TTS_MODEL || "gemini-3.8-flash-lite-tts",
@@ -1180,7 +1188,7 @@ module.exports = function installCompanion(deps) {
 
       try {
         const response = await fetch(
-          "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent",
+          "https://generativelanguage.googleapis.com/v1beta/models/" + encodeURIComponent(process.env.GEMINI_MODEL || "gemini-3.7-flash") + ":generateContent",
           {
             method:"POST",
             headers:{
@@ -1234,9 +1242,26 @@ module.exports = function installCompanion(deps) {
           try {
             const event = JSON.parse(data.toString("utf8"));
             if (event.setupComplete) {
-              clearTimeout(timer);
               console.log("PP Live self-test: setupComplete");
-              test.close(1000,"self-test complete");
+              test.send(JSON.stringify({
+                clientContent:{
+                  turns:[{role:"user",parts:[{text:"macaco"}]}],
+                  turnComplete:true
+                }
+              }));
+            } else if (event.serverContent) {
+              const content = event.serverContent;
+              const hasAudio = Boolean(
+                content.modelTurn &&
+                Array.isArray(content.modelTurn.parts) &&
+                content.modelTurn.parts.some(part => part && part.inlineData && part.inlineData.data)
+              );
+              const transcript = content.outputTranscription && content.outputTranscription.text;
+              if (hasAudio || transcript || content.generationComplete) {
+                clearTimeout(timer);
+                console.log("PP Live single-word self-test: response");
+                test.close(1000,"single-word self-test complete");
+              }
             } else if (event.error) {
               clearTimeout(timer);
               console.warn("PP Live self-test error:", JSON.stringify(event.error).slice(0,360));
