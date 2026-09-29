@@ -756,7 +756,7 @@ function addXP(amount, reason="atividade") {
 function renderStats() {
   byId("xpStat").textContent = `${state.progress.xp || 0} XP`;
   byId("streakStat").textContent = `${state.progress.streak || 0} dias`;
-  byId("lessonStat").textContent = `${state.progress.lessons || 0} aulas`;
+  byId("lessonStat").textContent = `${state.progress.lessons || 0} partes`;
 }
 
 function showScreen(name) {
@@ -927,7 +927,7 @@ function renderHome() {
 
   const mission = byId("dailyMission");
   if (mission) {
-    mission.innerHTML = `<p>1 aula • 5 min de escuta • 5 min de fala</p><div class="mission-bar"><span style="width:${Math.min(100,(state.progress.daily||0)*20)}%"></span></div>`;
+    mission.innerHTML = `<p>1 parte • 5 min de escuta • 5 min de fala</p><div class="mission-bar"><span style="width:${Math.min(100,(state.progress.daily||0)*20)}%"></span></div>`;
   }
 }
 
@@ -1447,7 +1447,7 @@ function buildLessonSteps(pack) {
         ...(pack.examples || []).slice(0,2).map(item=>`${item.ru} = ${item.pt}`)
       ].filter(Boolean);
 
-  steps.push({type:"recap",title:"O que você leva desta aula",items:recap});
+  steps.push({type:"recap",title:"O que você leva desta parte",items:recap});
   return steps;
 }
 
@@ -1536,10 +1536,10 @@ function renderLessonActivity() {
   if (step.type==="goal") {
     body=`
       <section class="v21-goal">
-        <span class="v20-kicker">META DA AULA</span>
+        <span class="v20-kicker">META DA PARTE</span>
         <div class="v21-goal-mark">✦</div>
         <h1>${step.objective}</h1>
-        <p>Você vai aprender em etapas curtas e depois usar o conteúdo sem ajuda.</p>
+        <p>Esta parte é dividida em atividades curtas. Primeiro você entende, depois pratica e por fim usa sozinho.</p>
       </section>`;
     primaryLabel="Começar";
   }
@@ -1671,9 +1671,9 @@ function renderLessonActivity() {
   if (step.type==="recap") {
     body=`
       <section class="v20-copy">
-        <span class="v20-kicker">REVISÃO RÁPIDA</span>
+        <span class="v20-kicker">FECHANDO A PARTE</span>
         <h1>${step.title}</h1>
-        <p>Antes de terminar, confira o que precisa sair desta aula com você.</p>
+        <p>Antes de avançar, confira o que você precisa dominar nesta parte.</p>
       </section>
       <div class="v20-recap">
         ${step.items.map(item=>`<div><span>✓</span><strong>${item}</strong></div>`).join("")}
@@ -1919,7 +1919,7 @@ function finishLessonSession() {
       state.progress.courseLessons[session.course.id]=completed;
       state.progress.lessons=(state.progress.lessons||0)+1;
       session.completedNow=true;
-      addXP(25,"aula concluída");
+      addXP(25,"parte concluída");
     }
     renderStats();
     renderCourse();
