@@ -215,6 +215,11 @@
     } catch (_) {}
   }
 
+  function setRealtimeMicEnabled(enabled) {
+    if (!companion.realtimeStream) return;
+    companion.realtimeStream.getAudioTracks().forEach(track=>{ track.enabled = Boolean(enabled); });
+  }
+
   function closeRealtime() {
     companion.realtimeConnected = false;
     companion.realtimeConnecting = false;
@@ -704,6 +709,11 @@
       if (!window.speechSynthesis || speechSynthesis.speaking || speechSynthesis.pending) return;
       clearInterval(companion.ttsWatch);
       companion.ttsWatch = null;
+      if (companion.realtimeConnected) {
+        setRealtimeMicEnabled(true);
+        setStatus("listening","ouvindo");
+        return;
+      }
       if (!companion.speaking && companion.wantsListening && !companion.lessonMicBusy) {
         scheduleRecognitionRestart(380);
       }
@@ -787,6 +797,11 @@
   async function respondTo(message, options) {
     if (!message || companion.thinking || companion.speaking) return;
 
+    if (companion.realtimeConnected) {
+      sendRealtimeText(message);
+      return;
+    }
+
     companion.thinking = true;
     stopRecognition(true);
     setStatus("thinking", "pensando");
@@ -822,6 +837,7 @@
     const now = Date.now();
     if (now - companion.lastNudgeAt < 90000) return;
     companion.lastNudgeAt = now;
+    pushRealtimeContext();
     await respondTo(
       "Você percebeu que eu errei repetidamente agora. Intervenha espontaneamente com uma observação curta, viva e específica, sem entregar a resposta.",
       { context:{ source:"automatic_intervention", trigger:reason || "repeated_mistake" } }
@@ -1090,7 +1106,8 @@
 
     const oldSpeak = speak;
     speak = function () {
-      if (companion.wantsListening) stopRecognition(true);
+      if (companion.realtimeConnected) setRealtimeMicEnabled(false);
+      if (companion.wantsListening && !companion.realtimeConnected) stopRecognition(true);
       const result = oldSpeak.apply(this, arguments);
       waitForSpeechEnd();
       return result;
@@ -1099,11 +1116,13 @@
     const oldSpeakingRecognition = startRecognition;
     startRecognition = function () {
       companion.lessonMicBusy = true;
+      if (companion.realtimeConnected) setRealtimeMicEnabled(false);
       stopRecognition(true);
       const result = oldSpeakingRecognition.apply(this, arguments);
       setTimeout(function () {
         companion.lessonMicBusy = false;
-        if (companion.wantsListening) scheduleRecognitionRestart(400);
+        if (companion.realtimeConnected) setRealtimeMicEnabled(true);
+        else if (companion.wantsListening) scheduleRecognitionRestart(400);
       }, 12000);
       return result;
     };
@@ -1111,11 +1130,13 @@
     const oldLessonRecognition = startLessonRecognition;
     startLessonRecognition = function () {
       companion.lessonMicBusy = true;
+      if (companion.realtimeConnected) setRealtimeMicEnabled(false);
       stopRecognition(true);
       const result = oldLessonRecognition.apply(this, arguments);
       setTimeout(function () {
         companion.lessonMicBusy = false;
-        if (companion.wantsListening) scheduleRecognitionRestart(400);
+        if (companion.realtimeConnected) setRealtimeMicEnabled(true);
+        else if (companion.wantsListening) scheduleRecognitionRestart(400);
       }, 12000);
       return result;
     };
