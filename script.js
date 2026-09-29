@@ -759,17 +759,28 @@ function renderStats() {
 
 function showScreen(name) {
   $$(".screen").forEach(el => el.classList.toggle("active", el.id === `screen-${name}`));
-  $$("#nav button").forEach(el => el.classList.toggle("active", el.dataset.screen === name));
+
+  const practiceChildren = new Set(["alphabet","handwriting","copybook","audio","speaking","review","exam","dictionary","culture","games"]);
+  const navName = practiceChildren.has(name) ? "practice" : name;
+  $$("#nav button[data-screen]").forEach(el => el.classList.toggle("active", el.dataset.screen === navName));
+
   const titles = {
-    home:["Início","Seu painel de estudo."], course:["Curso","Do A1 ao C2."], alphabet:["Alfabeto","Forma, som e cursiva."],
-    handwriting:["Escrita e cursiva","Trace e aperfeiçoe sua letra."], copybook:["Caderno de cópia","Prática organizada por linhas."],
-    audio:["Escuta","Reconheça palavras pelo som."], speaking:["Fala","Use o microfone para praticar."], chat:["Professor IA","Pergunte e receba explicações."],
-    review:["Revisão","Reforce seus pontos fracos."], exam:["Provas","Teste seu conhecimento."], dictionary:["Dicionário","Pesquise palavras."],
-    culture:["Cultura","Conheça a Rússia e a língua."], games:["Jogos","Aprenda praticando."], profile:["Perfil","Acompanhe sua evolução."]
+    home:["Início",""], course:["Curso",""], practice:["Prática",""],
+    alphabet:["Alfabeto",""], handwriting:["Escrita e cursiva",""], copybook:["Caderno",""],
+    audio:["Escuta",""], speaking:["Fala",""], chat:["Professor",""],
+    review:["Revisão",""], exam:["Provas",""], dictionary:["Dicionário",""],
+    culture:["Cultura",""], games:["Jogos",""], profile:["Perfil",""]
   };
+
   byId("screenTitle").textContent = titles[name]?.[0] || "PUTIRUSU";
   byId("screenSubtitle").textContent = titles[name]?.[1] || "";
   byId("sidebar").classList.remove("open");
+
+  if (name === "course") {
+    byId("courseListView")?.classList.remove("hidden");
+    byId("courseUnitView")?.classList.add("hidden");
+    byId("lessonView")?.classList.add("hidden");
+  }
   if (name === "handwriting") setTimeout(resizeCanvases, 30);
 }
 
@@ -874,7 +885,7 @@ function bindGeneral() {
   byId("memoryNewBtn").addEventListener("click",newMemoryGame);
   byId("profileForm").addEventListener("submit",saveProfile);
   byId("exportProgressBtn").addEventListener("click",exportProgress);
-  byId("startDailyBtn").addEventListener("click",()=>showScreen("handwriting"));
+  byId("startDailyBtn").addEventListener("click",()=>{ const next=firstPendingCourseLesson(); showScreen("course"); openUnit(next.course.id); });
   byId("levelFilter").addEventListener("change",renderCourse);
   window.addEventListener("resize",()=>{ if(byId("screen-handwriting").classList.contains("active")) resizeCanvases(); });
   setupCanvas();
@@ -886,15 +897,35 @@ function renderAll() {
 }
 
 function renderHome() {
-  byId("dailyMission").innerHTML = `<p>Escreva <strong>3 letras cursivas</strong>, ouça 5 palavras e complete uma revisão.</p><div class="mission-bar"><span style="width:${Math.min(100,(state.progress.daily||0)*20)}%"></span></div>`;
-  const cards = [
-    ["✍️","Escrita cursiva","Treine o traçado das 33 letras.","handwriting"], ["📓","Caderno","Copie palavras em linhas guiadas.","copybook"],
-    ["🔤","Alfabeto","Compare letra de forma e cursiva.","alphabet"], ["🎙️","Pronúncia","Fale e compare com o modelo.","speaking"]
-  ];
-  byId("homeQuick").innerHTML = cards.map(([icon,title,text,screen])=>`<article class="quick-card"><div class="quick-icon">${icon}</div><h3>${title}</h3><p>${text}</p><button data-home-go="${screen}">Abrir</button></article>`).join("");
-  $$('[data-home-go]').forEach(b=>b.addEventListener("click",()=>showScreen(b.dataset.homeGo)));
-  byId("writingProgressOverview").innerHTML = ALPHABET.map((l,i)=>{const p=state.progress.letters?.[l.lower]?.score||0; return `<button class="progress-letter" style="--progress:${p}%" data-progress-letter="${i}" title="${l.upper}: ${p}%"><span>${l.upper}</span></button>`}).join("");
-  $$('[data-progress-letter]').forEach(b=>b.addEventListener("click",()=>{state.selectedLetter=Number(b.dataset.progressLetter); renderHandwriting(); showScreen("handwriting");}));
+  const next = firstPendingCourseLesson();
+  const completed = COURSE.reduce((sum, course) => sum + completedCourseLessons(course.id).length, 0);
+  const total = COURSE.reduce((sum, course) => sum + course.lessons.length, 0);
+  const percent = total ? Math.round((completed / total) * 100) : 0;
+
+  const continueBox = byId("homeContinue");
+  if (continueBox) {
+    continueBox.innerHTML = `
+      <div class="home-continue-copy">
+        <span class="eyebrow">CONTINUAR</span>
+        <small>${next.course.level} • Unidade ${next.courseIndex + 1}</small>
+        <h1>${next.course.title}</h1>
+        <p>${next.course.lessons[next.lessonIndex]}</p>
+        <button type="button" id="homeContinueBtn">Abrir unidade</button>
+      </div>
+      <div class="home-continue-progress">
+        <strong>${percent}%</strong>
+        <span>do curso</span>
+      </div>`;
+    byId("homeContinueBtn")?.addEventListener("click", () => {
+      showScreen("course");
+      openUnit(next.course.id);
+    });
+  }
+
+  const mission = byId("dailyMission");
+  if (mission) {
+    mission.innerHTML = `<p>1 aula • 5 min de escuta • 5 min de fala</p><div class="mission-bar"><span style="width:${Math.min(100,(state.progress.daily||0)*20)}%"></span></div>`;
+  }
 }
 
 function renderAlphabet() {
@@ -1075,95 +1106,105 @@ function renderCourse() {
 
   const totalLessons = COURSE.reduce((sum, course) => sum + course.lessons.length, 0);
   const completedLessons = COURSE.reduce(
-    (sum, course) => sum + Math.min(course.lessons.length, completedCourseLessons(course.id).length),
-    0
+    (sum, course) => sum + Math.min(course.lessons.length, completedCourseLessons(course.id).length), 0
   );
   const percent = totalLessons ? Math.round((completedLessons / totalLessons) * 100) : 0;
-  const next = firstPendingCourseLesson();
 
   const overview = byId("courseOverview");
   if (overview) {
     overview.innerHTML = `
-      <section class="course-focus">
-        <div class="course-focus-main">
-          <span class="course-overline">CONTINUE AGORA</span>
-          <div class="course-focus-level">${next.course.level}</div>
-          <h2>${next.course.title}</h2>
-          <p>${next.course.lessons[next.lessonIndex]}</p>
-          <button type="button" data-course-continue>Continuar aula</button>
-        </div>
-        <div class="course-focus-progress">
-          <div class="course-percentage">${percent}%</div>
-          <span>do curso concluído</span>
-          <div class="course-progress-line"><span style="width:${percent}%"></span></div>
-          <div class="course-progress-numbers">
-            <strong>${completedLessons}</strong>
-            <span>de ${totalLessons} aulas</span>
-          </div>
-        </div>
-      </section>`;
-    overview.querySelector("[data-course-continue]")?.addEventListener("click", () => {
-      openCourse(next.course.id, next.lessonIndex);
-    });
+      <span><strong>${completedLessons}</strong> de ${totalLessons} aulas</span>
+      <div><i style="width:${percent}%"></i></div>
+      <b>${percent}%</b>`;
   }
 
-  const catalog = byId("courseGrid");
-  catalog.innerHTML = items.map(({ course, courseIndex }) => {
+  const grid = byId("courseGrid");
+  grid.innerHTML = items.map(({course, courseIndex}) => {
     const completed = completedCourseLessons(course.id);
     const unlocked = isCourseUnlocked(courseIndex);
-    const complete = isCourseComplete(course);
     const progress = Math.round((Math.min(completed.length, course.lessons.length) / course.lessons.length) * 100);
-
-    const lessonRows = course.lessons.map((lesson, lessonIndex) => {
-      const done = isCourseLessonComplete(course.id, lessonIndex);
-      const previousDone = lessonIndex === 0 || isCourseLessonComplete(course.id, lessonIndex - 1);
-      const lessonUnlocked = unlocked && previousDone;
-      const status = done ? "Concluída" : lessonUnlocked ? "Disponível" : "Bloqueada";
-
-      return `
-        <button
-          type="button"
-          class="curriculum-lesson ${done ? "done" : ""} ${lessonUnlocked ? "" : "locked"}"
-          data-course="${course.id}"
-          data-lesson="${lessonIndex}"
-          ${lessonUnlocked ? "" : "disabled"}
-        >
-          <span class="curriculum-lesson-number">${String(lessonIndex + 1).padStart(2,"0")}</span>
-          <span class="curriculum-lesson-copy">
-            <strong>${lesson}</strong>
-            <small>${status}</small>
-          </span>
-          <span class="curriculum-lesson-action">${done ? "✓" : lessonUnlocked ? "→" : "—"}</span>
-        </button>`;
-    }).join("");
+    const complete = isCourseComplete(course);
 
     return `
-      <article class="curriculum-unit ${unlocked ? "" : "locked"} ${complete ? "complete" : ""}">
-        <div class="curriculum-unit-side">
-          <span>NÍVEL ${course.level}</span>
-          <strong>${String(courseIndex + 1).padStart(2,"0")}</strong>
-        </div>
-        <div class="curriculum-unit-body">
-          <div class="curriculum-unit-head">
-            <div>
-              <p>UNIDADE ${courseIndex + 1}</p>
-              <h2>${course.title}</h2>
-              <span>${course.desc}</span>
-            </div>
-            <div class="curriculum-unit-meta">
-              <strong>${progress}%</strong>
-              <span>${completed.length}/${course.lessons.length} aulas</span>
-            </div>
-          </div>
-          <div class="curriculum-unit-progress"><span style="width:${progress}%"></span></div>
-          <div class="curriculum-lessons">${lessonRows}</div>
-        </div>
-      </article>`;
+      <button type="button"
+        class="unit-card-simple ${complete ? "complete" : ""} ${unlocked ? "" : "locked"}"
+        data-open-unit="${course.id}"
+        ${unlocked ? "" : "disabled"}>
+        <span class="unit-number">${String(courseIndex + 1).padStart(2,"0")}</span>
+        <span class="unit-copy">
+          <small>${course.level} • ${course.lessons.length} aulas</small>
+          <strong>${course.title}</strong>
+          <em>${course.desc}</em>
+        </span>
+        <span class="unit-progress-mini">
+          <b>${progress}%</b>
+          <i><u style="width:${progress}%"></u></i>
+        </span>
+        <span class="unit-arrow">${unlocked ? "›" : "⌕"}</span>
+      </button>`;
   }).join("");
 
-  catalog.querySelectorAll("[data-course][data-lesson]:not([disabled])").forEach(button => {
-    button.addEventListener("click", () => openCourse(button.dataset.course, Number(button.dataset.lesson)));
+  grid.querySelectorAll("[data-open-unit]:not([disabled])").forEach(button => {
+    button.addEventListener("click", () => openUnit(button.dataset.openUnit));
   });
+}
+
+function openUnit(id) {
+  ensureCourseProgress();
+  const courseIndex = COURSE.findIndex(course => course.id === id);
+  const course = COURSE[courseIndex];
+  if (!course || !isCourseUnlocked(courseIndex)) return;
+
+  const completed = completedCourseLessons(course.id);
+  const progress = Math.round((Math.min(completed.length, course.lessons.length) / course.lessons.length) * 100);
+  const unitView = byId("courseUnitView");
+
+  const lessons = course.lessons.map((lesson, lessonIndex) => {
+    const done = isCourseLessonComplete(course.id, lessonIndex);
+    const previousDone = lessonIndex === 0 || isCourseLessonComplete(course.id, lessonIndex - 1);
+    const unlocked = previousDone;
+    return `
+      <button type="button"
+        class="unit-lesson-simple ${done ? "done" : ""} ${unlocked ? "" : "locked"}"
+        data-unit-lesson="${lessonIndex}"
+        ${unlocked ? "" : "disabled"}>
+        <span>${done ? "✓" : lessonIndex + 1}</span>
+        <strong>${lesson}</strong>
+        <small>${done ? "Concluída" : unlocked ? "Começar" : "Bloqueada"}</small>
+        <b>›</b>
+      </button>`;
+  }).join("");
+
+  unitView.innerHTML = `
+    <div class="unit-page">
+      <button type="button" class="unit-back" id="backToUnits">← Voltar</button>
+      <div class="unit-page-head">
+        <div>
+          <small>${course.level} • Unidade ${courseIndex + 1}</small>
+          <h1>${course.title}</h1>
+          <p>${course.desc}</p>
+        </div>
+        <div class="unit-page-progress"><strong>${progress}%</strong><span>${completed.length}/${course.lessons.length} aulas</span></div>
+      </div>
+      <div class="unit-page-bar"><span style="width:${progress}%"></span></div>
+      <div class="unit-lesson-list">${lessons}</div>
+    </div>`;
+
+  byId("courseListView").classList.add("hidden");
+  byId("lessonView").classList.add("hidden");
+  unitView.classList.remove("hidden");
+
+  byId("backToUnits").addEventListener("click", () => {
+    unitView.classList.add("hidden");
+    byId("courseListView").classList.remove("hidden");
+    renderCourse();
+  });
+
+  unitView.querySelectorAll("[data-unit-lesson]:not([disabled])").forEach(button => {
+    button.addEventListener("click", () => openCourse(course.id, Number(button.dataset.unitLesson)));
+  });
+
+  window.scrollTo({top:0, behavior:"smooth"});
 }
 
 function openCourse(id, lessonIndex = 0) {
@@ -1174,47 +1215,42 @@ function openCourse(id, lessonIndex = 0) {
 
   lessonIndex = Math.max(0, Math.min(course.lessons.length - 1, Number(lessonIndex) || 0));
   const previousDone = lessonIndex === 0 || isCourseLessonComplete(course.id, lessonIndex - 1);
-  if (!previousDone) {
-    toast("Conclua a aula anterior primeiro.", "info");
-    return;
-  }
+  if (!previousDone) return;
 
   const title = course.lessons[lessonIndex];
   const alreadyDone = isCourseLessonComplete(course.id, lessonIndex);
   const view = byId("lessonView");
+
+  byId("courseUnitView").classList.add("hidden");
   view.classList.remove("hidden");
   view.innerHTML = `
-    <article class="lesson-workspace">
-      <div class="lesson-workspace-head">
-        <div>
-          <span class="lesson-breadcrumb">${course.level} / Unidade ${courseIndex + 1} / Aula ${lessonIndex + 1}</span>
-          <h2>${title}</h2>
-          <p>${course.desc}</p>
-        </div>
-        <button type="button" class="lesson-close" id="closeCourseLesson" aria-label="Fechar aula">×</button>
+    <div class="lesson-simple">
+      <button type="button" class="unit-back" id="backToUnit">← Unidade</button>
+      <div class="lesson-simple-head">
+        <small>${course.level} • Aula ${lessonIndex + 1} de ${course.lessons.length}</small>
+        <h1>${title}</h1>
+        <p>${course.desc}</p>
       </div>
-
-      <div class="lesson-method">
-        <div><span>01</span><strong>Contexto</strong><p>Veja a língua sendo usada antes da regra.</p></div>
-        <div><span>02</span><strong>Entenda</strong><p>Explicação curta, direta e com exemplos.</p></div>
-        <div><span>03</span><strong>Produza</strong><p>Fale e escreva sem depender de alternativas.</p></div>
-        <div><span>04</span><strong>Use</strong><p>Feche com uma situação real e revisão.</p></div>
+      <div class="lesson-simple-body">
+        <p>O conteúdo completo desta aula entra na Parte 2. Nesta base, o fluxo e a progressão já estão prontos.</p>
       </div>
-
-      <div class="lesson-workspace-footer">
-        <button type="button" class="ghost" id="courseLessonListen">Ouvir título</button>
-        <button type="button" id="completeCourse">${alreadyDone ? "Revisar próxima etapa" : "Marcar aula como concluída"}</button>
+      <div class="lesson-simple-actions">
+        <button type="button" id="courseLessonListen" class="ghost">Ouvir</button>
+        <button type="button" id="completeCourse">${alreadyDone ? "Continuar" : "Concluir aula"}</button>
       </div>
-    </article>`;
+    </div>`;
 
-  byId("closeCourseLesson").addEventListener("click", () => view.classList.add("hidden"));
+  byId("backToUnit").addEventListener("click", () => {
+    view.classList.add("hidden");
+    openUnit(course.id);
+  });
   byId("courseLessonListen").addEventListener("click", () => speak(title));
 
   byId("completeCourse").addEventListener("click", () => {
     const completed = completedCourseLessons(course.id);
     if (!completed.includes(lessonIndex)) {
       completed.push(lessonIndex);
-      completed.sort((a,b) => a - b);
+      completed.sort((a,b) => a-b);
       state.progress.courseLessons[course.id] = completed;
       state.progress.lessons = (state.progress.lessons || 0) + 1;
       addXP(25, "aula concluída");
@@ -1224,23 +1260,24 @@ function openCourse(id, lessonIndex = 0) {
 
     renderStats();
     renderCourse();
+    renderHome();
 
     if (lessonIndex + 1 < course.lessons.length) {
       openCourse(course.id, lessonIndex + 1);
       return;
     }
 
+    view.classList.add("hidden");
     const nextCourse = COURSE[courseIndex + 1];
     if (nextCourse && isCourseUnlocked(courseIndex + 1)) {
-      view.classList.add("hidden");
+      openUnit(nextCourse.id);
       toast("Próxima unidade liberada.");
-      return;
+    } else {
+      openUnit(course.id);
     }
-
-    view.classList.add("hidden");
   });
 
-  view.scrollIntoView({ behavior:"smooth", block:"center" });
+  window.scrollTo({top:0, behavior:"smooth"});
 }
 
 function newAudioQuestion() { state.audioItem=sample(WORDS); byId("audioRu").textContent="🔊"; byId("audioPron").textContent="Ouça antes de responder"; const options=shuffle([state.audioItem,...shuffle(WORDS.filter(w=>w!==state.audioItem)).slice(0,3)]);byId("audioOptions").innerHTML=options.map(w=>`<button data-audio-answer="${w.pt}">${w.pt}</button>`).join("");$$('[data-audio-answer]').forEach(b=>b.addEventListener("click",()=>{const ok=b.dataset.audioAnswer===state.audioItem.pt;showFeedback("audioFeedback",ok?`Correto: ${state.audioItem.ru} — ${state.audioItem.pt}`:"Tente ouvir novamente.",ok?"ok":"bad");if(ok)addXP(7,"escuta");})); setTimeout(()=>speak(state.audioItem.ru),200); }
