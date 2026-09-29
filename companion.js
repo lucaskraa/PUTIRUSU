@@ -16,6 +16,13 @@
     restartTimer: null,
     ttsWatch: null,
     idleTimer: null,
+    realtimePc: null,
+    realtimeDc: null,
+    realtimeStream: null,
+    realtimeAudio: null,
+    realtimeConnected: false,
+    realtimeConnecting: false,
+    realtimeReply: "",
     initialized: false
   };
 
@@ -131,7 +138,11 @@
       else enableAmbientListening(true);
     });
     document.getElementById("putiCompanionRepeat").addEventListener("click", function () {
-      if (companion.lastAnswer) speakCompanion(companion.lastAnswer);
+      if (companion.realtimeConnected) {
+        sendRealtimeText("Repita sua última fala, com o mesmo sentido, de forma natural e breve.");
+      } else if (companion.lastAnswer) {
+        speakCompanion(companion.lastAnswer);
+      }
     });
     document.getElementById("putiOnboardingVoice").addEventListener("click", function () {
       completeOnboarding(true);
@@ -202,6 +213,278 @@
     try {
       await request("/ai/event", { method:"POST", body:JSON.stringify({ type, details:details || {} }) });
     } catch (_) {}
+  }
+
+  function closeRealtime() {
+    companion.realtimeConnected = false;
+    companion.realtimeConnecting = false;
+
+    if (companion.realtimeDc) {
+      try { companion.realtimeDc.close(); } catch (_) {}
+      companion.realtimeDc = null;
+    }
+    if (companion.realtimePc) {
+      try { companion.realtimePc.close(); } catch (_) {}
+      companion.realtimePc = null;
+    }
+    if (companion.realtimeStream) {
+      companion.realtimeStream.getTracks().forEach(track => track.stop());
+      companion.realtimeStream = null;
+    }
+    if (companion.realtimeAudio) {
+      try { companion.realtimeAudio.pause(); } catch (_) {}
+      companion.realtimeAudio.srcObject = null;
+      companion.realtimeAudio.remove();
+      companion.realtimeAudio = null;
+    }
+  }
+
+  function logRealtime(role, text) {
+    if (!text || !state.token || state.token === "local-demo") return;
+    request("/ai/realtime/log", {
+      method:"POST",
+      body:JSON.stringify({ role, text:String(text).slice(0,1600) })
+    }).catch(()=>{});
+  }
+
+  function sendRealtimeEvent(event) {
+    const dc = companion.realtimeDc;
+    if (!dc || dc.readyState !== "open") return false;
+    try {
+      dc.send(JSON.stringify(event));
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  function pushRealtimeContext() {
+    if (!companion.realtimeConnected) return;
+    const context = currentContext();
+    sendRealtimeEvent({
+      type:"conversation.item.create",
+      item:{
+        type:"message",
+        role:"user",
+        content:[{
+          type:"input_text",
+          text:"[APP_CONTEXT] " + JSON.stringify(context)
+        }]
+      }
+    });
+  }
+
+  function sendRealtimeText(text) {
+    if (!companion.realtimeConnected || !text) return false;
+    sendRealtimeEvent({
+      type:"conversation.item.create",
+      item:{
+        type:"message",
+        role:"user",
+        content:[{ type:"input_text", text:String(text).slice(0,1200) }]
+      }
+    });
+    sendRealtimeEvent({ type:"response.create" });
+    return true;
+  }
+
+  function handleRealtimeEvent(event) {
+    if (!event || !event.type) return;
+
+    if (event.type === "session.created" || event.type === "session.updated") {
+      companion.realtimeConnected = true;
+      companion.realtimeConnecting = false;
+      setStatus("listening","ouvindo");
+      setMood("curious");
+      pushRealtimeContext();
+      return;
+    }
+
+    if (event.type === "input_audio_buffer.speech_started") {
+      setStatus("listening","te ouvindo");
+      setMood("curious");
+      return;
+    }
+
+    if (event.type === "input_audio_buffer.speech_stopped") {
+      setStatus("thinking","pensando");
+      setMood("focused");
+      return;
+    }
+
+    if (event.type === "conversation.item.input_audio_transcription.completed") {
+      const heard = String(event.transcript || "").trim();
+      if (heard) {
+        companion.lastHeard = heard;
+        const heardBox = document.getElementById("putiHeard");
+        if (heardBox) {
+          heardBox.textContent = "você: " + heard;
+          heardBox.classList.remove("hidden");
+        }
+        logRealtime("user",heard);
+      }
+      return;
+    }
+
+    if (event.type === "response.created") {
+      companion.realtimeReply = "";
+      setStatus("speaking","respondendo");
+      return;
+    }
+
+    if (event.type === "response.output_audio_transcript.delta") {
+      companion.realtimeReply += String(event.delta || "");
+      const text = companion.realtimeReply.trim();
+      if (text) {
+        companion.lastAnswer = text;
+        showBubble(text,true,companion.lastHeard);
+        setStatus("speaking","falando");
+      }
+      return;
+    }
+
+    if (event.type === "response.output_audio_transcript.done") {
+      const text = String(event.transcript || companion.realtimeReply || "").trim();
+      if (text) {
+        companion.lastAnswer = text;
+        companion.realtimeReply = text;
+        showBubble(text,true,companion.lastHeard);
+        logRealtime("assistant",text);
+      }
+      return;
+    }
+
+    if (event.type === "response.done") {
+      companion.speaking = false;
+      companion.thinking = false;
+      setStatus("listening","ouvindo");
+      setMood(inferMood(companion.lastAnswer));
+      return;
+    }
+
+    if (event.type === "error") {
+      console.warn("PUTIRUSU Realtime:", event.error || event);
+    }
+  }
+
+  function waitForIceComplete(pc) {
+    if (pc.iceGatheringState === "complete") return Promise.resolve();
+    return new Promise((resolve,reject)=>{
+      const timeout=setTimeout(()=>{
+        pc.removeEventListener("icegatheringstatechange",onState);
+        reject(new Error("ICE timeout"));
+      },8000);
+      function onState() {
+        if (pc.iceGatheringState !== "complete") return;
+        clearTimeout(timeout);
+        pc.removeEventListener("icegatheringstatechange",onState);
+        resolve();
+      }
+      pc.addEventListener("icegatheringstatechange",onState);
+    });
+  }
+
+  async function connectRealtime() {
+    if (companion.realtimeConnected) return true;
+    if (companion.realtimeConnecting) return false;
+    if (!window.RTCPeerConnection || !navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) return false;
+
+    companion.realtimeConnecting = true;
+    setStatus("thinking","acordando a voz");
+    closeRealtime();
+    companion.realtimeConnecting = true;
+
+    try {
+      const pc = new RTCPeerConnection();
+      companion.realtimePc = pc;
+
+      const audio = document.createElement("audio");
+      audio.autoplay = true;
+      audio.playsInline = true;
+      audio.style.display = "none";
+      document.body.appendChild(audio);
+      companion.realtimeAudio = audio;
+
+      pc.addEventListener("track",event=>{
+        const stream = event.streams && event.streams[0]
+          ? event.streams[0]
+          : new MediaStream([event.track]);
+        audio.srcObject = stream;
+        audio.play().catch(()=>{});
+      });
+
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio:{
+          echoCancellation:true,
+          noiseSuppression:true,
+          autoGainControl:true
+        }
+      });
+      companion.realtimeStream = stream;
+      stream.getAudioTracks().forEach(track=>pc.addTrack(track,stream));
+
+      const dc = pc.createDataChannel("oai-events");
+      companion.realtimeDc = dc;
+
+      dc.addEventListener("open",()=>{
+        companion.realtimeConnected = true;
+        companion.realtimeConnecting = false;
+        setStatus("listening","ouvindo");
+        pushRealtimeContext();
+      });
+      dc.addEventListener("message",e=>{
+        try { handleRealtimeEvent(JSON.parse(e.data)); } catch (_) {}
+      });
+      dc.addEventListener("close",()=>{
+        companion.realtimeConnected = false;
+        if (companion.wantsListening) {
+          setStatus("idle","reconectando");
+          setTimeout(()=>connectRealtime().catch(()=>{}),900);
+        }
+      });
+
+      pc.addEventListener("connectionstatechange",()=>{
+        if (pc.connectionState === "connected") {
+          companion.realtimeConnected = true;
+          companion.realtimeConnecting = false;
+          setStatus("listening","ouvindo");
+        }
+        if (["failed","disconnected","closed"].includes(pc.connectionState)) {
+          companion.realtimeConnected = false;
+        }
+      });
+
+      const offer = await pc.createOffer();
+      await pc.setLocalDescription(offer);
+      await waitForIceComplete(pc);
+
+      const endpoint = state.token && state.token !== "local-demo"
+        ? "/api/ai/realtime/session"
+        : "/api/ai/realtime/guest-session";
+
+      const headers = { "Content-Type":"application/sdp" };
+      if (state.token && state.token !== "local-demo") headers.Authorization = "Bearer " + state.token;
+
+      const response = await fetch(endpoint,{
+        method:"POST",
+        headers,
+        body:pc.localDescription.sdp
+      });
+
+      const answerSdp = await response.text();
+      if (!response.ok) throw new Error(answerSdp || "Realtime indisponível");
+
+      await pc.setRemoteDescription({ type:"answer", sdp:answerSdp });
+      companion.realtimeConnected = true;
+      companion.realtimeConnecting = false;
+      setStatus("listening","ouvindo");
+      return true;
+    } catch (error) {
+      console.warn("PUTIRUSU voz neural indisponível:",error.message);
+      closeRealtime();
+      companion.realtimeConnecting = false;
+      return false;
+    }
   }
 
   function recognitionLanguage() {
@@ -322,17 +605,26 @@
     companion.profile.ambientListening = true;
     companion.profile.voiceEnabled = true;
     await savePrivacy({ ambientListening:true, voiceEnabled:true });
-    setStatus("listening", "ligando o ouvido");
+    setStatus("thinking","conectando");
+
+    const neural = await connectRealtime();
+    if (neural) {
+      showBubble("Tô ouvindo.",true);
+      return;
+    }
+
+    setStatus("listening","ouvindo");
     startRecognitionLoop(Boolean(fromUserGesture));
   }
 
   async function disableAmbientListening() {
     stopRecognition(false);
+    closeRealtime();
     if (!companion.profile) companion.profile = {};
     companion.profile.ambientListening = false;
     await savePrivacy({ ambientListening:false });
-    setStatus("idle", "observando");
-    showBubble("Tá. Fico só olhando a aula por enquanto.", true);
+    setStatus("idle","observando");
+    showBubble("Beleza. Sem microfone.",true);
   }
 
   function voiceFor(lang) {
@@ -576,7 +868,8 @@
 
     if (withVoice) {
       companion.wantsListening = true;
-      speakCompanion(intro);
+      const neural = await connectRealtime();
+      if (!neural) speakCompanion(intro);
     }
   }
 
@@ -655,6 +948,7 @@
       const result = oldShowScreen.apply(this, arguments);
       track("screen_view", { screen:name });
       if (name === "profile") setTimeout(renderPrivacyPanel, 30);
+      setTimeout(pushRealtimeContext,40);
       return result;
     };
 
@@ -664,6 +958,7 @@
       const session = state.lessonSession;
       if (session) {
         companion.recentMistakes = 0;
+        setTimeout(pushRealtimeContext,40);
         track("lesson_open", {
           courseId:session.course.id,
           level:session.course.level,
@@ -680,6 +975,7 @@
       const result = oldRenderLesson.apply(this, arguments);
       const session = state.lessonSession;
       if (session && session.steps && session.steps[session.stepIndex]) {
+        setTimeout(pushRealtimeContext,30);
         const step = session.steps[session.stepIndex];
         track("lesson_step", {
           courseId:session.course.id,
@@ -868,7 +1164,9 @@
       }, 550);
     } else if (companion.profile.ambientListening) {
       companion.wantsListening = true;
-      setTimeout(function () { startRecognitionLoop(false); }, 700);
+      setTimeout(function () {
+        connectRealtime().then(ok=>{ if (!ok) startRecognitionLoop(false); });
+      },700);
     } else {
       setStatus("idle", "observando");
     }
