@@ -33,8 +33,10 @@
     realtimeConnecting: false,
     realtimeReply: "",
     realtimeCleanRetry: false,
+    aiAvailable: null,
     realtimeAvailable: null,
     realtimeFailures: 0,
+    neuralFallbackAudio: null,
     history: [],
     initialized: false
   };
@@ -154,7 +156,7 @@
       '</button>' +
       '<div id="putiCompanionBubble" class="puti-companion-bubble hidden">' +
         '<div class="puti-companion-head">' +
-          '<div class="puti-identity"><strong>PUTIRUSU</strong><span id="putiCompanionStatus">observando</span></div>' +
+          '<div class="puti-identity"><strong>PP</strong><span id="putiCompanionStatus">observando</span></div>' +
           '<div class="puti-wave" id="putiWave" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></div>' +
           '<button id="putiCompanionClose" type="button" aria-label="Fechar">×</button>' +
         '</div>' +
@@ -175,7 +177,7 @@
       '<div class="puti-onboarding-card">' +
         '<div class="puti-onboarding-mark"><span>П</span><i></i><i></i></div>' +
         '<span class="puti-onboarding-kicker">EU JÁ ESTOU AQUI</span>' +
-        '<h1>Você não precisa abrir uma IA. Eu vivo no PUTIRUSU.</h1>' +
+        '<h1>Você não precisa abrir outra IA. Eu vivo aqui no curso.</h1>' +
         '<p>Eu acompanho o que aparece na tela, noto seus erros e consigo conversar enquanto você estuda. Se você falar comigo, eu uso o que está acontecendo agora para entender a referência.</p>' +
         '<div class="puti-onboarding-points">' +
           '<div><b>Eu observo</b><span>Aula, exercício, letra, acertos, erros e progresso.</span></div>' +
@@ -283,12 +285,29 @@
     try {
       const response = await companionFetch("/ai/health",{ method:"GET" });
       const data = await response.json();
+      companion.aiAvailable = Boolean(data && (data.aiConfigured || data.geminiConfigured || data.openaiConfigured));
       companion.realtimeAvailable = Boolean(data && data.liveConfigured && data.liveProvider === "gemini");
       return data || {};
     } catch (_) {
+      companion.aiAvailable = false;
       companion.realtimeAvailable = false;
       return {};
     }
+  }
+
+  function reportLiveIssue(stage, error, extra) {
+    const payload = {
+      stage:String(stage || "unknown").slice(0,80),
+      message:String(error && error.message || error || "").slice(0,500),
+      extra:extra || {},
+      ua:String(navigator.userAgent || "").slice(0,240),
+      at:new Date().toISOString()
+    };
+    companionFetch("/ai/live/client-log",{
+      method:"POST",
+      headers:{ "Content-Type":"application/json" },
+      body:JSON.stringify(payload)
+    }).catch(()=>{});
   }
 
   function setRealtimeMicEnabled(enabled) {
@@ -762,8 +781,11 @@
           } catch (_) {}
         };
 
-        ws.onerror = () => {
+        ws.onerror = event => {
           clearTimeout(timeout);
+          reportLiveIssue("websocket_error","Falha no WebSocket Gemini Live.",{
+            readyState:ws.readyState
+          });
           reject(new Error("Falha no WebSocket Gemini Live."));
         };
 
@@ -778,7 +800,11 @@
             setStatus("listening","ouvindo");
             if (!companion.recognition) startRecognitionLoop(false);
           }
-          if (event && event.reason) console.warn("PUTIRUSU Gemini Live fechou:",event.reason);
+          reportLiveIssue("websocket_close",event && event.reason || "socket fechado",{
+            code:event && event.code,
+            wasClean:Boolean(event && event.wasClean)
+          });
+          if (event && event.reason) console.warn("PP Gemini Live fechou:",event.reason);
         };
       });
 
@@ -801,7 +827,8 @@
       pushRealtimeContext();
       return true;
     } catch (error) {
-      console.warn("PUTIRUSU Gemini Live indisponível:",error.message);
+      console.warn("PP Gemini Live indisponível:",error.message);
+      reportLiveIssue("connect_realtime_catch",error,{ failures:companion.realtimeFailures });
       closeRealtime();
       companion.realtimeConnecting = false;
       companion.realtimeFailures += 1;
@@ -954,6 +981,73 @@
     showBubble("Beleza. Sem microfone.",true);
   }
 
+  function stopNeuralFallbackAudio() {
+    if (!companion.neuralFallbackAudio) return;
+    try {
+      companion.neuralFallbackAudio.pause();
+      if (companion.neuralFallbackAudio.src) URL.revokeObjectURL(companion.neuralFallbackAudio.src);
+    } catch (_) {}
+    companion.neuralFallbackAudio = null;
+  }
+
+  async function speakNeuralFallback(text) {
+    if (!text || companion.realtimeConnected) return false;
+    const authenticated = Boolean(state.token && state.token !== "local-demo");
+    const body = JSON.stringify({ text:String(text).slice(0,1400) });
+
+    async function requestAudio() {
+      if (authenticated) {
+        try {
+          return await companionFetch("/ai/tts",{
+            method:"POST",
+            headers:{ "Content-Type":"application/json" },
+            body
+          });
+        } catch (_) {}
+      }
+      return companionFetch("/ai/guest/tts",{
+        method:"POST",
+        headers:{ "Content-Type":"application/json" },
+        body
+      });
+    }
+
+    try {
+      const response = await requestAudio();
+      const blob = await response.blob();
+      if (!blob || !blob.size) return false;
+
+      stopNeuralFallbackAudio();
+      if (window.speechSynthesis) speechSynthesis.cancel();
+      stopRecognition(true);
+
+      const url = URL.createObjectURL(blob);
+      const audio = new Audio(url);
+      companion.neuralFallbackAudio = audio;
+      companion.speaking = true;
+      setStatus("speaking","falando");
+
+      await new Promise((resolve,reject)=>{
+        audio.onended = resolve;
+        audio.onerror = () => reject(new Error("Falha ao tocar voz neural."));
+        const play = audio.play();
+        if (play && typeof play.catch === "function") play.catch(reject);
+      });
+
+      if (companion.neuralFallbackAudio === audio) companion.neuralFallbackAudio = null;
+      try { URL.revokeObjectURL(url); } catch (_) {}
+      companion.speaking = false;
+      setStatus("idle",companion.wantsListening ? "ouvindo" : "observando");
+      if (companion.wantsListening) scheduleRecognitionRestart(220);
+      return true;
+    } catch (error) {
+      reportLiveIssue("neural_tts_fallback",error);
+      stopNeuralFallbackAudio();
+      companion.speaking = false;
+      return false;
+    }
+  }
+
   function voiceFor(lang) {
     if (!window.speechSynthesis) return null;
     const voices = speechSynthesis.getVoices();
@@ -986,10 +1080,16 @@
     });
   }
 
-  function speakCompanion(text) {
-    if (!text || !window.speechSynthesis) return;
+  async function speakCompanion(text) {
+    if (!text) return;
     if (companion.profile && companion.profile.voiceEnabled === false) return;
 
+    if (!companion.realtimeConnected && companion.aiAvailable !== false) {
+      const neural = await speakNeuralFallback(text);
+      if (neural) return;
+    }
+
+    if (!window.speechSynthesis) return;
     stopRecognition(true);
     speechSynthesis.cancel();
     companion.speaking = true;
@@ -1002,7 +1102,7 @@
       if (index >= segments.length) {
         companion.speaking = false;
         setStatus("idle", companion.wantsListening ? "ouvindo" : "observando");
-        if (companion.wantsListening) scheduleRecognitionRestart(420);
+        if (companion.wantsListening) scheduleRecognitionRestart(300);
         return;
       }
 
@@ -1010,14 +1110,8 @@
       const utter = new SpeechSynthesisUtterance(item.text);
       utter.lang = item.lang;
       utter.volume = 1;
-
-      if (item.lang === "ru-RU") {
-        utter.rate = 1.0;
-        utter.pitch = 0.98;
-      } else {
-        utter.rate = 1.14;
-        utter.pitch = 1.12;
-      }
+      utter.rate = item.lang === "ru-RU" ? 1.03 : 1.16;
+      utter.pitch = item.lang === "ru-RU" ? 1.0 : 1.06;
 
       const selected = voiceFor(item.lang);
       if (selected) utter.voice = selected;
@@ -1060,7 +1154,7 @@
       ];
       return lines[Math.floor(Math.random() * lines.length)];
     }
-    if (m.includes("quem é você") || m.includes("quem e voce")) return "Eu sou o PUTIRUSU. Eu moro aqui dentro. Observo seu estudo, lembro do que importa e, aparentemente, também tenho que explicar minha própria existência.";
+    if (m.includes("quem é você") || m.includes("quem e voce")) return "Eu sou o PP. Eu moro aqui dentro. Observo seu estudo, lembro do que importa e, aparentemente, também tenho que explicar minha própria existência.";
     if (m.includes("repete") || m.includes("repita") || m.includes("de novo")) return focus ? "De novo: " + focus : (companion.lastAnswer || "Você precisa me dar algo para repetir.");
     if (m.includes("devagar")) return focus ? "Certo. Bem devagar: " + focus : "Certo. Desacelerando.";
     if (m.includes("não entendi") || m.includes("nao entendi")) return focus ? "Eu vi. O ponto atual é “" + focus + "”. Vou separar isso em uma parte menor." : "Tá. Eu perdi a referência exata, mas não a conversa. Fala qual parte te travou.";
@@ -1074,7 +1168,7 @@
 
     return focus
       ? "Peguei. Eu ainda estou vendo “" + focus + "”."
-      : "Te ouvi. Minha conversa completa falhou por um instante; tenta mais uma vez.";
+      : "Te ouvi. A voz ao vivo tropeçou, mas eu continuo pensando normal. Fala comigo.";
   }
 
   function cleanCompanionSpeech(text) {
@@ -1099,7 +1193,7 @@
   }
 
   async function callBrain(message) {
-    if (companion.realtimeAvailable === false) {
+    if (companion.aiAvailable === false) {
       return { answer:localBrain(message), provider:"local" };
     }
 
@@ -1235,7 +1329,7 @@
     companion.profile.ambientListening = Boolean(withVoice);
 
     const name = state.user && state.user.name ? state.user.name.split(" ")[0] : "";
-    const intro = (name ? name + ". " : "") + "Eu sou o PUTIRUSU. Eu fico por aqui, observo o que você está fazendo e aprendo o seu jeito de estudar. Pode falar comigo normal.";
+    const intro = (name ? name + ". " : "") + "Eu sou o PP. Eu fico por aqui, observo o que você está fazendo e aprendo o seu jeito de estudar. Pode falar comigo normal.";
 
     companion.lastAnswer = intro;
     showBubble(intro, true);
@@ -1590,10 +1684,12 @@
     if (app && !app.classList.contains("hidden")) setTimeout(init, 60);
   });
 
-  window.PUTIRUSU_COMPANION = {
+  const ppApi = {
     ask:message => respondTo(message, { heard:message }),
     listen:() => enableAmbientListening(true),
     silence:disableAmbientListening,
     context:currentContext
   };
+  window.PUTIRUSU_COMPANION = ppApi;
+  window.PP_COMPANION = ppApi;
 })();
