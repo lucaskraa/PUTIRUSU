@@ -897,4 +897,193 @@ module.exports = function installCompanion(deps) {
     writeDatabase(db);
     res.json({ answer, provider });
   });
+
+  function attachWebSocketServer(server) {
+    const { WebSocketServer, WebSocket } = require("ws");
+    const wss = new WebSocketServer({ noServer:true, perMessageDeflate:false });
+    const activeByIp = new Map();
+
+    function originAllowed(origin) {
+      if (!origin) return true;
+      try {
+        const url = new URL(origin);
+        if (url.hostname === "lucaskraa.github.io") return true;
+        if (url.hostname === "putirusu-dev.onrender.com") return true;
+        if (url.hostname === "localhost" || url.hostname === "127.0.0.1") return true;
+      } catch (_) {}
+      return false;
+    }
+
+    server.on("upgrade", (req, socket, head) => {
+      let url;
+      try { url = new URL(req.url || "/", "http://localhost"); }
+      catch (_) { socket.destroy(); return; }
+
+      if (url.pathname !== "/api/ai/live/socket") return;
+      if (!originAllowed(req.headers.origin || "")) {
+        socket.write("HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n");
+        socket.destroy();
+        return;
+      }
+
+      const ip = String(req.headers["x-forwarded-for"] || req.socket.remoteAddress || "unknown").split(",")[0].trim();
+      const active = activeByIp.get(ip) || 0;
+      if (active >= 3) {
+        socket.write("HTTP/1.1 429 Too Many Requests\r\nConnection: close\r\n\r\n");
+        socket.destroy();
+        return;
+      }
+
+      wss.handleUpgrade(req, socket, head, ws => {
+        ws._ppIp = ip;
+        activeByIp.set(ip, active + 1);
+        wss.emit("connection", ws, req);
+      });
+    });
+
+    wss.on("connection", client => {
+      const apiKey = process.env.GEMINI_API_KEY;
+      if (!apiKey) {
+        client.close(1013, "PP neural voice unavailable");
+        return;
+      }
+
+      const model = process.env.GEMINI_LIVE_MODEL || "gemini-3.8-live";
+      const upstreamUrl =
+        "wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent" +
+        "?key=" + encodeURIComponent(apiKey);
+
+      const upstream = new WebSocket(upstreamUrl, {
+        perMessageDeflate:false,
+        handshakeTimeout:10000
+      });
+
+      let upstreamReady = false;
+      let closed = false;
+      const pending = [];
+      const maxPending = 80;
+
+      function safeClientJson(payload) {
+        if (client.readyState !== WebSocket.OPEN) return;
+        try { client.send(JSON.stringify(payload)); } catch (_) {}
+      }
+
+      function closeBoth(code, reason) {
+        if (closed) return;
+        closed = true;
+        try {
+          if (client.readyState === WebSocket.OPEN || client.readyState === WebSocket.CONNECTING) {
+            client.close(code || 1011, String(reason || "PP Live disconnected").slice(0,120));
+          }
+        } catch (_) {}
+        try {
+          if (upstream.readyState === WebSocket.OPEN || upstream.readyState === WebSocket.CONNECTING) {
+            upstream.close();
+          }
+        } catch (_) {}
+      }
+
+      upstream.on("open", () => {
+        const setup = {
+          setup:{
+            model:"models/" + model,
+            generationConfig:{
+              responseModalities:["AUDIO"],
+              temperature:0.82
+            },
+            systemInstruction:{
+              parts:[{
+                text:realtimeInstructions(
+                  { name:"aluno", level:"A1" },
+                  { recentActivity:[], repeatedDifficulties:[], weakWritingLetters:[] },
+                  []
+                )
+              }]
+            },
+            realtimeInputConfig:{
+              automaticActivityDetection:{
+                disabled:false,
+                startOfSpeechSensitivity:"START_SENSITIVITY_HIGH",
+                endOfSpeechSensitivity:"END_SENSITIVITY_HIGH",
+                prefixPaddingMs:80,
+                silenceDurationMs:380
+              },
+              activityHandling:"START_OF_ACTIVITY_INTERRUPTS",
+              turnCoverage:"TURN_INCLUDES_ONLY_ACTIVITY"
+            },
+            inputAudioTranscription:{
+              languageCodes:["pt-BR","ru-RU"]
+            },
+            outputAudioTranscription:{},
+            sessionResumption:{}
+          }
+        };
+
+        upstream.send(JSON.stringify(setup), { binary:false });
+        upstreamReady = true;
+
+        while (pending.length && upstream.readyState === WebSocket.OPEN) {
+          const item = pending.shift();
+          upstream.send(item.data, { binary:item.isBinary });
+        }
+      });
+
+      upstream.on("message", (data, isBinary) => {
+        if (client.readyState !== WebSocket.OPEN) return;
+        try { client.send(data, { binary:isBinary }); }
+        catch (_) { closeBoth(1011,"client send failed"); }
+      });
+
+      upstream.on("error", error => {
+        console.error("PP Live upstream error:", error && error.message || error);
+        safeClientJson({
+          error:{
+            code:"UPSTREAM_ERROR",
+            message:"A voz neural perdeu a conexão."
+          }
+        });
+      });
+
+      upstream.on("close", (code, reason) => {
+        const why = Buffer.isBuffer(reason) ? reason.toString("utf8") : String(reason || "");
+        console.warn("PP Live upstream closed:", code, why.slice(0,240));
+        closeBoth(1011, why || "Gemini Live closed");
+      });
+
+      client.on("message", (data, isBinary) => {
+        if (!isBinary) {
+          try {
+            const parsed = JSON.parse(data.toString("utf8"));
+            // The server owns the Gemini setup so old/stale clients cannot send a second setup.
+            if (parsed && parsed.setup) return;
+          } catch (_) {}
+        }
+
+        if (upstreamReady && upstream.readyState === WebSocket.OPEN) {
+          try { upstream.send(data, { binary:isBinary }); }
+          catch (_) { closeBoth(1011,"upstream send failed"); }
+          return;
+        }
+
+        if (pending.length < maxPending) pending.push({ data, isBinary });
+      });
+
+      client.on("error", () => closeBoth(1011,"client socket error"));
+      client.on("close", () => {
+        closeBoth(1000,"client closed");
+        const ip = client._ppIp;
+        if (ip) {
+          const count = Math.max(0,(activeByIp.get(ip) || 1) - 1);
+          if (count) activeByIp.set(ip,count);
+          else activeByIp.delete(ip);
+        }
+      });
+    });
+
+    console.log("PP Live WebSocket proxy attached.");
+    return wss;
+  }
+
+  return { attachWebSocketServer };
+
 };
