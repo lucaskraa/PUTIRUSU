@@ -1458,15 +1458,19 @@
     let value = String(answer || "").trim();
     if (!value) return value;
 
-    value = value
-      .replace(/\b(câmbio|central|alto e claro|sinal de radar|código secreto|meus circuitos|milagre tecnológico)\b[^.!?]*[.!?]?/gi,"")
-      .replace(/\s{2,}/g," ")
-      .trim();
+    const theatrical = /\b(câmbio|central|alto e claro|radar|código secreto|codigo secreto|meus circuitos|circuitos|milagre tecnológico|milagre tecnologico)\b/i;
+    if (theatrical.test(value)) {
+      return instantConversationalReply(message) || localBrain(message);
+    }
+
+    value = value.replace(/\s{2,}/g," ").trim();
 
     if (casualMessage(message) && value.length > 72) {
+      const instant = instantConversationalReply(message);
+      if (instant) return instant;
       const first = value.split(/(?<=[.!?])\s+/)[0].trim();
-      if (first && first.length <= 72) value = first;
-      else value = localBrain(message);
+      if (first && first.length <= 72) return first;
+      return localBrain(message);
     }
     return value || localBrain(message);
   }
