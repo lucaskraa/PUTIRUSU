@@ -446,8 +446,8 @@
 
     const opts = options || {};
     const margin = 14;
-    const avatarW = 92;
-    const avatarH = 146;
+    const avatarW = 72;
+    const avatarH = 110;
     const desiredLeft = rect.right + avatarW + 24 < innerWidth
       ? rect.right + 16
       : Math.max(margin, rect.left - avatarW - 18);
@@ -469,7 +469,7 @@
         target.classList.add("pipo-focus-target");
         const rootRect = root.getBoundingClientRect();
         const fromX = rootRect.left + rootRect.width * .5;
-        const fromY = rootRect.top + 84;
+        const fromY = rootRect.top + 64;
         const toX = desiredLeft > rect.right ? rect.right : rect.left;
         const toY = Math.min(rect.bottom - 12, Math.max(rect.top + 12, fromY));
         const dx = toX - fromX;
@@ -912,6 +912,15 @@
       }
     }
 
+    if (event.type === "response.output_audio.delta") {
+      companion.speaking = true;
+      companion.thinking = false;
+      setStatus("speaking","falando");
+    }
+    if (event.type === "response.output_audio.done") {
+      companion.speaking = false;
+    }
+
     if ((event.type === "response.output_audio_transcript.delta" || event.type === "response.audio_transcript.delta") && event.delta) {
       if (!companion.realtimeFirstResponseAt) {
         companion.realtimeFirstResponseAt = performance.now();
@@ -1122,13 +1131,16 @@
       if (value.length < 2) return;
       clearInterimCommit();
       lastInterimCandidate = value;
+      const lastWord = value.toLowerCase().split(/\s+/).pop();
+      const unfinished = new Set(["e","mas","que","porque","tipo","pra","para","com","de","do","da","um","uma","então","entao"]);
+      const delay = unfinished.has(lastWord) ? 720 : 360;
       interimCommitTimer = setTimeout(() => {
         if (!lastInterimCandidate || companion.speaking || companion.thinking || companion.recognition !== rec) return;
         const heard = lastInterimCandidate;
         lastInterimCandidate = "";
         stopRecognition(true);
         handleHeard(heard);
-      },480);
+      },delay);
     }
 
     rec.onstart = function () {
@@ -1345,7 +1357,7 @@
       if (index >= segments.length) {
         companion.speaking = false;
         setStatus("idle", companion.wantsListening ? "ouvindo" : "observando");
-        if (companion.wantsListening) scheduleRecognitionRestart(300);
+        if (companion.wantsListening) scheduleRecognitionRestart(120);
         return;
       }
 
@@ -1353,8 +1365,8 @@
       const utter = new SpeechSynthesisUtterance(item.text);
       utter.lang = item.lang;
       utter.volume = 1;
-      utter.rate = item.lang === "ru-RU" ? 1.03 : 1.16;
-      utter.pitch = item.lang === "ru-RU" ? 1.0 : 1.06;
+      utter.rate = item.lang === "ru-RU" ? 0.95 : 0.99;
+      utter.pitch = item.lang === "ru-RU" ? 1.01 : 1.07;
 
       const selected = voiceFor(item.lang);
       if (selected) utter.voice = selected;
@@ -1391,22 +1403,21 @@
 
     if (/^(oi|olá|ola|eae|e aí|ei|opa|salve|привет)[!. ]*$/.test(m)) {
       const lines = [
-        "Oi. Tô aqui.",
-        "E aí. O que foi?",
-        "Olá. Você me chamou?"
+        "Oi.",
+        "Tô aqui.",
+        "E aí."
       ];
       return lines[Math.floor(Math.random() * lines.length)];
     }
-    if (m.includes("quem é você") || m.includes("quem e voce")) return "Eu sou o Pipo. Eu moro aqui dentro. Observo seu estudo, lembro do que importa e, aparentemente, também tenho que explicar minha própria existência.";
+    if (m.includes("quem é você") || m.includes("quem e voce")) return "Eu sou o Pipo. Fico aqui com você no curso.";
     if (m.includes("repete") || m.includes("repita") || m.includes("de novo")) return focus ? "De novo: " + focus : (companion.lastAnswer || "Você precisa me dar algo para repetir.");
     if (m.includes("devagar")) return focus ? "Certo. Bem devagar: " + focus : "Certo. Desacelerando.";
-    if (m.includes("não entendi") || m.includes("nao entendi")) return focus ? "Eu vi. O ponto atual é “" + focus + "”. Vou separar isso em uma parte menor." : "Tá. Eu perdi a referência exata, mas não a conversa. Fala qual parte te travou.";
-    if (m.includes("obrigad")) return "De nada. Registre este raro momento de educação digital.";
-    if (m.includes("tchau") || m.includes("falou")) return "Vai lá. Eu continuo aqui. Vantagens de não ter pernas.";
+    if (m.includes("não entendi") || m.includes("nao entendi")) return focus ? "Beleza. Vamos por partes nessa aqui: “" + focus + "”." : "Qual parte?";
+    if (m.includes("obrigad")) return "De nada.";
+    if (m.includes("tchau") || m.includes("falou")) return "Falou.";
 
     if (/^[\p{L}\p{N}][\p{L}\p{N}\-]{0,28}$/u.test(raw)) {
-      const word = raw.charAt(0).toUpperCase() + raw.slice(1);
-      return word + "? Do nada assim? Tô ouvindo. Isso veio de algum contexto ou você só tá testando se eu acompanho qualquer coisa?";
+      return raw + "?";
     }
 
     if (typeof localTeacher === "function") {
@@ -1415,8 +1426,8 @@
     }
 
     return focus
-      ? "Tô vendo “" + focus + "”. Posso explicar isso pelo que está na tela."
-      : "Tô aqui. A conexão principal oscilou, mas eu ainda consigo continuar a conversa.";
+      ? "Tô vendo “" + focus + "”."
+      : "Tô aqui.";
   }
 
   function cleanCompanionSpeech(text) {
@@ -1442,21 +1453,39 @@
 
   function instantConversationalReply(message) {
     const raw = String(message || "").trim();
-    const m = raw.toLowerCase().replace(/[!?.,]+$/g,"").trim();
+    const m = raw.toLowerCase().replace(/[!?.,]+$/g,"").replace(/\s+/g," ").trim();
     if (!m) return "";
-    if (/^(oi|olá|ola|eae|e aí|ei|opa|salve|alô|alo|alô alô|alo alo|привет)$/.test(m)) {
-      return "Oi. Tô te ouvindo.";
-    }
-    if (/^(sim|aham|uhum|isso|isso mesmo|exato|beleza|blz|ok|okay)$/.test(m)) {
-      return "Tô acompanhando. Continua.";
-    }
-    if (/^(não|nao|nada a ver|errado)$/.test(m)) {
-      return "Tá. Então eu peguei errado. Continua que eu reajusto.";
-    }
-    if (/^(repete|repita|de novo)$/.test(m) && companion.lastAnswer) {
-      return companion.lastAnswer;
-    }
+
+    const words = m.split(" ");
+    const greetings = new Set(["oi","olá","ola","eae","ei","opa","salve","alô","alo"]);
+    if (words.length <= 5 && words.every(word => greetings.has(word))) return "Oi.";
+
+    if (/^(bora|vamos|vamo|vambora|bora estudar|vamos estudar)$/.test(m)) return "Bora.";
+    if (/^(sim|aham|uhum|isso|isso mesmo|exato|beleza|blz|ok|okay)$/.test(m)) return "Tô acompanhando.";
+    if (/^(tá me ouvindo|ta me ouvindo|me ouve|você me ouve|voce me ouve)$/.test(m)) return "Tô.";
+    if (/^(não|nao|nada a ver|errado)$/.test(m)) return "Tá. Peguei errado.";
+    if (/^(repete|repita|de novo)$/.test(m) && companion.lastAnswer) return companion.lastAnswer;
     return "";
+  }
+
+  function brainContext() {
+    const c = currentContext();
+    return {
+      screen:c.screen || "",
+      lessonTitle:c.lessonTitle || "",
+      stepType:c.stepType || "",
+      focusText:compactText(c.focusText,320),
+      feedback:compactText(c.feedback || c.pronunciationFeedback,360),
+      activity:c.activity ? {
+        type:c.activity.type || "",
+        prompt:compactText(c.activity.prompt,360),
+        target:compactText(c.activity.target,260),
+        translation:compactText(c.activity.translation,220),
+        answer:compactText(c.activity.answer,220),
+        options:Array.isArray(c.activity.options) ? c.activity.options.slice(0,8) : []
+      } : null,
+      lastEvent:c.lastEvent || null
+    };
   }
 
   async function callBrain(message) {
@@ -1467,8 +1496,8 @@
     const authenticated = Boolean(state.token && state.token !== "local-demo");
     const body = JSON.stringify({
       message:String(message).slice(0,1600),
-      context:currentContext(),
-      history:companion.history.slice(-14)
+      context:brainContext(),
+      history:companion.history.slice(-6)
     });
 
     if (authenticated) {
