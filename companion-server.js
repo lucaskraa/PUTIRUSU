@@ -385,7 +385,7 @@ module.exports = function installCompanion(deps) {
       : { recentActivity: [], repeatedDifficulties: [], weakWritingLetters: [] };
     const recentHistory = profile.memoryEnabled !== false && profile.storeTranscripts !== false
       ? db.chats.filter(item => item.userId === req.userId && (item.scope === "companion" || item.scope === "realtime"))
-          .slice(-10)
+          .slice(-6)
           .map(item => ({
             role:item.role || (item.message ? "user" : "assistant"),
             message:item.message || item.text || "",
