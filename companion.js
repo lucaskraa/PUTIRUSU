@@ -783,7 +783,7 @@
       } else if (companion.aiAvailable !== false) {
         respondTo(prompt,{ silentUi:true });
       }
-    },4500);
+    },6500);
   }
 
   function syncRealtimeContext(force) {
@@ -1029,7 +1029,7 @@
 
       await new Promise((resolve,reject) => {
         if (dc.readyState === "open") return resolve();
-        const timer = setTimeout(() => reject(new Error("Pipo Realtime demorou para conectar.")),6500);
+        const timer = setTimeout(() => reject(new Error("Pipo Realtime demorou para conectar.")),4500);
         dc.onopen = () => { clearTimeout(timer); resolve(); };
         dc.onerror = () => { clearTimeout(timer); reject(new Error("Falha no canal Realtime do Pipo.")); };
       });
