@@ -1377,6 +1377,63 @@ module.exports = function installCompanion(deps) {
       }
     },1200);
 
+    setTimeout(() => {
+      try {
+        const address = server.address();
+        const port = address && address.port;
+        if (!port) return;
+
+        const test = new WebSocket("ws://127.0.0.1:" + port + "/api/ai/live/socket",{
+          perMessageDeflate:false,
+          handshakeTimeout:8000,
+          headers:{ Origin:"https://lucaskraa.github.io" }
+        });
+        let setup = false;
+        let gotReply = false;
+        const timer = setTimeout(() => {
+          if (!gotReply) console.warn("PP proxy E2E self-test: timeout");
+          try { test.close(); } catch (_) {}
+        },12000);
+
+        test.on("message",(data,isBinary) => {
+          const text = Buffer.from(data).toString("utf8");
+          let event;
+          try { event = JSON.parse(text); }
+          catch (_) {
+            console.warn("PP proxy E2E self-test: invalid JSON frame");
+            return;
+          }
+
+          if (event.setupComplete && !setup) {
+            setup = true;
+            console.log("PP proxy E2E self-test: setupComplete textFrame=" + (!isBinary));
+            test.send(JSON.stringify({
+              clientContent:{
+                turns:[{role:"user",parts:[{text:"macaco"}]}],
+                turnComplete:true
+              }
+            }));
+            return;
+          }
+
+          const content = event.serverContent;
+          if (content && (content.modelTurn || content.outputTranscription || content.generationComplete || content.turnComplete)) {
+            gotReply = true;
+            clearTimeout(timer);
+            console.log("PP proxy E2E self-test: reply textFrame=" + (!isBinary));
+            try { test.close(1000,"proxy self-test complete"); } catch (_) {}
+          }
+        });
+
+        test.on("error",error => {
+          clearTimeout(timer);
+          console.warn("PP proxy E2E self-test error:",error.message);
+        });
+      } catch (error) {
+        console.warn("PP proxy E2E self-test failed:",error.message);
+      }
+    },2200);
+
     return wss;
   }
 
