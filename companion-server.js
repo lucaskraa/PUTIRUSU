@@ -14,6 +14,20 @@ module.exports = function installCompanion(deps) {
   ]);
 
   const guestRate = new Map();
+  let healthyTextModel = null;
+  const textModelFailures = new Map();
+
+  function textModelCandidates() {
+    return [...new Set([
+      healthyTextModel,
+      process.env.GEMINI_MODEL,
+      "gemini-3.5-flash-lite",
+      "gemini-3.8-flash",
+      "gemini-3.6-flash",
+      "gemini-3.7-flash",
+      "gemini-3.5-flash"
+    ].filter(Boolean))];
+  }
 
   function ensureAiCollections(db) {
     if (!Array.isArray(db.aiProfiles)) db.aiProfiles = [];
@@ -226,21 +240,17 @@ module.exports = function installCompanion(deps) {
     const apiKey = process.env.GEMINI_API_KEY;
     if (!apiKey) return null;
 
-    const preferred = process.env.GEMINI_MODEL || "gemini-3.7-flash";
-    const models = [...new Set([
-      preferred,
-      "gemini-3.7-flash",
-      "gemini-3.6-flash",
-      "gemini-3.8-flash",
-      "gemini-3.5-flash",
-      "gemini-3.5-flash-lite"
-    ])];
+    const models = textModelCandidates();
     const thinkingLevel = reasoningLevelFor(payload);
     let lastError = null;
+    const now = Date.now();
 
     for (const model of models) {
+      const blockedUntil = Number(textModelFailures.get(model) || 0);
+      if (blockedUntil > now) continue;
+
       const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), thinkingLevel === "medium" ? 8000 : 5200);
+      const timeout = setTimeout(() => controller.abort(), thinkingLevel === "medium" ? 5200 : 3600);
       try {
         const response = await fetch(
           "https://generativelanguage.googleapis.com/v1beta/models/" + encodeURIComponent(model) + ":generateContent",
@@ -270,10 +280,19 @@ module.exports = function installCompanion(deps) {
         const body = await response.text();
         if (response.ok) {
           const answer = geminiOutputText(JSON.parse(body));
-          if (answer) return answer;
+          if (answer) {
+            healthyTextModel = model;
+            textModelFailures.delete(model);
+            return answer;
+          }
         }
 
         lastError = new Error("Gemini " + model + " respondeu " + response.status + ": " + body.slice(0,220));
+        if ([429,500,502,503,504].includes(response.status)) {
+          textModelFailures.set(model,Date.now() + 60000);
+        } else if (response.status === 404) {
+          textModelFailures.set(model,Date.now() + 10 * 60 * 1000);
+        }
         if (![404,429,500,502,503,504].includes(response.status)) throw lastError;
       } catch (error) {
         lastError = error;
@@ -291,35 +310,35 @@ module.exports = function installCompanion(deps) {
   }
 
   async function analyzeActivityContext(context) {
+    if (!process.env.GEMINI_API_KEY || !context || typeof context !== "object") return "";
+
+    const payload = {
+      guest:true,
+      message:[
+        "Faça uma pré-análise silenciosa da atividade atual para outro agente.",
+        "Retorne um briefing curto em português com objetivo, resultado esperado se houver, dois erros prováveis, melhor pista sem entregar tudo e ponto de pronúncia se houver russo.",
+        "Não fale com o aluno, não use saudação e não invente nada fora do contexto."
+      ].join(" "),
+      context:cleanValue(context),
+      snapshot:{},
+      history:[],
+      progress:{},
+      user:{name:"aluno",level:"A1"}
+    };
+
+    const answer = await generateGeminiAnswer(payload);
+    return String(answer || "").slice(0,1800);
+  }
+
+  async function probeTextModels() {
     const apiKey = process.env.GEMINI_API_KEY;
-    if (!apiKey || !context || typeof context !== "object") return "";
+    if (!apiKey) return null;
 
-    const instruction = [
-      "Faça uma pré-análise silenciosa da atividade atual para outro agente.",
-      "Retorne em português um briefing curto com: objetivo, resultado esperado se houver, dois erros prováveis, melhor pista sem entregar tudo e ponto de pronúncia se houver russo.",
-      "Não fale com o aluno, não use saudação e não invente nada fora do contexto."
-    ].join(" ");
-
-    try {
-      const live = await generateGeminiLiveText({
-        guest:true,
-        message:instruction,
-        context:cleanValue(context),
-        snapshot:{},
-        history:[],
-        progress:{},
-        user:{name:"aluno",level:"A1"}
-      });
-      if (live) return live.slice(0,1800);
-    } catch (error) {
-      console.warn("PP activity Live pre-analysis failed:",error.message);
-    }
-
-    const models = ["gemini-3.7-flash","gemini-3.6-flash","gemini-3.8-flash"];
-    let lastError = null;
-    for (const model of models) {
+    const candidates = ["gemini-3.5-flash-lite","gemini-3.8-flash","gemini-3.6-flash","gemini-3.7-flash","gemini-3.5-flash"];
+    const results = await Promise.all(candidates.map(async model => {
       const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 6000);
+      const started = Date.now();
+      const timeout = setTimeout(() => controller.abort(),4200);
       try {
         const response = await fetch(
           "https://generativelanguage.googleapis.com/v1beta/models/" + model + ":generateContent",
@@ -331,26 +350,34 @@ module.exports = function installCompanion(deps) {
               "Content-Type":"application/json"
             },
             body:JSON.stringify({
-              systemInstruction:{parts:[{text:instruction}]},
-              contents:[{role:"user",parts:[{text:JSON.stringify(cleanValue(context))}]}],
+              contents:[{parts:[{text:"Responda somente OK"}]}],
               generationConfig:{
-                temperature:0.2,
-                maxOutputTokens:220,
+                maxOutputTokens:16,
                 thinkingConfig:{thinkingLevel:"low"}
               }
             })
           }
         );
         const body = await response.text();
-        if (response.ok) return geminiOutputText(JSON.parse(body)).slice(0,1800);
-        lastError = new Error("Activity brief " + model + " " + response.status);
+        const latency = Date.now() - started;
+        return {model,ok:response.ok,status:response.status,latency,body:body.slice(0,100)};
       } catch (error) {
-        lastError = error;
+        return {model,ok:false,status:0,latency:Date.now()-started,body:error.name || error.message};
       } finally {
         clearTimeout(timeout);
       }
+    }));
+
+    const healthy = results.filter(item => item.ok).sort((a,b)=>a.latency-b.latency);
+    healthyTextModel = healthy.length ? healthy[0].model : null;
+    for (const item of results) {
+      if (!item.ok) textModelFailures.set(item.model,Date.now()+60000);
     }
-    throw lastError || new Error("Activity brief unavailable");
+    console.log("PP text model probe:",JSON.stringify(results.map(item=>({
+      model:item.model,ok:item.ok,status:item.status,latency:item.latency
+    }))));
+    console.log("PP text model selected:",healthyTextModel || "none");
+    return healthyTextModel;
   }
 
   async function generateGeminiLiveText(payload) {
@@ -476,13 +503,6 @@ module.exports = function installCompanion(deps) {
 
   async function generateAnswer(payload) {
     if (process.env.GEMINI_API_KEY) {
-      try {
-        const liveAnswer = await generateGeminiLiveText(payload);
-        if (liveAnswer) return liveAnswer;
-      } catch (error) {
-        console.warn("Falha Gemini Live texto:", error.message);
-      }
-
       try {
         const answer = await generateGeminiAnswer(payload);
         if (answer) return answer;
@@ -1305,27 +1325,9 @@ module.exports = function installCompanion(deps) {
       if (!apiKey) return;
 
       try {
-        const response = await fetch(
-          "https://generativelanguage.googleapis.com/v1beta/models/" + encodeURIComponent(process.env.GEMINI_MODEL || "gemini-3.7-flash") + ":generateContent",
-          {
-            method:"POST",
-            headers:{
-              "x-goog-api-key":apiKey,
-              "Content-Type":"application/json"
-            },
-            body:JSON.stringify({
-              contents:[{parts:[{text:"Responda apenas PP_OK"}]}],
-              generationConfig:{
-                maxOutputTokens:32,
-                thinkingConfig:{thinkingLevel:"low"}
-              }
-            })
-          }
-        );
-        const body = await response.text();
-        console.log("PP text self-test:", response.status, response.ok ? "ok" : body.slice(0,180));
+        await probeTextModels();
       } catch (error) {
-        console.warn("PP text self-test failed:", error.message);
+        console.warn("PP text model probe failed:",error.message);
       }
 
       try {
@@ -1399,7 +1401,7 @@ module.exports = function installCompanion(deps) {
     setTimeout(async () => {
       if (!process.env.GEMINI_API_KEY) return;
       try {
-        const arbitrary = await generateGeminiLiveText({
+        const arbitrary = await generateGeminiAnswer({
           guest:true,
           message:"macaco",
           context:{screen:"home"},
@@ -1414,7 +1416,7 @@ module.exports = function installCompanion(deps) {
       }
 
       try {
-        const activity = await generateGeminiLiveText({
+        const activity = await generateGeminiAnswer({
           guest:true,
           message:"me ajuda nessa",
           context:{
