@@ -966,3 +966,321 @@
     animation: none !important;
   }
 }
+
+
+/* === PIPO V26 — FULL SMALL ROBOT BODY === */
+.puti-companion-orb {
+  width: 90px;
+  height: 136px;
+  overflow: visible;
+}
+
+.puti-avatar-svg {
+  width: 90px;
+  height: 133px;
+  overflow: visible;
+  transform-origin: 50% 82%;
+  filter: drop-shadow(0 9px 11px rgba(23,35,48,.24));
+}
+
+.pipo-head {
+  transform-box: view-box;
+  transform-origin: 48px 70px;
+}
+
+.pipo-body {
+  transform-box: view-box;
+  transform-origin: 48px 92px;
+}
+
+.pipo-neck {
+  fill: #7d8b97;
+  stroke: #4d5b68;
+  stroke-width: 1.6;
+}
+
+.pipo-torso-shadow {
+  fill: rgba(38,51,64,.24);
+  transform: translateY(3px);
+}
+
+.pipo-torso {
+  fill: #df4d49;
+  stroke: #596674;
+  stroke-width: 2.2;
+  stroke-linejoin: round;
+}
+
+.pipo-chest {
+  fill: #f3f5f6;
+  stroke: #596674;
+  stroke-width: 1.8;
+  stroke-linejoin: round;
+}
+
+.pipo-core {
+  fill: #4fd7ff;
+  stroke: #0f708b;
+  stroke-width: 1.6;
+  filter: drop-shadow(0 0 4px rgba(79,215,255,.75));
+}
+
+.pipo-waist {
+  fill: #263a55;
+  stroke: #596674;
+  stroke-width: 1.4;
+}
+
+.pipo-arm,
+.pipo-leg {
+  transform-box: view-box;
+}
+
+.pipo-arm.left { transform-origin: 27px 84px; }
+.pipo-arm.right { transform-origin: 69px 84px; }
+.pipo-leg.left { transform-origin: 41px 120px; }
+.pipo-leg.right { transform-origin: 55px 120px; }
+
+.pipo-joint,
+.pipo-hip {
+  fill: #263a55;
+  stroke: #596674;
+  stroke-width: 1.3;
+}
+
+.pipo-upper-arm,
+.pipo-forearm,
+.pipo-shin {
+  fill: #e8edf0;
+  stroke: #596674;
+  stroke-width: 1.7;
+  stroke-linejoin: round;
+}
+
+.pipo-hand,
+.pipo-foot {
+  fill: #263a55;
+  stroke: #596674;
+  stroke-width: 1.4;
+  stroke-linejoin: round;
+}
+
+/* Respiração corporal: a cabeça tem vida separada do corpo. */
+.puti-companion[data-state="idle"]:not(.is-travelling) .pipo-body {
+  animation: pipoBodyBreathe 2.8s ease-in-out infinite;
+}
+.puti-companion[data-state="idle"]:not(.is-travelling) .pipo-head {
+  animation: pipoHeadAlive 4.6s ease-in-out infinite;
+}
+.puti-companion[data-state="idle"]:not(.is-travelling) .pipo-arm.left {
+  animation: pipoIdleArmLeft 3.2s ease-in-out infinite;
+}
+.puti-companion[data-state="idle"]:not(.is-travelling) .pipo-arm.right {
+  animation: pipoIdleArmRight 3.2s ease-in-out infinite reverse;
+}
+
+@keyframes pipoBodyBreathe {
+  0%,100% { transform: translateY(0) scaleY(1); }
+  50% { transform: translateY(-1px) scaleY(1.015); }
+}
+@keyframes pipoHeadAlive {
+  0%,76%,100% { transform: rotate(0deg) translateY(0); }
+  82% { transform: rotate(-2.6deg) translateY(-1px); }
+  90% { transform: rotate(2deg) translateY(-1px); }
+}
+@keyframes pipoIdleArmLeft {
+  0%,100% { transform: rotate(0deg); }
+  50% { transform: rotate(3deg); }
+}
+@keyframes pipoIdleArmRight {
+  0%,100% { transform: rotate(0deg); }
+  50% { transform: rotate(-3deg); }
+}
+
+/* Caminhada: corpo avança, pernas e braços alternam. */
+.puti-companion.is-travelling .puti-avatar-svg {
+  animation: pipoRobotWalk .30s ease-in-out infinite alternate !important;
+}
+.puti-companion.is-travelling .pipo-leg.left {
+  animation: pipoLegForward .30s ease-in-out infinite alternate;
+}
+.puti-companion.is-travelling .pipo-leg.right {
+  animation: pipoLegBack .30s ease-in-out infinite alternate;
+}
+.puti-companion.is-travelling .pipo-arm.left {
+  animation: pipoArmForward .30s ease-in-out infinite alternate;
+}
+.puti-companion.is-travelling .pipo-arm.right {
+  animation: pipoArmBack .30s ease-in-out infinite alternate;
+}
+
+@keyframes pipoRobotWalk {
+  from { transform: translateY(0) rotate(-1.2deg); }
+  to { transform: translateY(-5px) rotate(1.2deg); }
+}
+@keyframes pipoLegForward {
+  from { transform: rotate(13deg); }
+  to { transform: rotate(-13deg); }
+}
+@keyframes pipoLegBack {
+  from { transform: rotate(-13deg); }
+  to { transform: rotate(13deg); }
+}
+@keyframes pipoArmForward {
+  from { transform: rotate(-8deg); }
+  to { transform: rotate(8deg); }
+}
+@keyframes pipoArmBack {
+  from { transform: rotate(8deg); }
+  to { transform: rotate(-8deg); }
+}
+
+/* Ouvindo: inclina a cabeça como quem realmente prestou atenção. */
+.puti-companion[data-state="listening"]:not(.is-travelling) .pipo-head {
+  animation: pipoListenHead 1.3s ease-in-out infinite alternate;
+}
+.puti-companion[data-state="listening"] .pipo-core {
+  animation: pipoCoreListen .58s ease-in-out infinite alternate;
+}
+@keyframes pipoListenHead {
+  from { transform: rotate(-2deg) translateY(0); }
+  to { transform: rotate(3.5deg) translateY(-2px); }
+}
+@keyframes pipoCoreListen {
+  from { opacity: .72; filter: drop-shadow(0 0 3px rgba(79,215,255,.45)); }
+  to { opacity: 1; filter: drop-shadow(0 0 8px rgba(79,215,255,1)); }
+}
+
+/* Falando: gestos pequenos e naturais, sem ficar congelado. */
+.puti-companion[data-state="speaking"]:not(.is-travelling) .pipo-arm.right {
+  animation: pipoTalkHand .52s ease-in-out infinite alternate;
+}
+.puti-companion[data-state="speaking"]:not(.is-travelling) .pipo-head {
+  animation: pipoTalkHead .72s ease-in-out infinite alternate;
+}
+@keyframes pipoTalkHand {
+  from { transform: rotate(-5deg); }
+  to { transform: rotate(-18deg); }
+}
+@keyframes pipoTalkHead {
+  from { transform: rotate(-1.2deg); }
+  to { transform: rotate(1.8deg) translateY(-1px); }
+}
+
+/* Pensando: olha de lado e segura o corpo. */
+.puti-companion[data-state="thinking"]:not(.is-travelling) .pipo-head {
+  animation: pipoThinkHead .64s ease-in-out infinite alternate;
+}
+.puti-companion[data-state="thinking"]:not(.is-travelling) .pipo-arm.left {
+  transform: rotate(12deg);
+}
+@keyframes pipoThinkHead {
+  from { transform: rotate(-4deg) translateY(0); }
+  to { transform: rotate(2deg) translateY(-2px); }
+}
+
+/* Apontar usa o braço físico, além da linha guia discreta. */
+.puti-companion.is-pointing[data-point-side="left"] .pipo-arm.left {
+  animation: none !important;
+  transform: rotate(56deg);
+}
+.puti-companion.is-pointing[data-point-side="right"] .pipo-arm.right {
+  animation: none !important;
+  transform: rotate(-56deg);
+}
+.puti-companion.is-pointing[data-point-side="left"] .pipo-head {
+  transform: rotate(-5deg);
+}
+.puti-companion.is-pointing[data-point-side="right"] .pipo-head {
+  transform: rotate(5deg);
+}
+
+/* Gestos espontâneos. */
+.puti-companion.is-wave .pipo-arm.right {
+  animation: pipoWaveArm .22s ease-in-out 6 alternate !important;
+}
+.puti-companion.is-wave .pipo-head {
+  animation: pipoWaveHead .45s ease-in-out 3 alternate !important;
+}
+@keyframes pipoWaveArm {
+  from { transform: rotate(-72deg); }
+  to { transform: rotate(-112deg); }
+}
+@keyframes pipoWaveHead {
+  from { transform: rotate(-2deg); }
+  to { transform: rotate(3deg); }
+}
+
+.puti-companion.is-cheer .pipo-arm.left {
+  animation: pipoCheerLeft .35s ease-in-out 4 alternate !important;
+}
+.puti-companion.is-cheer .pipo-arm.right {
+  animation: pipoCheerRight .35s ease-in-out 4 alternate !important;
+}
+.puti-companion.is-cheer .pipo-body {
+  animation: pipoCheerBody .35s ease-in-out 4 alternate !important;
+}
+@keyframes pipoCheerLeft {
+  from { transform: rotate(30deg); }
+  to { transform: rotate(98deg); }
+}
+@keyframes pipoCheerRight {
+  from { transform: rotate(-30deg); }
+  to { transform: rotate(-98deg); }
+}
+@keyframes pipoCheerBody {
+  from { transform: translateY(0); }
+  to { transform: translateY(-6px); }
+}
+
+.puti-companion.is-nod .pipo-head {
+  animation: pipoNod .22s ease-in-out 4 alternate !important;
+}
+@keyframes pipoNod {
+  from { transform: rotate(-1deg) translateY(0); }
+  to { transform: rotate(1deg) translateY(3px); }
+}
+
+.puti-companion.is-curious .pipo-head {
+  animation: pipoCurious .42s ease-in-out 3 alternate !important;
+}
+@keyframes pipoCurious {
+  from { transform: rotate(-7deg); }
+  to { transform: rotate(3deg) translateY(-2px); }
+}
+
+/* Piscar sem apagar o brilho dos olhos. */
+.puti-companion[data-state="idle"] .puti-eye {
+  animation: pipoBlink 6.4s infinite;
+}
+@keyframes pipoBlink {
+  0%,45%,48%,100% { transform: scaleY(1); }
+  46%,47% { transform: scaleY(.12); }
+}
+
+/* A seta nasce perto da mão/ombro do corpo, não do topo da cabeça. */
+.puti-pointer {
+  left: 44px;
+  top: 83px;
+}
+
+@media (max-width: 640px) {
+  .puti-companion-orb {
+    width: 78px;
+    height: 119px;
+  }
+  .puti-avatar-svg {
+    width: 78px;
+    height: 116px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .pipo-head,
+  .pipo-body,
+  .pipo-arm,
+  .pipo-leg,
+  .pipo-core {
+    animation: none !important;
+  }
+}
