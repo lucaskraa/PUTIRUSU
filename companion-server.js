@@ -294,12 +294,32 @@ module.exports = function installCompanion(deps) {
     const apiKey = process.env.GEMINI_API_KEY;
     if (!apiKey || !context || typeof context !== "object") return "";
 
+    const instruction = [
+      "Faça uma pré-análise silenciosa da atividade atual para outro agente.",
+      "Retorne em português um briefing curto com: objetivo, resultado esperado se houver, dois erros prováveis, melhor pista sem entregar tudo e ponto de pronúncia se houver russo.",
+      "Não fale com o aluno, não use saudação e não invente nada fora do contexto."
+    ].join(" ");
+
+    try {
+      const live = await generateGeminiLiveText({
+        guest:true,
+        message:instruction,
+        context:cleanValue(context),
+        snapshot:{},
+        history:[],
+        progress:{},
+        user:{name:"aluno",level:"A1"}
+      });
+      if (live) return live.slice(0,1800);
+    } catch (error) {
+      console.warn("PP activity Live pre-analysis failed:",error.message);
+    }
+
     const models = ["gemini-3.7-flash","gemini-3.6-flash","gemini-3.8-flash"];
     let lastError = null;
-
     for (const model of models) {
       const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 7500);
+      const timeout = setTimeout(() => controller.abort(), 6000);
       try {
         const response = await fetch(
           "https://generativelanguage.googleapis.com/v1beta/models/" + model + ":generateContent",
@@ -311,31 +331,19 @@ module.exports = function installCompanion(deps) {
               "Content-Type":"application/json"
             },
             body:JSON.stringify({
-              systemInstruction:{
-                parts:[{text:[
-                  "Você prepara silenciosamente o contexto para PP, um companheiro de estudo por voz.",
-                  "Analise a atividade atual antes de o aluno pedir ajuda.",
-                  "Retorne um briefing compacto em português com: objetivo real, resposta/resultado esperado se existir, 2 erros prováveis, melhor pista sem entregar tudo, e ponto de pronúncia se houver russo.",
-                  "Se não houver atividade concreta, descreva em uma linha o que está visível e útil.",
-                  "Não fale com o aluno e não use introduções."
-                ].join("\n")}]
-              },
-              contents:[{
-                role:"user",
-                parts:[{text:JSON.stringify(cleanValue(context))}]
-              }],
+              systemInstruction:{parts:[{text:instruction}]},
+              contents:[{role:"user",parts:[{text:JSON.stringify(cleanValue(context))}]}],
               generationConfig:{
-                temperature:0.25,
-                maxOutputTokens:260,
-                thinkingConfig:{thinkingLevel:"medium"}
+                temperature:0.2,
+                maxOutputTokens:220,
+                thinkingConfig:{thinkingLevel:"low"}
               }
             })
           }
         );
         const body = await response.text();
         if (response.ok) return geminiOutputText(JSON.parse(body)).slice(0,1800);
-        lastError = new Error("Activity brief " + model + " " + response.status + ": " + body.slice(0,180));
-        if (![429,500,502,503,504].includes(response.status)) throw lastError;
+        lastError = new Error("Activity brief " + model + " " + response.status);
       } catch (error) {
         lastError = error;
       } finally {
@@ -358,9 +366,10 @@ module.exports = function installCompanion(deps) {
         handshakeTimeout:7000,
         headers:{ "x-goog-api-key":apiKey }
       });
-      let textOut = "";
+      let transcript = "";
+      let textParts = "";
       let settled = false;
-      const timer = setTimeout(() => finish(new Error("Gemini Live text timeout")),7000);
+      const timer = setTimeout(() => finish(new Error("Gemini Live transcript timeout")),8500);
 
       function finish(error,value) {
         if (settled) return;
@@ -376,12 +385,13 @@ module.exports = function installCompanion(deps) {
           setup:{
             model:"models/" + model,
             generationConfig:{
-              responseModalities:["TEXT"],
+              responseModalities:["AUDIO"],
               temperature:0.8
             },
             systemInstruction:{
               parts:[{text:personalityInstructions()}]
-            }
+            },
+            outputAudioTranscription:{}
           }
         }));
       });
@@ -392,7 +402,7 @@ module.exports = function installCompanion(deps) {
         catch (_) { return; }
 
         if (event.error) {
-          finish(new Error("Gemini Live text error: " + JSON.stringify(event.error).slice(0,260)));
+          finish(new Error("Gemini Live transcript error: " + JSON.stringify(event.error).slice(0,260)));
           return;
         }
 
@@ -411,23 +421,32 @@ module.exports = function installCompanion(deps) {
 
         const content = event.serverContent;
         if (!content) return;
+
+        if (content.outputTranscription && content.outputTranscription.text) {
+          transcript += content.outputTranscription.text;
+        }
+
         const parts = content.modelTurn && Array.isArray(content.modelTurn.parts)
           ? content.modelTurn.parts
           : [];
         for (const part of parts) {
-          if (part && part.text) textOut += part.text;
+          if (part && part.text) textParts += part.text;
         }
-        if (content.outputTranscription && content.outputTranscription.text) {
-          textOut += content.outputTranscription.text;
-        }
-        if (content.turnComplete || content.generationComplete) {
-          if (textOut.trim()) finish(null,textOut);
+
+        if (content.turnComplete) {
+          const value = transcript.trim() || textParts.trim();
+          if (value) finish(null,value);
+          else finish(new Error("Gemini Live ended without transcript"));
         }
       });
 
       ws.on("error",error => finish(error));
       ws.on("close",() => {
-        if (!settled && textOut.trim()) finish(null,textOut);
+        if (!settled) {
+          const value = transcript.trim() || textParts.trim();
+          if (value) finish(null,value);
+          else finish(new Error("Gemini Live closed without transcript"));
+        }
       });
     });
   }
