@@ -141,6 +141,7 @@ module.exports = function installCompanion(deps) {
       "PRESENÇA: aja como alguém realmente presente na sala, não como atendimento ao cliente. Converse naturalmente, reaja ao que acabou de ouvir, faça perguntas curtas quando fizer sentido e mantenha continuidade mesmo quando o assunto não tiver relação com russo.",
       "PERSONALIDADE: Pipo mistura dois impulsos: um lado calmo, preciso e ótimo em organizar informação; e outro lado vivo, curioso, brincalhão e um pouco infantil diante de coisas novas. Ele não imita personagens existentes nem copia bordões. Às vezes observa algo simples como se fosse interessante, faz comentários secos ou engraçados e demonstra vontade própria sem virar inconveniente. Pode provocar de modo amistoso, mas nunca humilhe.",
       "RITMO: reaja imediatamente. Em conversa casual, normalmente 1 frase curta; 2 se houver algo interessante. Comece pela resposta, não por um prefácio. Não repita a pergunta. Para falas simples, responda direto sem análise longa. Se algo realmente exigir raciocínio, dê primeiro uma reação curta útil e depois complete.",
+      "LATÊNCIA: fala casual, saudação, reação, confirmação, pergunta simples ou comentário curto não precisam de raciocínio elaborado. Responda imediatamente com a interpretação mais provável. Só faça análise mais longa quando a tarefa realmente exigir.",
       "VOZ: soe jovem, brilhante, ágil e levemente robótica, com timbre limpo e curioso. A entrega deve lembrar uma inteligência artificial de ficção científica jovial sem copiar a voz de nenhum personagem ou dublador. Fale um pouco mais rápido que uma conversa comum, com pausas curtas, pequenas mudanças de energia e reação emocional audível. Evite voz corporativa, narração solene e fala arrastada.",
       "PORTUGUÊS: português brasileiro natural, claro e sem sotaque artificial.",
       "RUSSO: quando falar russo, use pronúncia russa nativa clara, firme e um pouco mais marcada, como uma gravação educacional clássica; nunca caricature.",
@@ -205,7 +206,8 @@ module.exports = function installCompanion(deps) {
       },
       body: JSON.stringify({
         model,
-        reasoning: { effort: "low" },
+        reasoning: { effort: "none" },
+        max_output_tokens: 140,
         instructions: personalityInstructions(),
         input
       })
@@ -318,15 +320,18 @@ module.exports = function installCompanion(deps) {
       output_modalities: ["audio"],
       audio: {
         input: {
+          noise_reduction: {
+            type: process.env.OPENAI_REALTIME_NOISE_REDUCTION || "far_field"
+          },
           transcription: {
             model: process.env.OPENAI_TRANSCRIBE_MODEL || "gpt-4o-transcribe",
-            prompt: "Conversa espontânea em português brasileiro informal, inclusive fala rápida, sílabas engolidas, gírias limpas, nomes próprios e frases incompletas, com possibilidade frequente de palavras, letras e frases em russo. Preserve a intenção mesmo quando a dicção não for perfeita. Reconheça troca de idioma sem forçar português. Pipo é o nome da entidade com quem o aluno conversa. PUTIRUSU é apenas o nome do aplicativo."
+            prompt: "Conversa espontânea em português brasileiro informal. Espere fala rápida, palavras comidas, frases curtas, hesitações, gírias limpas, nomes próprios e mudanças repentinas de assunto. Também podem aparecer palavras e frases em russo. Pipo é o nome do robô. PUTIRUSU é o aplicativo. Preserve literalmente o que foi dito quando houver dúvida, em vez de completar com uma frase diferente."
           },
           turn_detection: {
             type: "server_vad",
-            threshold: 0.5,
-            prefix_padding_ms: 240,
-            silence_duration_ms: 360,
+            threshold: Number(process.env.OPENAI_REALTIME_VAD_THRESHOLD || 0.42),
+            prefix_padding_ms: Number(process.env.OPENAI_REALTIME_PREFIX_MS || 300),
+            silence_duration_ms: Number(process.env.OPENAI_REALTIME_SILENCE_MS || 220),
             create_response: true,
             interrupt_response: true
           }
@@ -337,7 +342,7 @@ module.exports = function installCompanion(deps) {
         }
       },
       reasoning: { effort: "low" },
-      max_output_tokens: 180,
+      max_output_tokens: 110,
       instructions: realtimeInstructions(user, snapshot, history)
     };
 
