@@ -71,13 +71,13 @@
     companion.history.push({ role:normalizedRole, text:value });
     companion.history = companion.history.slice(-24);
     try {
-      localStorage.setItem("ppRecentConversation",JSON.stringify(companion.history.slice(-24)));
+      localStorage.setItem("pipoRecentConversation",JSON.stringify(companion.history.slice(-24)));
     } catch (_) {}
   }
 
   function restoreRecentConversation() {
     try {
-      const data = JSON.parse(localStorage.getItem("ppRecentConversation") || "[]");
+      const data = JSON.parse(localStorage.getItem("pipoRecentConversation") || localStorage.getItem("ppRecentConversation") || "[]");
       if (Array.isArray(data)) {
         companion.history = data
           .filter(item => item && (item.role === "user" || item.role === "assistant") && item.text)
@@ -94,10 +94,8 @@
     if (token) opts.headers.Authorization = "Bearer " + token;
 
     const localUrl = (typeof API === "string" ? API : "/api") + path;
-    const candidates = [localUrl];
-    if (!String(location.origin || "").includes("putirusu-dev.onrender.com")) {
-      candidates.push(PUTIRUSU_REMOTE_API + path);
-    }
+    const onRender = String(location.origin || "").includes("putirusu-dev.onrender.com");
+    const candidates = [onRender ? localUrl : PUTIRUSU_REMOTE_API + path];
 
     let lastError = null;
     for (const url of candidates) {
@@ -239,7 +237,7 @@
     root.dataset.mood = "curious";
     root.setAttribute("aria-live", "polite");
     root.innerHTML =
-      '<button id="putiCompanionOrb" class="puti-companion-orb" type="button" aria-label="Abrir PP">' +
+      '<button id="putiCompanionOrb" class="puti-companion-orb" type="button" aria-label="Abrir Pipo">' +
         '<span class="puti-orb-ring"></span>' +
         '<svg class="puti-avatar-svg" viewBox="0 0 96 82" aria-hidden="true">' +
           '<path class="puti-helmet-shadow" d="M13 29 25 13 43 7 48 2l5 5 18 6 12 16-4 31-14 15H31L17 60Z"/>' +
@@ -259,7 +257,7 @@
       '</button>' +
       '<div id="putiCompanionBubble" class="puti-companion-bubble hidden">' +
         '<div class="puti-companion-head">' +
-          '<div class="puti-identity"><strong>PP</strong><span id="putiCompanionStatus">observando</span></div>' +
+          '<div class="puti-identity"><strong>Pipo</strong><span id="putiCompanionStatus">observando</span></div>' +
           '<div class="puti-wave" id="putiWave" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></div>' +
           '<button id="putiCompanionClose" type="button" aria-label="Fechar">×</button>' +
         '</div>' +
@@ -389,7 +387,7 @@
       const response = await companionFetch("/ai/health",{ method:"GET" });
       const data = await response.json();
       companion.aiAvailable = Boolean(data && (data.aiConfigured || data.geminiConfigured || data.openaiConfigured));
-      companion.realtimeAvailable = Boolean(data && data.liveConfigured && data.liveProvider === "gemini");
+      companion.realtimeAvailable = Boolean(data && data.openaiConfigured && data.realtimeModel);
       return data || {};
     } catch (_) {
       companion.aiAvailable = false;
@@ -416,17 +414,13 @@
   function setRealtimeMicEnabled(enabled) {
     companion.realtimeMicEnabled = Boolean(enabled);
     if (!companion.realtimeStream) return;
-    companion.realtimeStream.getAudioTracks().forEach(track=>{ track.enabled = Boolean(enabled); });
+    companion.realtimeStream.getAudioTracks().forEach(track => { track.enabled = Boolean(enabled); });
   }
 
   function stopGeminiPlayback() {
-    if (companion.realtimeOutputSources) {
-      companion.realtimeOutputSources.forEach(source => {
-        try { source.stop(); } catch (_) {}
-      });
-      companion.realtimeOutputSources.clear();
+    if (companion.realtimeAudio) {
+      try { companion.realtimeAudio.pause(); } catch (_) {}
     }
-    companion.realtimeOutputTime = 0;
     companion.speaking = false;
   }
 
@@ -434,55 +428,22 @@
     companion.realtimeConnected = false;
     companion.realtimeConnecting = false;
     companion.realtimeMicEnabled = true;
-    resetLocalVad();
     stopGeminiPlayback();
 
-    if (companion.realtimeWs) {
-      try {
-        companion.realtimeWs.onopen = null;
-        companion.realtimeWs.onmessage = null;
-        companion.realtimeWs.onerror = null;
-        companion.realtimeWs.onclose = null;
-        companion.realtimeWs.close();
-      } catch (_) {}
-      companion.realtimeWs = null;
+    if (companion.realtimeDc) {
+      try { companion.realtimeDc.onopen = null; companion.realtimeDc.onmessage = null; companion.realtimeDc.onclose = null; companion.realtimeDc.close(); } catch (_) {}
+      companion.realtimeDc = null;
     }
-
-    if (companion.realtimeProcessor) {
-      try { companion.realtimeProcessor.disconnect(); } catch (_) {}
-      companion.realtimeProcessor.onaudioprocess = null;
-      companion.realtimeProcessor = null;
-    }
-    if (companion.realtimeCaptureSource) {
-      try { companion.realtimeCaptureSource.disconnect(); } catch (_) {}
-      companion.realtimeCaptureSource = null;
-    }
-    if (companion.realtimeCaptureContext) {
-      try { companion.realtimeCaptureContext.close(); } catch (_) {}
-      companion.realtimeCaptureContext = null;
-    }
-    if (companion.realtimeAudioContext) {
-      try { companion.realtimeAudioContext.close(); } catch (_) {}
-      companion.realtimeAudioContext = null;
+    if (companion.realtimePc) {
+      try { companion.realtimePc.ontrack = null; companion.realtimePc.onconnectionstatechange = null; companion.realtimePc.close(); } catch (_) {}
+      companion.realtimePc = null;
     }
     if (companion.realtimeStream) {
       companion.realtimeStream.getTracks().forEach(track => track.stop());
       companion.realtimeStream = null;
     }
-
-    // Campos antigos mantidos apenas para compatibilidade com versões anteriores.
-    if (companion.realtimeDc) {
-      try { companion.realtimeDc.close(); } catch (_) {}
-      companion.realtimeDc = null;
-    }
-    if (companion.realtimePc) {
-      try { companion.realtimePc.close(); } catch (_) {}
-      companion.realtimePc = null;
-    }
     if (companion.realtimeAudio) {
-      try { companion.realtimeAudio.pause(); } catch (_) {}
-      companion.realtimeAudio.srcObject = null;
-      companion.realtimeAudio.remove();
+      try { companion.realtimeAudio.srcObject = null; companion.realtimeAudio.remove(); } catch (_) {}
       companion.realtimeAudio = null;
     }
   }
@@ -496,41 +457,31 @@
   }
 
   function sendRealtimeEvent(event) {
-    const ws = companion.realtimeWs;
-    if (!ws || ws.readyState !== WebSocket.OPEN) return false;
+    const dc = companion.realtimeDc;
+    if (!dc || dc.readyState !== "open") return false;
     try {
-      ws.send(JSON.stringify(event));
+      dc.send(JSON.stringify(event));
       return true;
     } catch (_) {
       return false;
     }
   }
 
-  async function realtimeMessageText(data) {
-    if (typeof data === "string") return data;
-    if (data instanceof Blob) return await data.text();
-    if (data instanceof ArrayBuffer) return new TextDecoder("utf-8").decode(new Uint8Array(data));
-    if (ArrayBuffer.isView(data)) return new TextDecoder("utf-8").decode(data);
-    return String(data == null ? "" : data);
-  }
-
-  async function parseRealtimeMessage(data) {
-    const text = await realtimeMessageText(data);
-    return JSON.parse(text);
-  }
-
   function sendGeminiClientContent(text, turnComplete) {
     const value = String(text || "").trim();
-    if (!value) return false;
-    return sendRealtimeEvent({
-      clientContent:{
-        turns:[{
-          role:"user",
-          parts:[{ text:value }]
-        }],
-        turnComplete:Boolean(turnComplete)
+    if (!value || !companion.realtimeConnected) return false;
+    const created = sendRealtimeEvent({
+      type:"conversation.item.create",
+      item:{
+        type:"message",
+        role:"user",
+        content:[{ type:"input_text", text:value }]
       }
     });
+    if (created && turnComplete) {
+      sendRealtimeEvent({ type:"response.create" });
+    }
+    return created;
   }
 
   function autonomousPrompt(type, details) {
@@ -564,17 +515,14 @@
       } else if (companion.aiAvailable !== false) {
         respondTo(prompt + "\nUse esta atividade: " + JSON.stringify(currentContext()), { silentUi:true });
       }
-    },220);
+    },180);
   }
 
   function pushRealtimeAppEvent(type, details) {
     companion.lastAppEvent = { type, details:details || {}, at:new Date().toISOString() };
     maybeReactAutonomously(type,details || {});
     if (!companion.realtimeConnected) return;
-    sendGeminiClientContent(
-      "[APP_EVENT] " + JSON.stringify(companion.lastAppEvent),
-      false
-    );
+    sendGeminiClientContent("[APP_EVENT] " + JSON.stringify(companion.lastAppEvent), false);
   }
 
   function pushRealtimeContext() {
@@ -597,35 +545,10 @@
   }
 
   async function preAnalyzeActivity(context, key) {
-    const authenticated = Boolean(state.token && state.token !== "local-demo");
-    const body = JSON.stringify({ context });
-    try {
-      let response;
-      if (authenticated) {
-        try {
-          response = await companionFetch("/ai/context/analyze",{
-            method:"POST",
-            headers:{ "Content-Type":"application/json" },
-            body
-          });
-        } catch (_) {}
-      }
-      if (!response) {
-        response = await companionFetch("/ai/guest/context/analyze",{
-          method:"POST",
-          headers:{ "Content-Type":"application/json" },
-          body
-        });
-      }
-      const data = await response.json();
-      if (key !== companion.briefFingerprint) return;
-      companion.activityBrief = String(data && data.brief || "").slice(0,1800);
-      if (companion.realtimeConnected && companion.activityBrief) {
-        sendGeminiClientContent("[ACTIVITY_BRIEF] " + companion.activityBrief,false);
-        sendGeminiClientContent("[APP_CONTEXT] " + JSON.stringify(currentContext()),false);
-      }
-      scheduleAliveObservation(context,key);
-    } catch (_) {}
+    // A análise antecipada é opcional. Não bloqueia a conversa nem o microfone.
+    if (key !== companion.briefFingerprint) return;
+    companion.activityBrief = "";
+    scheduleAliveObservation(context,key);
   }
 
   function scheduleActivityPreAnalysis(context) {
@@ -636,39 +559,27 @@
       return;
     }
     if (key === companion.briefFingerprint) return;
-
     companion.briefFingerprint = key;
     companion.activityBrief = "";
     if (companion.briefTimer) clearTimeout(companion.briefTimer);
-    companion.briefTimer = setTimeout(() => {
-      preAnalyzeActivity(context,key);
-    },520);
+    companion.briefTimer = setTimeout(() => preAnalyzeActivity(context,key),120);
   }
 
   function scheduleAliveObservation(context,key) {
     if (!key || companion.noticedActivityKey === key) return;
     companion.noticedActivityKey = key;
-    const started = Date.now();
-
     setTimeout(() => {
       if (!companion.wantsListening || companion.speaking || companion.thinking) return;
       if (Date.now() - companion.lastUserAt < 5000) return;
       if (companion.briefFingerprint !== key) return;
       const fresh = currentContext();
       if (!fresh.activity) return;
-
       const prompt =
         "Você percebeu silenciosamente uma nova atividade. Faça UMA observação curta e espontânea sobre algo concreto dela, ou uma pergunta curta que ajude o aluno a começar. " +
         "Não dê a resposta pronta e não diga que recebeu contexto do aplicativo. Soe como alguém ao lado dele que acabou de olhar a tela.";
-
       if (companion.realtimeConnected) {
-        sendGeminiClientContent(
-          "[AUTONOMOUS_REACTION]\n" + prompt +
-          "\n[ACTIVITY_BRIEF]\n" + String(companion.activityBrief || "") +
-          "\n[APP_CONTEXT]\n" + JSON.stringify(fresh),
-          true
-        );
-      } else if (companion.aiAvailable !== false && Date.now() - started > 3500) {
+        sendGeminiClientContent("[AUTONOMOUS_REACTION]\n" + prompt + "\n[APP_CONTEXT]\n" + JSON.stringify(fresh),true);
+      } else if (companion.aiAvailable !== false) {
         respondTo(prompt,{ silentUi:true });
       }
     },6500);
@@ -680,14 +591,12 @@
     if (!force && fingerprint === companion.contextFingerprint) return;
     companion.contextFingerprint = fingerprint;
     scheduleActivityPreAnalysis(context);
-    if (companion.realtimeConnected) {
-      sendGeminiClientContent("[APP_CONTEXT] " + fingerprint, false);
-    }
+    if (companion.realtimeConnected) sendGeminiClientContent("[APP_CONTEXT] " + fingerprint,false);
   }
 
   function scheduleContextSync() {
     if (companion.contextSyncTimer) clearTimeout(companion.contextSyncTimer);
-    companion.contextSyncTimer = setTimeout(() => syncRealtimeContext(false), 140);
+    companion.contextSyncTimer = setTimeout(() => syncRealtimeContext(false),100);
   }
 
   function startContextObserver() {
@@ -710,9 +619,9 @@
     if (!companion.realtimeConnected || !text) return false;
     const payload =
       "[APP_CONTEXT] " + JSON.stringify(currentContext()) +
-      "\n[INSTRUCAO_DE_TURNO] Responda ao conteúdo real do que o aluno disse, mesmo que seja só uma palavra. Resolva referências como 'essa', 'isso' e 'aqui' pela tela atual." +
+      "\n[INSTRUCAO_DE_TURNO] Responda ao conteúdo real do que o aluno disse, mesmo que seja só uma palavra, frase incompleta ou mudança brusca de assunto. Resolva 'essa', 'isso', 'aqui' e referências parecidas pela tela e conversa recentes. Não peça para repetir só porque a frase ficou imperfeita; tente inferir pelo contexto primeiro." +
       "\n[FALA_USUARIO] " + String(text).slice(0,1200);
-    return sendGeminiClientContent(payload, true);
+    return sendGeminiClientContent(payload,true);
   }
 
   function containsBlockedLanguage(text) {
@@ -722,7 +631,7 @@
   function retryRealtimeClean() {
     if (companion.realtimeCleanRetry) return;
     companion.realtimeCleanRetry = true;
-    stopGeminiPlayback();
+    sendRealtimeEvent({ type:"response.cancel" });
     sendRealtimeText("Refaça sua resposta anterior imediatamente, mantendo a personalidade, mas sem qualquer palavrão, obscenidade ou xingamento. Não mencione esta correção.");
   }
 
@@ -736,179 +645,13 @@
     return (a + " " + b).replace(/\s+/g," ").trim();
   }
 
-  function base64ToBytes(base64) {
-    const raw = atob(String(base64 || ""));
-    const out = new Uint8Array(raw.length);
-    for (let i=0;i<raw.length;i++) out[i] = raw.charCodeAt(i);
-    return out;
-  }
-
-  function bytesToBase64(bytes) {
-    let binary = "";
-    const size = 0x8000;
-    for (let i=0;i<bytes.length;i+=size) {
-      binary += String.fromCharCode.apply(null, bytes.subarray(i, Math.min(i+size, bytes.length)));
-    }
-    return btoa(binary);
-  }
-
-  function downsampleFloat32(input, inputRate, outputRate) {
-    if (!input || !input.length) return new Float32Array(0);
-    if (!inputRate || inputRate <= outputRate) return new Float32Array(input);
-    const ratio = inputRate / outputRate;
-    const length = Math.max(1, Math.round(input.length / ratio));
-    const result = new Float32Array(length);
-    for (let i=0;i<length;i++) {
-      const pos = i * ratio;
-      const left = Math.floor(pos);
-      const right = Math.min(input.length - 1, left + 1);
-      const mix = pos - left;
-      result[i] = input[left] * (1 - mix) + input[right] * mix;
-    }
-    return result;
-  }
-
-  function float32ToPcm16Base64(input, sampleRate) {
-    const samples = downsampleFloat32(input, sampleRate, 16000);
-    const bytes = new Uint8Array(samples.length * 2);
-    const view = new DataView(bytes.buffer);
-    for (let i=0;i<samples.length;i++) {
-      const v = Math.max(-1, Math.min(1, samples[i]));
-      view.setInt16(i*2, v < 0 ? v * 32768 : v * 32767, true);
-    }
-    return bytesToBase64(bytes);
-  }
-
-  function audioRms(input) {
-    if (!input || !input.length) return 0;
-    let sum = 0;
-    for (let i=0;i<input.length;i++) {
-      const value = input[i];
-      sum += value * value;
-    }
-    return Math.sqrt(sum / input.length);
-  }
-
-  function resetLocalVad() {
-    companion.realtimeSpeechActive = false;
-    companion.realtimeSilenceMs = 0;
-    companion.realtimeLastSpeechAt = 0;
-  }
-
-  function updateLocalVad(input, sampleRate) {
-    if (!input || !input.length || !sampleRate) return;
-    const rms = audioRms(input);
-    const frameMs = (input.length / sampleRate) * 1000;
-
-    if (!companion.realtimeSpeechActive) {
-      companion.realtimeNoiseFloor =
-        Math.max(0.0015, companion.realtimeNoiseFloor * 0.97 + Math.min(rms,0.03) * 0.03);
-    }
-
-    const threshold = Math.max(0.008, companion.realtimeNoiseFloor * 2.8);
-    const speakingNow = rms >= threshold;
-
-    if (speakingNow) {
-      if (!companion.realtimeSpeechActive) {
-        companion.realtimeSpeechActive = true;
-        companion.realtimeSilenceMs = 0;
-        setStatus("listening","te ouvindo");
-      }
-      companion.realtimeLastSpeechAt = performance.now();
-      companion.realtimeSilenceMs = 0;
-      return;
-    }
-
-    if (!companion.realtimeSpeechActive) return;
-
-    companion.realtimeSilenceMs += frameMs;
-    if (companion.realtimeSilenceMs >= 320) {
-      // Hybrid VAD: Gemini still detects speech start; the browser closes the
-      // turn as soon as local silence is clear instead of waiting server-side.
-      sendRealtimeEvent({
-        realtimeInput:{
-          audioStreamEnd:true
-        }
-      });
-      companion.realtimeSpeechActive = false;
-      companion.realtimeSilenceMs = 0;
-      companion.realtimeTurnEndedAt = performance.now();
-      companion.realtimeFirstAudioAt = 0;
-      companion.realtimeMetricsReported = false;
-      setStatus("thinking","pensando");
-    }
-  }
-
-  function ensureGeminiPlaybackContext() {
-    if (companion.realtimeAudioContext && companion.realtimeAudioContext.state !== "closed") {
-      return companion.realtimeAudioContext;
-    }
-    const AudioContext = window.AudioContext || window.webkitAudioContext;
-    if (!AudioContext) return null;
-    companion.realtimeAudioContext = new AudioContext();
-    return companion.realtimeAudioContext;
-  }
-
-  function playGeminiPcm(base64, mimeType) {
-    const ctx = ensureGeminiPlaybackContext();
-    if (!ctx || !base64) return;
-
-    if (!companion.realtimeFirstAudioAt) {
-      companion.realtimeFirstAudioAt = performance.now();
-      if (companion.realtimeTurnEndedAt && !companion.realtimeMetricsReported) {
-        companion.realtimeMetricsReported = true;
-        const responseLatencyMs = Math.round(companion.realtimeFirstAudioAt - companion.realtimeTurnEndedAt);
-        reportLiveIssue("turn_latency","first_audio",{
-          responseLatencyMs,
-          transcript:String(companion.realtimeInputTranscript || "").slice(0,180),
-          sampleRate:companion.realtimeCaptureContext && companion.realtimeCaptureContext.sampleRate
-        });
-      }
-    }
-
-    const rateMatch = String(mimeType || "").match(/rate=(\d+)/i);
-    const sampleRate = rateMatch ? Number(rateMatch[1]) : 24000;
-    const bytes = base64ToBytes(base64);
-    const sampleCount = Math.floor(bytes.length / 2);
-    if (!sampleCount) return;
-
-    const audioBuffer = ctx.createBuffer(1, sampleCount, sampleRate);
-    const channel = audioBuffer.getChannelData(0);
-    const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
-    for (let i=0;i<sampleCount;i++) channel[i] = view.getInt16(i*2,true) / 32768;
-
-    const source = ctx.createBufferSource();
-    source.buffer = audioBuffer;
-    source.connect(ctx.destination);
-
-    const startAt = Math.max(ctx.currentTime + 0.015, companion.realtimeOutputTime || 0);
-    companion.realtimeOutputTime = startAt + audioBuffer.duration;
-    companion.realtimeOutputSources.add(source);
-    companion.speaking = true;
-    setStatus("speaking","falando");
-
-    source.onended = () => {
-      companion.realtimeOutputSources.delete(source);
-      if (!companion.realtimeOutputSources.size) {
-        companion.speaking = false;
-        if (companion.realtimeConnected) setStatus("listening","ouvindo");
-      }
-    };
-
-    try {
-      if (ctx.state === "suspended") ctx.resume().catch(()=>{});
-      source.start(startAt);
-    } catch (_) {
-      companion.realtimeOutputSources.delete(source);
-    }
-  }
-
-  function finalizeGeminiTurn() {
+  function finalizeRealtimeTurn() {
     const heard = String(companion.realtimeInputTranscript || "").trim();
     const answer = String(companion.realtimeReply || "").trim();
 
     if (heard) {
       companion.lastHeard = heard;
+      companion.lastUserAt = Date.now();
       rememberTurn("user",heard);
       logRealtime("user",heard);
       const heardBox = document.getElementById("putiHeard");
@@ -917,14 +660,12 @@
         heardBox.classList.remove("hidden");
       }
     }
-
     if (answer) {
       companion.lastAnswer = answer;
       rememberTurn("assistant",answer);
       logRealtime("assistant",answer);
       showBubble(answer,true,heard || companion.lastHeard);
     }
-
     companion.realtimeInputTranscript = "";
     companion.realtimeReply = "";
     companion.realtimeCleanRetry = false;
@@ -933,273 +674,161 @@
   }
 
   function handleRealtimeEvent(event) {
-    if (!event) return;
+    if (!event || !event.type) return;
 
-    if (event.setupComplete) {
-      companion.realtimeConnected = true;
-      companion.realtimeConnecting = false;
-      companion.realtimeFailures = 0;
-      setStatus("listening","ao vivo");
-      setMood("curious");
-
-      const recent = companion.history.slice(-12);
-      if (recent.length) {
-        sendGeminiClientContent(
-          "[RECENT_CONVERSATION] " + JSON.stringify(recent),
-          false
-        );
-      }
-      syncRealtimeContext(true);
-      return;
-    }
-
-    if (event.goAway) {
-      console.warn("PP Gemini Live vai encerrar a sessão:", event.goAway);
-      return;
-    }
-
-    if (event.error) {
-      console.warn("PP Gemini Live:", event.error);
-      reportLiveIssue("gemini_server_error", JSON.stringify(event.error).slice(0,700));
-      return;
-    }
-
-    const content = event.serverContent;
-    if (!content) return;
-
-    if (content.interrupted) {
-      resetLocalVad();
-      stopGeminiPlayback();
-      companion.realtimeReply = "";
-      companion.realtimeCleanRetry = false;
+    if (event.type === "input_audio_buffer.speech_started") {
+      companion.realtimeSpeechActive = true;
+      companion.lastUserAt = Date.now();
       setStatus("listening","te ouvindo");
+      return;
+    }
+    if (event.type === "input_audio_buffer.speech_stopped") {
+      companion.realtimeSpeechActive = false;
+      setStatus("thinking","respondendo");
+      return;
     }
 
-    if (content.inputTranscription && content.inputTranscription.text) {
-      companion.realtimeInputTranscript = mergeTranscript(
-        companion.realtimeInputTranscript,
-        content.inputTranscription.text
-      );
-      const heard = companion.realtimeInputTranscript.trim();
-      if (heard) {
-        companion.lastHeard = heard;
-        const heardBox = document.getElementById("putiHeard");
-        if (heardBox) {
-          heardBox.textContent = "você: " + heard;
-          heardBox.classList.remove("hidden");
-        }
-        setStatus("listening","te ouvindo");
+    if (event.type === "conversation.item.input_audio_transcription.delta" && event.delta) {
+      companion.realtimeInputTranscript = mergeTranscript(companion.realtimeInputTranscript,event.delta);
+    }
+    if (event.type === "conversation.item.input_audio_transcription.completed" && event.transcript) {
+      companion.realtimeInputTranscript = String(event.transcript).trim();
+      const heardBox = document.getElementById("putiHeard");
+      if (heardBox && companion.realtimeInputTranscript) {
+        heardBox.textContent = "você: " + companion.realtimeInputTranscript;
+        heardBox.classList.remove("hidden");
       }
     }
 
-    if (content.outputTranscription && content.outputTranscription.text) {
-      companion.realtimeReply = mergeTranscript(
-        companion.realtimeReply,
-        content.outputTranscription.text
-      );
+    if ((event.type === "response.output_audio_transcript.delta" || event.type === "response.audio_transcript.delta") && event.delta) {
+      companion.realtimeReply += String(event.delta);
       const text = companion.realtimeReply.trim();
-      if (containsBlockedLanguage(text)) {
+      if (text) showBubble(text,true,companion.lastHeard);
+    }
+    if ((event.type === "response.output_audio_transcript.done" || event.type === "response.audio_transcript.done") && event.transcript) {
+      companion.realtimeReply = String(event.transcript).trim();
+    }
+
+    if (event.type === "response.created") {
+      companion.thinking = true;
+      setStatus("thinking","respondendo");
+    }
+    if (event.type === "response.done") {
+      if (containsBlockedLanguage(companion.realtimeReply)) {
         retryRealtimeClean();
         return;
       }
-      if (text) {
-        companion.lastAnswer = text;
-        showBubble(text,true,companion.lastHeard);
-      }
+      finalizeRealtimeTurn();
     }
-
-    const parts = content.modelTurn && content.modelTurn.parts ? content.modelTurn.parts : [];
-    for (const part of parts) {
-      const inline = part && (part.inlineData || part.inline_data);
-      if (inline && inline.data && String(inline.mimeType || inline.mime_type || "").startsWith("audio/")) {
-        playGeminiPcm(inline.data, inline.mimeType || inline.mime_type);
-      }
-      if (part && part.text) {
-        companion.realtimeReply = mergeTranscript(companion.realtimeReply,part.text);
-      }
+    if (event.type === "error") {
+      console.warn("Pipo Realtime:",event.error || event);
     }
-
-    if (content.generationComplete && !companion.speaking) setStatus("listening","ouvindo");
-    if (content.turnComplete) finalizeGeminiTurn();
-  }
-
-  async function startGeminiCapture(stream) {
-    const AudioContext = window.AudioContext || window.webkitAudioContext;
-    if (!AudioContext) throw new Error("Web Audio indisponível.");
-
-    let ctx;
-    try {
-      ctx = new AudioContext({ sampleRate:16000, latencyHint:"interactive" });
-    } catch (_) {
-      ctx = new AudioContext({ latencyHint:"interactive" });
-    }
-
-    companion.realtimeCaptureContext = ctx;
-    resetLocalVad();
-    if (ctx.state === "suspended") {
-      try { await ctx.resume(); } catch (_) {}
-    }
-
-    const source = ctx.createMediaStreamSource(stream);
-    companion.realtimeCaptureSource = source;
-    const processor = ctx.createScriptProcessor(1024,1,1);
-    companion.realtimeProcessor = processor;
-
-    processor.onaudioprocess = event => {
-      if (!companion.realtimeConnected || !companion.realtimeMicEnabled) return;
-      const ws = companion.realtimeWs;
-      if (!ws || ws.readyState !== WebSocket.OPEN) return;
-
-      const input = event.inputBuffer.getChannelData(0);
-      updateLocalVad(input,ctx.sampleRate);
-
-      const data = float32ToPcm16Base64(input,ctx.sampleRate);
-      if (!data) return;
-      sendRealtimeEvent({
-        realtimeInput:{
-          audio:{
-            data,
-            mimeType:"audio/pcm;rate=16000"
-          }
-        }
-      });
-    };
-
-    source.connect(processor);
-    processor.connect(ctx.destination);
-  }
-
-  async function fetchGeminiLiveSession() {
-    const authenticated = Boolean(state.token && state.token !== "local-demo");
-    if (authenticated) {
-      try {
-        const response = await companionFetch("/ai/live/token",{ method:"GET" });
-        return response.json();
-      } catch (_) {}
-    }
-    const response = await companionFetch("/ai/live/guest-token",{ method:"GET" });
-    return response.json();
   }
 
   async function connectRealtime() {
     if (companion.realtimeConnected) return true;
     if (companion.realtimeConnecting) return false;
-    if (!window.WebSocket || !navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) return false;
+    if (!window.RTCPeerConnection || !navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) return false;
 
     closeRealtime();
     companion.realtimeConnecting = true;
-    setStatus("thinking","acordando");
+    setStatus("thinking","conectando");
 
     try {
-      const protocol = location.protocol === "https:" ? "wss://" : "ws://";
-      const endpoint = location.hostname === "putirusu-dev.onrender.com"
-        ? protocol + location.host + "/api/ai/live/socket"
-        : "wss://putirusu-dev.onrender.com/api/ai/live/socket";
-
-      const ws = new WebSocket(endpoint);
-      ws.binaryType = "arraybuffer";
-      companion.realtimeWs = ws;
-      companion.realtimeInputTranscript = "";
-      companion.realtimeReply = "";
-
-      await new Promise((resolve,reject)=>{
-        const timeout = setTimeout(()=>{
-          try { ws.close(); } catch (_) {}
-          reject(new Error("PP Live demorou para acordar."));
-        },10000);
-
-        ws.onopen = () => {
-          setStatus("thinking","conectando");
-          // O servidor configura o Gemini Live. O navegador nunca recebe a chave permanente.
-        };
-
-        ws.onmessage = async message => {
-          try {
-            const event = await parseRealtimeMessage(message.data);
-            handleRealtimeEvent(event);
-            if (event && event.error) {
-              clearTimeout(timeout);
-              reject(new Error("PP Live: " + JSON.stringify(event.error).slice(0,500)));
-              return;
-            }
-            if (event && event.setupComplete) {
-              clearTimeout(timeout);
-              resolve();
-            }
-          } catch (error) {
-            reportLiveIssue("message_parse",error,{
-              dataType:Object.prototype.toString.call(message && message.data)
-            });
-          }
-        };
-
-        ws.onerror = () => {
-          clearTimeout(timeout);
-          reportLiveIssue("proxy_websocket_error","Falha no túnel WebSocket do PP.",{
-            readyState:ws.readyState
-          });
-          reject(new Error("Falha no túnel de voz do PP."));
-        };
-
-        ws.onclose = event => {
-          clearTimeout(timeout);
-          const wasActive = companion.realtimeConnected;
-          companion.realtimeConnected = false;
-          companion.realtimeConnecting = false;
-          stopGeminiPlayback();
-
-          reportLiveIssue("proxy_websocket_close",event && event.reason || "socket fechado",{
-            code:event && event.code,
-            wasClean:Boolean(event && event.wasClean),
-            wasActive
-          });
-
-          if (companion.wantsListening && !companion.lessonMicBusy) {
-            companion.realtimeFailures += 1;
-            setStatus("thinking","reconectando");
-            if (companion.realtimeFailures < 3) {
-              setTimeout(async () => {
-                if (!companion.wantsListening || companion.realtimeConnected || companion.realtimeConnecting) return;
-                const ok = await connectRealtime();
-                if (!ok && !companion.recognition) startRecognitionLoop(false);
-              },650);
-            } else {
-              companion.realtimeAvailable = false;
-              setStatus("listening","ouvindo");
-              if (!companion.recognition) startRecognitionLoop(false);
-            }
-          }
-        };
-      });
-
       const stream = await navigator.mediaDevices.getUserMedia({
         audio:{
           echoCancellation:true,
           noiseSuppression:true,
           autoGainControl:true,
-          channelCount:1,
-          sampleRate:16000,
-          sampleSize:16
+          channelCount:1
         }
       });
       companion.realtimeStream = stream;
-      setRealtimeMicEnabled(true);
-      await startGeminiCapture(stream);
+
+      const pc = new RTCPeerConnection();
+      companion.realtimePc = pc;
+
+      const audio = document.createElement("audio");
+      audio.autoplay = true;
+      audio.playsInline = true;
+      audio.style.display = "none";
+      document.body.appendChild(audio);
+      companion.realtimeAudio = audio;
+
+      pc.ontrack = event => {
+        if (event.streams && event.streams[0]) audio.srcObject = event.streams[0];
+        companion.speaking = true;
+        setStatus("speaking","falando");
+        audio.play().catch(()=>{});
+      };
+
+      stream.getTracks().forEach(track => pc.addTrack(track,stream));
+
+      const dc = pc.createDataChannel("oai-events");
+      companion.realtimeDc = dc;
+
+      dc.onmessage = message => {
+        try { handleRealtimeEvent(JSON.parse(message.data)); }
+        catch (_) {}
+      };
+
+      pc.onconnectionstatechange = () => {
+        const st = pc.connectionState;
+        if (st === "connected") {
+          companion.realtimeConnected = true;
+          companion.realtimeConnecting = false;
+          companion.realtimeFailures = 0;
+          companion.realtimeAvailable = true;
+          setStatus("listening","ao vivo");
+        } else if ((st === "failed" || st === "disconnected" || st === "closed") && companion.realtimeConnected) {
+          companion.realtimeConnected = false;
+          companion.realtimeConnecting = false;
+          companion.realtimeFailures += 1;
+          if (companion.wantsListening && !companion.recognition) {
+            setStatus("listening","ouvindo");
+            startRecognitionLoop(false);
+          }
+        }
+      };
+
+      const offer = await pc.createOffer();
+      await pc.setLocalDescription(offer);
+
+      const authenticated = Boolean(state.token && state.token !== "local-demo");
+      const endpoint = authenticated ? "/ai/realtime/session" : "/ai/realtime/guest-session";
+      const response = await companionFetch(endpoint,{
+        method:"POST",
+        headers:{ "Content-Type":"application/sdp" },
+        body:offer.sdp
+      });
+      const answerSdp = await response.text();
+      await pc.setRemoteDescription({ type:"answer", sdp:answerSdp });
+
+      await new Promise((resolve,reject) => {
+        if (dc.readyState === "open") return resolve();
+        const timer = setTimeout(() => reject(new Error("Pipo Realtime demorou para conectar.")),6500);
+        dc.onopen = () => { clearTimeout(timer); resolve(); };
+        dc.onerror = () => { clearTimeout(timer); reject(new Error("Falha no canal Realtime do Pipo.")); };
+      });
 
       companion.realtimeConnected = true;
       companion.realtimeConnecting = false;
       companion.realtimeFailures = 0;
       companion.realtimeAvailable = true;
+      companion.realtimeInputTranscript = "";
+      companion.realtimeReply = "";
       setStatus("listening","ao vivo");
       syncRealtimeContext(true);
+
+      const recent = companion.history.slice(-10);
+      if (recent.length) sendGeminiClientContent("[RECENT_CONVERSATION] " + JSON.stringify(recent),false);
       return true;
     } catch (error) {
-      console.warn("PP Live indisponível:",error.message);
-      reportLiveIssue("connect_realtime_catch",error,{ failures:companion.realtimeFailures });
+      console.warn("Pipo Realtime indisponível:",error.message);
       closeRealtime();
       companion.realtimeConnecting = false;
       companion.realtimeFailures += 1;
-      if (companion.realtimeFailures >= 3) companion.realtimeAvailable = false;
+      if (companion.realtimeFailures >= 2) companion.realtimeAvailable = false;
       return false;
     }
   }
@@ -1257,7 +886,7 @@
     rec.lang = recognitionLanguage();
     rec.continuous = true;
     rec.interimResults = true;
-    rec.maxAlternatives = 1;
+    rec.maxAlternatives = 3;
 
     rec.onstart = function () {
       companion.listening = true;
@@ -1269,7 +898,9 @@
 
       let interim = "";
       for (let i = event.resultIndex; i < event.results.length; i++) {
-        const text = String(event.results[i][0].transcript || "").trim();
+        const alternatives = Array.from(event.results[i] || []);
+        alternatives.sort((a,b) => Number(b.confidence || 0) - Number(a.confidence || 0));
+        const text = String((alternatives[0] && alternatives[0].transcript) || "").trim();
         if (!text) continue;
         if (event.results[i].isFinal) {
           handleHeard(text);
@@ -1306,13 +937,13 @@
     rec.onend = function () {
       companion.listening = false;
       companion.recognition = null;
-      if (companion.wantsListening) scheduleRecognitionRestart(600);
+      if (companion.wantsListening) scheduleRecognitionRestart(180);
     };
 
     try {
       rec.start();
     } catch (_) {
-      scheduleRecognitionRestart(900);
+      scheduleRecognitionRestart(300);
     }
   }
 
@@ -1521,7 +1152,7 @@
       ];
       return lines[Math.floor(Math.random() * lines.length)];
     }
-    if (m.includes("quem é você") || m.includes("quem e voce")) return "Eu sou o PP. Eu moro aqui dentro. Observo seu estudo, lembro do que importa e, aparentemente, também tenho que explicar minha própria existência.";
+    if (m.includes("quem é você") || m.includes("quem e voce")) return "Eu sou o Pipo. Eu moro aqui dentro. Observo seu estudo, lembro do que importa e, aparentemente, também tenho que explicar minha própria existência.";
     if (m.includes("repete") || m.includes("repita") || m.includes("de novo")) return focus ? "De novo: " + focus : (companion.lastAnswer || "Você precisa me dar algo para repetir.");
     if (m.includes("devagar")) return focus ? "Certo. Bem devagar: " + focus : "Certo. Desacelerando.";
     if (m.includes("não entendi") || m.includes("nao entendi")) return focus ? "Eu vi. O ponto atual é “" + focus + "”. Vou separar isso em uma parte menor." : "Tá. Eu perdi a referência exata, mas não a conversa. Fala qual parte te travou.";
@@ -1692,7 +1323,7 @@
     companion.profile.ambientListening = Boolean(withVoice);
 
     const name = state.user && state.user.name ? state.user.name.split(" ")[0] : "";
-    const intro = (name ? name + ". " : "") + "Eu sou o PP. Eu fico por aqui, observo o que você está fazendo e aprendo o seu jeito de estudar. Pode falar comigo normal.";
+    const intro = (name ? name + ". " : "") + "Eu sou o Pipo. Eu fico por aqui, observo o que você está fazendo e aprendo o seu jeito de estudar. Pode falar comigo normal.";
 
     companion.lastAnswer = intro;
     showBubble(intro, true);
@@ -1727,7 +1358,7 @@
       panel.id = "putiPrivacyPanel";
       panel.className = "panel puti-privacy-panel";
       panel.innerHTML =
-        '<p class="tag">PP • PRIVACIDADE</p>' +
+        '<p class="tag">Pipo • PRIVACIDADE</p>' +
         '<h2>Memória e voz</h2>' +
         '<p class="puti-privacy-copy">A memória autenticada é separada por conta. O áudio bruto não é salvo.</p>' +
         '<label class="puti-setting"><span><b>Memória pedagógica</b><small>Guarda dificuldades e eventos de estudo.</small></span><input id="putiMemorySetting" type="checkbox"></label>' +
@@ -1755,7 +1386,7 @@
         else disableAmbientListening();
       });
       document.getElementById("putiClearMemory").addEventListener("click", async function () {
-        if (!confirm("Apagar a memória pedagógica e as conversas do PP desta conta? Seu progresso normal será mantido.")) return;
+        if (!confirm("Apagar a memória pedagógica e as conversas do Pipo desta conta? Seu progresso normal será mantido.")) return;
         if (!state.token || state.token === "local-demo") {
           toast("Esta sessão temporária não possui memória persistente.");
           return;
@@ -2019,7 +1650,7 @@
 
     renderPrivacyPanel();
 
-    const localIntroSeen = localStorage.getItem("putirusuCompanionIntroSeen") === "1";
+    const localIntroSeen = localStorage.getItem("pipoCompanionIntroSeen") === "1" || localStorage.getItem("putirusuCompanionIntroSeen") === "1";
     if (!companion.profile.onboarded && !localIntroSeen) {
       setTimeout(function () {
         const onboarding = document.getElementById("putiOnboarding");
@@ -2046,7 +1677,7 @@
 
   const oldComplete = completeOnboarding;
   completeOnboarding = async function (withVoice) {
-    localStorage.setItem("putirusuCompanionIntroSeen", "1");
+    localStorage.setItem("pipoCompanionIntroSeen", "1");
     return oldComplete(withVoice);
   };
 
@@ -2062,5 +1693,6 @@
     context:currentContext
   };
   window.PUTIRUSU_COMPANION = ppApi;
+  window.PIPO_COMPANION = ppApi;
   window.PP_COMPANION = ppApi;
 })();
