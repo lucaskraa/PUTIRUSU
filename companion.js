@@ -51,6 +51,10 @@
     realtimeConnecting: false,
     realtimeReply: "",
     realtimeCleanRetry: false,
+    realtimeSpeechStoppedAt: 0,
+    realtimeResponseCreatedAt: 0,
+    realtimeFirstResponseAt: 0,
+    lastContextSentAt: 0,
     aiAvailable: null,
     realtimeAvailable: null,
     realtimeFailures: 0,
@@ -665,20 +669,18 @@
     }
   }
 
-  function sendGeminiClientContent(text, turnComplete) {
+  function sendGeminiClientContent(text, turnComplete, role) {
     const value = String(text || "").trim();
     if (!value || !companion.realtimeConnected) return false;
     const created = sendRealtimeEvent({
       type:"conversation.item.create",
       item:{
         type:"message",
-        role:"user",
+        role:role === "system" ? "system" : "user",
         content:[{ type:"input_text", text:value }]
       }
     });
-    if (created && turnComplete) {
-      sendRealtimeEvent({ type:"response.create" });
-    }
+    if (created && turnComplete) sendRealtimeEvent({ type:"response.create" });
     return created;
   }
 
@@ -721,12 +723,12 @@
     presenceReact(type,details || {});
     maybeReactAutonomously(type,details || {});
     if (!companion.realtimeConnected) return;
-    sendGeminiClientContent("[APP_EVENT] " + JSON.stringify(companion.lastAppEvent), false);
+    sendGeminiClientContent("[APP_EVENT] " + JSON.stringify(companion.lastAppEvent), false, "system");
   }
 
   function pushRealtimeContext() {
     if (!companion.realtimeConnected) return;
-    sendGeminiClientContent("[APP_CONTEXT] " + JSON.stringify(currentContext()), false);
+    sendGeminiClientContent("[APP_CONTEXT] " + JSON.stringify(currentContext()), false, "system");
   }
 
   function activityKey(context) {
@@ -781,7 +783,7 @@
       } else if (companion.aiAvailable !== false) {
         respondTo(prompt,{ silentUi:true });
       }
-    },6500);
+    },4500);
   }
 
   function syncRealtimeContext(force) {
@@ -790,12 +792,18 @@
     if (!force && fingerprint === companion.contextFingerprint) return;
     companion.contextFingerprint = fingerprint;
     scheduleActivityPreAnalysis(context);
-    if (companion.realtimeConnected) sendGeminiClientContent("[APP_CONTEXT] " + fingerprint,false);
+
+    if (companion.realtimeConnected) {
+      const now = Date.now();
+      if (!force && now - companion.lastContextSentAt < 800) return;
+      companion.lastContextSentAt = now;
+      sendGeminiClientContent("[APP_CONTEXT] " + fingerprint,false,"system");
+    }
   }
 
   function scheduleContextSync() {
     if (companion.contextSyncTimer) clearTimeout(companion.contextSyncTimer);
-    companion.contextSyncTimer = setTimeout(() => syncRealtimeContext(false),100);
+    companion.contextSyncTimer = setTimeout(() => syncRealtimeContext(false),260);
   }
 
   function startContextObserver() {
@@ -885,7 +893,10 @@
     }
     if (event.type === "input_audio_buffer.speech_stopped") {
       companion.realtimeSpeechActive = false;
-      setStatus("thinking","respondendo");
+      companion.realtimeSpeechStoppedAt = performance.now();
+      companion.realtimeResponseCreatedAt = 0;
+      companion.realtimeFirstResponseAt = 0;
+      setStatus("thinking","já peguei");
       return;
     }
 
@@ -902,6 +913,16 @@
     }
 
     if ((event.type === "response.output_audio_transcript.delta" || event.type === "response.audio_transcript.delta") && event.delta) {
+      if (!companion.realtimeFirstResponseAt) {
+        companion.realtimeFirstResponseAt = performance.now();
+        const latency = companion.realtimeSpeechStoppedAt
+          ? Math.round(companion.realtimeFirstResponseAt - companion.realtimeSpeechStoppedAt)
+          : 0;
+        if (latency) console.debug("[Pipo 2A] fala->primeira resposta:",latency + "ms");
+      }
+      companion.speaking = true;
+      companion.thinking = false;
+      setStatus("speaking","falando");
       companion.realtimeReply += String(event.delta);
       const text = companion.realtimeReply.trim();
       if (text) showBubble(text,true,companion.lastHeard);
@@ -911,10 +932,12 @@
     }
 
     if (event.type === "response.created") {
+      companion.realtimeResponseCreatedAt = performance.now();
       companion.thinking = true;
-      setStatus("thinking","respondendo");
+      setStatus("thinking","já respondo");
     }
     if (event.type === "response.done") {
+      companion.speaking = false;
       if (containsBlockedLanguage(companion.realtimeReply)) {
         retryRealtimeClean();
         return;
@@ -941,7 +964,8 @@
           echoCancellation:true,
           noiseSuppression:true,
           autoGainControl:true,
-          channelCount:1
+          channelCount:1,
+          latency:0.01
         }
       });
       companion.realtimeStream = stream;
@@ -958,8 +982,6 @@
 
       pc.ontrack = event => {
         if (event.streams && event.streams[0]) audio.srcObject = event.streams[0];
-        companion.speaking = true;
-        setStatus("speaking","falando");
         audio.play().catch(()=>{});
       };
 
@@ -1022,7 +1044,7 @@
       syncRealtimeContext(true);
 
       const recent = companion.history.slice(-10);
-      if (recent.length) sendGeminiClientContent("[RECENT_CONVERSATION] " + JSON.stringify(recent),false);
+      if (recent.length) sendGeminiClientContent("[RECENT_CONVERSATION] " + JSON.stringify(recent),false,"system");
       return true;
     } catch (error) {
       console.warn("Pipo Realtime indisponível:",error.message);
@@ -1085,9 +1107,29 @@
     const rec = new Recognition();
     companion.recognition = rec;
     rec.lang = recognitionLanguage();
-    rec.continuous = true;
+    rec.continuous = false;
     rec.interimResults = true;
     rec.maxAlternatives = 3;
+
+    let interimCommitTimer = null;
+    let lastInterimCandidate = "";
+    function clearInterimCommit() {
+      if (interimCommitTimer) clearTimeout(interimCommitTimer);
+      interimCommitTimer = null;
+    }
+    function scheduleInterimCommit(candidate) {
+      const value = String(candidate || "").trim();
+      if (value.length < 2) return;
+      clearInterimCommit();
+      lastInterimCandidate = value;
+      interimCommitTimer = setTimeout(() => {
+        if (!lastInterimCandidate || companion.speaking || companion.thinking || companion.recognition !== rec) return;
+        const heard = lastInterimCandidate;
+        lastInterimCandidate = "";
+        stopRecognition(true);
+        handleHeard(heard);
+      },480);
+    }
 
     rec.onstart = function () {
       companion.listening = true;
@@ -1104,6 +1146,8 @@
         const text = String((alternatives[0] && alternatives[0].transcript) || "").trim();
         if (!text) continue;
         if (event.results[i].isFinal) {
+          clearInterimCommit();
+          lastInterimCandidate = "";
           handleHeard(text);
         } else {
           interim += (interim ? " " : "") + text;
@@ -1111,6 +1155,7 @@
       }
 
       if (interim) {
+        scheduleInterimCommit(interim);
         const heardBox = document.getElementById("putiHeard");
         if (heardBox) {
           heardBox.textContent = "ouvindo: " + interim;
@@ -1120,6 +1165,7 @@
     };
 
     rec.onerror = function (event) {
+      clearInterimCommit();
       companion.listening = false;
       if (event.error === "not-allowed" || event.error === "service-not-allowed") {
         companion.wantsListening = false;
@@ -1136,9 +1182,10 @@
     };
 
     rec.onend = function () {
+      clearInterimCommit();
       companion.listening = false;
       companion.recognition = null;
-      if (companion.wantsListening) scheduleRecognitionRestart(180);
+      if (companion.wantsListening) scheduleRecognitionRestart(90);
     };
 
     try {
