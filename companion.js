@@ -1082,11 +1082,8 @@
     if (!text) return;
     if (companion.profile && companion.profile.voiceEnabled === false) return;
 
-    if (!companion.realtimeConnected && companion.aiAvailable !== false) {
-      const neural = await speakNeuralFallback(text);
-      if (neural) return;
-    }
-
+    // Quando o Realtime não está ativo, fale imediatamente com a voz local.
+    // Evita esperar rotas de TTS externas antes de responder.
     if (!window.speechSynthesis) return;
     stopRecognition(true);
     speechSynthesis.cancel();
@@ -1195,6 +1192,25 @@
     return value;
   }
 
+  function instantConversationalReply(message) {
+    const raw = String(message || "").trim();
+    const m = raw.toLowerCase().replace(/[!?.,]+$/g,"").trim();
+    if (!m) return "";
+    if (/^(oi|olá|ola|eae|e aí|ei|opa|salve|alô|alo|alô alô|alo alo|привет)$/.test(m)) {
+      return "Oi. Tô te ouvindo.";
+    }
+    if (/^(sim|aham|uhum|isso|isso mesmo|exato|beleza|blz|ok|okay)$/.test(m)) {
+      return "Tô acompanhando. Continua.";
+    }
+    if (/^(não|nao|nada a ver|errado)$/.test(m)) {
+      return "Tá. Então eu peguei errado. Continua que eu reajusto.";
+    }
+    if (/^(repete|repita|de novo)$/.test(m) && companion.lastAnswer) {
+      return companion.lastAnswer;
+    }
+    return "";
+  }
+
   async function callBrain(message) {
     if (companion.aiAvailable === false) {
       return { answer:localBrain(message), provider:"local" };
@@ -1236,7 +1252,7 @@
 
     companion.thinking = true;
     stopRecognition(true);
-    setStatus("thinking", companion.realtimeAvailable === false ? "pensando" : "pensando");
+    setStatus("thinking", "já peguei");
     setMood("focused");
 
     if (!(options && options.silentUi)) {
@@ -1250,7 +1266,8 @@
     }
 
     try {
-      const data = await callBrain(message);
+      const instant = instantConversationalReply(message);
+      const data = instant ? { answer:instant, provider:"instant" } : await callBrain(message);
       const answer = cleanCompanionSpeech(String(data && data.answer || "").trim() || localBrain(message));
 
       rememberTurn("user", message);
