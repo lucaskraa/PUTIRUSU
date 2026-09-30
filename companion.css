@@ -859,3 +859,110 @@
     height: 59px;
   }
 }
+
+
+/* === PIPO V25 — AUTONOMOUS PHYSICAL PRESENCE === */
+.puti-companion {
+  transition: left .82s cubic-bezier(.2,.8,.2,1), top .82s cubic-bezier(.2,.8,.2,1), right .82s cubic-bezier(.2,.8,.2,1), bottom .82s cubic-bezier(.2,.8,.2,1);
+}
+
+.puti-companion.is-roaming {
+  justify-items: start;
+}
+
+.puti-companion.is-travelling .puti-avatar-svg {
+  animation: pipoWalk .32s ease-in-out infinite alternate !important;
+}
+
+.puti-companion.is-travelling .puti-companion-bubble {
+  opacity: .88;
+}
+
+@keyframes pipoWalk {
+  from { transform: translateY(0) rotate(-3deg) scaleX(.98); }
+  to { transform: translateY(-7px) rotate(3deg) scaleX(1.02); }
+}
+
+.puti-pointer {
+  position: absolute;
+  z-index: -1;
+  left: 38px;
+  top: 38px;
+  width: var(--pipo-pointer-length, 54px);
+  height: 3px;
+  border-radius: 999px;
+  background: linear-gradient(90deg, rgba(79,215,255,.95), rgba(39,76,119,.35));
+  box-shadow: 0 0 9px rgba(79,215,255,.4);
+  opacity: 0;
+  transform-origin: 0 50%;
+  transform: rotate(var(--pipo-pointer-angle, 0deg)) scaleX(.2);
+  transition: opacity .2s ease, transform .28s ease;
+  pointer-events: none;
+}
+
+.puti-pointer::after {
+  content: "";
+  position: absolute;
+  right: -1px;
+  top: 50%;
+  width: 9px;
+  height: 9px;
+  border-top: 3px solid #4fd7ff;
+  border-right: 3px solid #4fd7ff;
+  transform: translateY(-50%) rotate(45deg);
+}
+
+.puti-companion.is-pointing .puti-pointer {
+  opacity: 1;
+  transform: rotate(var(--pipo-pointer-angle, 0deg)) scaleX(1);
+}
+
+.puti-companion.is-pointing .puti-avatar-svg {
+  animation: pipoPoint .72s ease-in-out infinite alternate;
+}
+
+@keyframes pipoPoint {
+  from { transform: translateY(0) rotate(-1deg); }
+  to { transform: translateY(-2px) rotate(1.8deg); }
+}
+
+.pipo-focus-target {
+  position: relative;
+  outline: 2px solid rgba(79,215,255,.56) !important;
+  outline-offset: 5px;
+  transition: outline-color .2s ease, box-shadow .2s ease;
+  box-shadow: 0 0 0 7px rgba(79,215,255,.07) !important;
+}
+
+.puti-companion[data-mood="pleased"] .puti-avatar-svg {
+  animation: pipoHappy .42s ease-in-out 3 alternate;
+}
+
+@keyframes pipoHappy {
+  from { transform: translateY(0) rotate(-2deg); }
+  to { transform: translateY(-8px) rotate(2deg); }
+}
+
+@media (max-width: 760px) {
+  .puti-companion.is-roaming {
+    left: auto !important;
+    top: auto !important;
+    right: 14px !important;
+    bottom: 14px !important;
+  }
+  .puti-pointer {
+    display: none;
+  }
+  .pipo-focus-target {
+    outline-offset: 2px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .puti-companion,
+  .puti-companion.is-travelling .puti-avatar-svg,
+  .puti-companion.is-pointing .puti-avatar-svg {
+    transition: none !important;
+    animation: none !important;
+  }
+}
