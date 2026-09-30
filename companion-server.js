@@ -1377,6 +1377,50 @@ module.exports = function installCompanion(deps) {
       }
     },1200);
 
+    setTimeout(async () => {
+      if (!process.env.GEMINI_API_KEY) return;
+      try {
+        const arbitrary = await generateGeminiLiveText({
+          guest:true,
+          message:"macaco",
+          context:{screen:"home"},
+          snapshot:{},
+          history:[],
+          progress:{},
+          user:{name:"aluno",level:"A1"}
+        });
+        console.log("PP reasoning self-test arbitrary:", String(arbitrary || "").slice(0,220));
+      } catch (error) {
+        console.warn("PP reasoning self-test arbitrary failed:",error.message);
+      }
+
+      try {
+        const activity = await generateGeminiLiveText({
+          guest:true,
+          message:"me ajuda nessa",
+          context:{
+            screen:"course",
+            lessonTitle:"Saudações",
+            stepType:"choice",
+            focusText:"привет",
+            activity:{
+              prompt:"Qual é a tradução de привет?",
+              target:"привет",
+              answer:"olá",
+              options:["obrigado","olá","tchau","por favor"]
+            }
+          },
+          snapshot:{},
+          history:[],
+          progress:{},
+          user:{name:"aluno",level:"A1"}
+        });
+        console.log("PP reasoning self-test activity:", String(activity || "").slice(0,260));
+      } catch (error) {
+        console.warn("PP reasoning self-test activity failed:",error.message);
+      }
+    },3600);
+
     setTimeout(() => {
       try {
         const address = server.address();
