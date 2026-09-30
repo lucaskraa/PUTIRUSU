@@ -43,6 +43,9 @@
     realtimeSilenceMs: 0,
     realtimeNoiseFloor: 0.004,
     realtimeLastSpeechAt: 0,
+    realtimeTurnEndedAt: 0,
+    realtimeFirstAudioAt: 0,
+    realtimeMetricsReported: false,
     realtimeInputTranscript: "",
     realtimeConnected: false,
     realtimeConnecting: false,
@@ -829,6 +832,9 @@
       });
       companion.realtimeSpeechActive = false;
       companion.realtimeSilenceMs = 0;
+      companion.realtimeTurnEndedAt = performance.now();
+      companion.realtimeFirstAudioAt = 0;
+      companion.realtimeMetricsReported = false;
       setStatus("thinking","pensando");
     }
   }
@@ -846,6 +852,19 @@
   function playGeminiPcm(base64, mimeType) {
     const ctx = ensureGeminiPlaybackContext();
     if (!ctx || !base64) return;
+
+    if (!companion.realtimeFirstAudioAt) {
+      companion.realtimeFirstAudioAt = performance.now();
+      if (companion.realtimeTurnEndedAt && !companion.realtimeMetricsReported) {
+        companion.realtimeMetricsReported = true;
+        const responseLatencyMs = Math.round(companion.realtimeFirstAudioAt - companion.realtimeTurnEndedAt);
+        reportLiveIssue("turn_latency","first_audio",{
+          responseLatencyMs,
+          transcript:String(companion.realtimeInputTranscript || "").slice(0,180),
+          sampleRate:companion.realtimeCaptureContext && companion.realtimeCaptureContext.sampleRate
+        });
+      }
+    }
 
     const rateMatch = String(mimeType || "").match(/rate=(\d+)/i);
     const sampleRate = rateMatch ? Number(rateMatch[1]) : 24000;
@@ -1158,7 +1177,9 @@
           echoCancellation:true,
           noiseSuppression:true,
           autoGainControl:true,
-          channelCount:1
+          channelCount:1,
+          sampleRate:16000,
+          sampleSize:16
         }
       });
       companion.realtimeStream = stream;
