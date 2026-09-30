@@ -55,6 +55,11 @@
     realtimeAvailable: null,
     realtimeFailures: 0,
     neuralFallbackAudio: null,
+    movementTimer: null,
+    returnHomeTimer: null,
+    roaming: false,
+    pointing: false,
+    lastPresenceMoveAt: 0,
     history: [],
     initialized: false
   };
@@ -255,6 +260,7 @@
           '<circle class="puti-cheek-dot right" cx="73" cy="47" r="2.2"/>' +
         '</svg>' +
       '</button>' +
+      '<span id="putiPointer" class="puti-pointer" aria-hidden="true"></span>' +
       '<div id="putiCompanionBubble" class="puti-companion-bubble hidden">' +
         '<div class="puti-companion-head">' +
           '<div class="puti-identity"><strong>Pipo</strong><span id="putiCompanionStatus">observando</span></div>' +
@@ -317,6 +323,143 @@
     document.getElementById("putiOnboardingSkip").addEventListener("click", function () {
       completeOnboarding(false);
     });
+  }
+
+  function visibleElement(selectors) {
+    for (const selector of selectors) {
+      const nodes = document.querySelectorAll(selector);
+      for (const node of nodes) {
+        const rect = node.getBoundingClientRect();
+        const style = getComputedStyle(node);
+        if (style.display !== "none" && style.visibility !== "hidden" && rect.width > 40 && rect.height > 24 &&
+            rect.bottom > 0 && rect.top < innerHeight && rect.right > 0 && rect.left < innerWidth) return node;
+      }
+    }
+    return null;
+  }
+
+  function currentPresenceTarget() {
+    return visibleElement([
+      "#lessonView:not(.hidden) .lesson-card",
+      "#lessonView:not(.hidden) .lesson-run-card",
+      "#lessonView:not(.hidden) [data-step]",
+      "#lessonView:not(.hidden)",
+      "#courseUnitView:not(.hidden) .lesson-row",
+      "#courseUnitView:not(.hidden)",
+      "#screen-speaking.active .panel",
+      "#screen-handwriting.active .trace-panel",
+      "#screen-audio.active .panel",
+      "#screen-review.active .panel",
+      "#screen-exam.active .panel",
+      ".continue-card",
+      ".hero-card"
+    ]);
+  }
+
+  function clearPresencePointing() {
+    const root = document.getElementById("putirusuCompanion");
+    if (!root) return;
+    root.classList.remove("is-pointing");
+    root.style.removeProperty("--pipo-pointer-angle");
+    root.style.removeProperty("--pipo-pointer-length");
+    companion.pointing = false;
+    document.querySelectorAll(".pipo-focus-target").forEach(el => el.classList.remove("pipo-focus-target"));
+  }
+
+  function returnPipoHome(delay) {
+    if (companion.returnHomeTimer) clearTimeout(companion.returnHomeTimer);
+    companion.returnHomeTimer = setTimeout(() => {
+      const root = document.getElementById("putirusuCompanion");
+      if (!root) return;
+      clearPresencePointing();
+      root.classList.add("is-travelling");
+      root.classList.remove("is-roaming");
+      root.style.removeProperty("left");
+      root.style.removeProperty("top");
+      root.style.removeProperty("right");
+      root.style.removeProperty("bottom");
+      companion.roaming = false;
+      setTimeout(() => root.classList.remove("is-travelling"),900);
+    },Math.max(0,Number(delay)||0));
+  }
+
+  function movePipoNear(target, options) {
+    if (!target || matchMedia("(prefers-reduced-motion: reduce)").matches) return false;
+    const root = document.getElementById("putirusuCompanion");
+    if (!root) return false;
+    const rect = target.getBoundingClientRect();
+    if (!rect.width || !rect.height) return false;
+
+    const opts = options || {};
+    const margin = 14;
+    const avatarW = 84;
+    const avatarH = 76;
+    const desiredLeft = rect.right + avatarW + 24 < innerWidth
+      ? rect.right + 16
+      : Math.max(margin, rect.left - avatarW - 18);
+    const desiredTop = Math.min(innerHeight - avatarH - margin, Math.max(62, rect.top + Math.min(88,rect.height * .32)));
+
+    if (companion.returnHomeTimer) clearTimeout(companion.returnHomeTimer);
+    clearPresencePointing();
+    root.classList.add("is-roaming","is-travelling");
+    root.style.right = "auto";
+    root.style.bottom = "auto";
+    root.style.left = Math.round(desiredLeft) + "px";
+    root.style.top = Math.round(desiredTop) + "px";
+    companion.roaming = true;
+    companion.lastPresenceMoveAt = Date.now();
+
+    setTimeout(() => {
+      root.classList.remove("is-travelling");
+      if (opts.point !== false) {
+        target.classList.add("pipo-focus-target");
+        const rootRect = root.getBoundingClientRect();
+        const fromX = rootRect.left + rootRect.width * .42;
+        const fromY = rootRect.top + 42;
+        const toX = desiredLeft > rect.right ? rect.right : rect.left;
+        const toY = Math.min(rect.bottom - 12, Math.max(rect.top + 12, fromY));
+        const dx = toX - fromX;
+        const dy = toY - fromY;
+        const len = Math.min(130,Math.max(28,Math.hypot(dx,dy)));
+        const angle = Math.atan2(dy,dx) * 180 / Math.PI;
+        root.style.setProperty("--pipo-pointer-angle",angle + "deg");
+        root.style.setProperty("--pipo-pointer-length",len + "px");
+        root.classList.add("is-pointing");
+        companion.pointing = true;
+      }
+    },720);
+
+    returnPipoHome(opts.stay || 5200);
+    return true;
+  }
+
+  function presenceReact(type, details) {
+    const now = Date.now();
+    if (now - companion.lastPresenceMoveAt < 2200) return;
+    const target = currentPresenceTarget();
+    if (!target) return;
+
+    if (type === "lesson_mistake") {
+      setMood("focused");
+      movePipoNear(target,{ point:true, stay:6500 });
+    } else if (type === "lesson_complete") {
+      setMood("pleased");
+      movePipoNear(target,{ point:false, stay:3600 });
+    } else if (type === "lesson_answer" && details && details.correct) {
+      setMood("pleased");
+      if (Math.random() > .45) movePipoNear(target,{ point:false, stay:2600 });
+    } else if (type === "writing_score" && Number(details && details.score) < 70) {
+      setMood("focused");
+      movePipoNear(target,{ point:true, stay:5200 });
+    }
+  }
+
+  function maybeWanderPipo() {
+    if (companion.speaking || companion.thinking || companion.realtimeSpeechActive || companion.roaming) return;
+    if (Date.now() - companion.lastUserAt < 7000) return;
+    const target = currentPresenceTarget();
+    if (!target) return;
+    if (Math.random() < .34) movePipoNear(target,{ point:Math.random() > .35, stay:3000 + Math.random()*2600 });
   }
 
   function setMood(mood) {
@@ -520,6 +663,7 @@
 
   function pushRealtimeAppEvent(type, details) {
     companion.lastAppEvent = { type, details:details || {}, at:new Date().toISOString() };
+    presenceReact(type,details || {});
     maybeReactAutonomously(type,details || {});
     if (!companion.realtimeConnected) return;
     sendGeminiClientContent("[APP_EVENT] " + JSON.stringify(companion.lastAppEvent), false);
@@ -679,6 +823,8 @@
     if (event.type === "input_audio_buffer.speech_started") {
       companion.realtimeSpeechActive = true;
       companion.lastUserAt = Date.now();
+      if (window.speechSynthesis && speechSynthesis.speaking) speechSynthesis.cancel();
+      companion.speaking = false;
       setStatus("listening","te ouvindo");
       return;
     }
@@ -1316,8 +1462,9 @@
           : ["observando","acordada","de olho","calculando coisas desnecessárias"];
         if (status) status.textContent = labels[Math.floor(Math.random() * labels.length)];
         setMood(Math.random() > .72 ? "amused" : "curious");
+        maybeWanderPipo();
       }
-      companion.idleTimer = setTimeout(pulse, 18000 + Math.random() * 16000);
+      companion.idleTimer = setTimeout(pulse, 11000 + Math.random() * 9000);
     }, 14000);
   }
 
@@ -1707,7 +1854,9 @@
     ask:message => respondTo(message, { heard:message }),
     listen:() => enableAmbientListening(true),
     silence:disableAmbientListening,
-    context:currentContext
+    context:currentContext,
+    point:() => movePipoNear(currentPresenceTarget(),{ point:true, stay:5200 }),
+    home:() => returnPipoHome(0)
   };
   window.PUTIRUSU_COMPANION = ppApi;
   window.PIPO_COMPANION = ppApi;
