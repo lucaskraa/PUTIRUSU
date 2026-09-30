@@ -345,6 +345,93 @@ module.exports = function installCompanion(deps) {
     throw lastError || new Error("Activity brief unavailable");
   }
 
+  async function generateGeminiLiveText(payload) {
+    const apiKey = process.env.GEMINI_API_KEY;
+    if (!apiKey) return null;
+    const { WebSocket } = require("ws");
+    const model = process.env.GEMINI_LIVE_MODEL || "gemini-3.8-live";
+    const url = "wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent";
+
+    return await new Promise((resolve,reject) => {
+      const ws = new WebSocket(url,{
+        perMessageDeflate:false,
+        handshakeTimeout:7000,
+        headers:{ "x-goog-api-key":apiKey }
+      });
+      let textOut = "";
+      let settled = false;
+      const timer = setTimeout(() => finish(new Error("Gemini Live text timeout")),7000);
+
+      function finish(error,value) {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        try { ws.close(); } catch (_) {}
+        if (error) reject(error);
+        else resolve(String(value || "").trim() || null);
+      }
+
+      ws.on("open",() => {
+        ws.send(JSON.stringify({
+          setup:{
+            model:"models/" + model,
+            generationConfig:{
+              responseModalities:["TEXT"],
+              temperature:0.8
+            },
+            systemInstruction:{
+              parts:[{text:personalityInstructions()}]
+            }
+          }
+        }));
+      });
+
+      ws.on("message",data => {
+        let event;
+        try { event = JSON.parse(Buffer.from(data).toString("utf8")); }
+        catch (_) { return; }
+
+        if (event.error) {
+          finish(new Error("Gemini Live text error: " + JSON.stringify(event.error).slice(0,260)));
+          return;
+        }
+
+        if (event.setupComplete) {
+          ws.send(JSON.stringify({
+            clientContent:{
+              turns:[{
+                role:"user",
+                parts:[{text:buildBrainInput(payload)}]
+              }],
+              turnComplete:true
+            }
+          }));
+          return;
+        }
+
+        const content = event.serverContent;
+        if (!content) return;
+        const parts = content.modelTurn && Array.isArray(content.modelTurn.parts)
+          ? content.modelTurn.parts
+          : [];
+        for (const part of parts) {
+          if (part && part.text) textOut += part.text;
+        }
+        if (content.outputTranscription && content.outputTranscription.text) {
+          textOut += content.outputTranscription.text;
+        }
+        if (content.turnComplete || content.generationComplete) {
+          if (textOut.trim()) finish(null,textOut);
+        }
+      });
+
+      ws.on("error",error => finish(error));
+      ws.on("close",() => {
+        if (!settled && textOut.trim()) finish(null,textOut);
+      });
+    });
+  }
+
   async function generateOpenAIAnswer(payload) {
     const apiKey = process.env.OPENAI_API_KEY;
     if (!apiKey) return null;
@@ -370,6 +457,13 @@ module.exports = function installCompanion(deps) {
 
   async function generateAnswer(payload) {
     if (process.env.GEMINI_API_KEY) {
+      try {
+        const liveAnswer = await generateGeminiLiveText(payload);
+        if (liveAnswer) return liveAnswer;
+      } catch (error) {
+        console.warn("Falha Gemini Live texto:", error.message);
+      }
+
       try {
         const answer = await generateGeminiAnswer(payload);
         if (answer) return answer;
@@ -1128,10 +1222,15 @@ module.exports = function installCompanion(deps) {
         }
       });
 
-      upstream.on("message", (data, isBinary) => {
+      upstream.on("message", (data) => {
         if (client.readyState !== WebSocket.OPEN) return;
-        try { client.send(data, { binary:isBinary }); }
-        catch (_) { closeBoth(1011,"client send failed"); }
+        try {
+          const text = Buffer.isBuffer(data) ? data.toString("utf8") : String(data);
+          if (text.includes("\"setupComplete\"")) console.log("PP browser Live proxy: setupComplete");
+          client.send(text,{binary:false});
+        } catch (_) {
+          closeBoth(1011,"client send failed");
+        }
       });
 
       upstream.on("error", error => {
