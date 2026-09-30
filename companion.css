@@ -1367,3 +1367,37 @@
     height: 91px;
   }
 }
+
+
+/* === PIPO V28 — FINAL COMPACT CUTE SCALE === */
+.puti-companion-orb {
+  width: 62px;
+  height: 94px;
+}
+
+.puti-avatar-svg {
+  width: 62px;
+  height: 91px;
+  filter: drop-shadow(0 6px 8px rgba(23,35,48,.18));
+}
+
+.puti-pointer {
+  left: 31px;
+  top: 57px;
+}
+
+.puti-companion-bubble {
+  width: min(330px, calc(100vw - 28px));
+}
+
+@media (max-width: 640px) {
+  .puti-companion-orb {
+    width: 56px;
+    height: 84px;
+  }
+
+  .puti-avatar-svg {
+    width: 56px;
+    height: 82px;
+  }
+}
