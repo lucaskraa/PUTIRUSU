@@ -39,6 +39,10 @@
     realtimeOutputTime: 0,
     realtimeOutputSources: new Set(),
     realtimeMicEnabled: true,
+    realtimeSpeechActive: false,
+    realtimeSilenceMs: 0,
+    realtimeNoiseFloor: 0.004,
+    realtimeLastSpeechAt: 0,
     realtimeInputTranscript: "",
     realtimeConnected: false,
     realtimeConnecting: false,
@@ -427,6 +431,7 @@
     companion.realtimeConnected = false;
     companion.realtimeConnecting = false;
     companion.realtimeMicEnabled = true;
+    resetLocalVad();
     stopGeminiPlayback();
 
     if (companion.realtimeWs) {
@@ -702,6 +707,7 @@
     if (!companion.realtimeConnected || !text) return false;
     const payload =
       "[APP_CONTEXT] " + JSON.stringify(currentContext()) +
+      "\n[INSTRUCAO_DE_TURNO] Responda ao conteúdo real do que o aluno disse, mesmo que seja só uma palavra. Resolva referências como 'essa', 'isso' e 'aqui' pela tela atual." +
       "\n[FALA_USUARIO] " + String(text).slice(0,1200);
     return sendGeminiClientContent(payload, true);
   }
@@ -768,6 +774,63 @@
       view.setInt16(i*2, v < 0 ? v * 32768 : v * 32767, true);
     }
     return bytesToBase64(bytes);
+  }
+
+  function audioRms(input) {
+    if (!input || !input.length) return 0;
+    let sum = 0;
+    for (let i=0;i<input.length;i++) {
+      const value = input[i];
+      sum += value * value;
+    }
+    return Math.sqrt(sum / input.length);
+  }
+
+  function resetLocalVad() {
+    companion.realtimeSpeechActive = false;
+    companion.realtimeSilenceMs = 0;
+    companion.realtimeLastSpeechAt = 0;
+  }
+
+  function updateLocalVad(input, sampleRate) {
+    if (!input || !input.length || !sampleRate) return;
+    const rms = audioRms(input);
+    const frameMs = (input.length / sampleRate) * 1000;
+
+    if (!companion.realtimeSpeechActive) {
+      companion.realtimeNoiseFloor =
+        Math.max(0.0015, companion.realtimeNoiseFloor * 0.97 + Math.min(rms,0.03) * 0.03);
+    }
+
+    const threshold = Math.max(0.008, companion.realtimeNoiseFloor * 2.8);
+    const speakingNow = rms >= threshold;
+
+    if (speakingNow) {
+      if (!companion.realtimeSpeechActive) {
+        companion.realtimeSpeechActive = true;
+        companion.realtimeSilenceMs = 0;
+        setStatus("listening","te ouvindo");
+      }
+      companion.realtimeLastSpeechAt = performance.now();
+      companion.realtimeSilenceMs = 0;
+      return;
+    }
+
+    if (!companion.realtimeSpeechActive) return;
+
+    companion.realtimeSilenceMs += frameMs;
+    if (companion.realtimeSilenceMs >= 320) {
+      // Hybrid VAD: Gemini still detects speech start; the browser closes the
+      // turn as soon as local silence is clear instead of waiting server-side.
+      sendRealtimeEvent({
+        realtimeInput:{
+          audioStreamEnd:true
+        }
+      });
+      companion.realtimeSpeechActive = false;
+      companion.realtimeSilenceMs = 0;
+      setStatus("thinking","pensando");
+    }
   }
 
   function ensureGeminiPlaybackContext() {
@@ -857,8 +920,16 @@
       companion.realtimeConnected = true;
       companion.realtimeConnecting = false;
       companion.realtimeFailures = 0;
-      setStatus("listening","ouvindo");
+      setStatus("listening","ao vivo");
       setMood("curious");
+
+      const recent = companion.history.slice(-12);
+      if (recent.length) {
+        sendGeminiClientContent(
+          "[RECENT_CONVERSATION] " + JSON.stringify(recent),
+          false
+        );
+      }
       syncRealtimeContext(true);
       return;
     }
@@ -878,6 +949,7 @@
     if (!content) return;
 
     if (content.interrupted) {
+      resetLocalVad();
       stopGeminiPlayback();
       companion.realtimeReply = "";
       companion.realtimeCleanRetry = false;
@@ -897,7 +969,7 @@
           heardBox.textContent = "você: " + heard;
           heardBox.classList.remove("hidden");
         }
-        setStatus("thinking","entendi");
+        setStatus("listening","te ouvindo");
       }
     }
 
@@ -936,22 +1008,32 @@
     const AudioContext = window.AudioContext || window.webkitAudioContext;
     if (!AudioContext) throw new Error("Web Audio indisponível.");
 
-    const ctx = new AudioContext();
+    let ctx;
+    try {
+      ctx = new AudioContext({ sampleRate:16000, latencyHint:"interactive" });
+    } catch (_) {
+      ctx = new AudioContext({ latencyHint:"interactive" });
+    }
+
     companion.realtimeCaptureContext = ctx;
+    resetLocalVad();
     if (ctx.state === "suspended") {
       try { await ctx.resume(); } catch (_) {}
     }
 
     const source = ctx.createMediaStreamSource(stream);
     companion.realtimeCaptureSource = source;
-    const processor = ctx.createScriptProcessor(2048,1,1);
+    const processor = ctx.createScriptProcessor(1024,1,1);
     companion.realtimeProcessor = processor;
 
     processor.onaudioprocess = event => {
       if (!companion.realtimeConnected || !companion.realtimeMicEnabled) return;
       const ws = companion.realtimeWs;
       if (!ws || ws.readyState !== WebSocket.OPEN) return;
+
       const input = event.inputBuffer.getChannelData(0);
+      updateLocalVad(input,ctx.sampleRate);
+
       const data = float32ToPcm16Base64(input,ctx.sampleRate);
       if (!data) return;
       sendRealtimeEvent({
