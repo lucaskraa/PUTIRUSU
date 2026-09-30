@@ -84,7 +84,7 @@ module.exports = function installCompanion(deps) {
     }
 
     return {
-      recentActivity: events.slice(-22).map(event => ({
+      recentActivity: events.slice(-8).map(event => ({
         type: event.type,
         details: event.details,
         createdAt: event.createdAt
@@ -140,7 +140,7 @@ module.exports = function installCompanion(deps) {
       "IDENTIDADE: Você é Pipo, uma entidade digital original que vive dentro do aplicativo de russo PUTIRUSU.",
       "PRESENÇA: aja como alguém realmente presente na sala, não como atendimento ao cliente. Converse naturalmente, reaja ao que acabou de ouvir, faça perguntas curtas quando fizer sentido e mantenha continuidade mesmo quando o assunto não tiver relação com russo.",
       "PERSONALIDADE: inteligente, muito rápida, observadora e inicialmente contida, mas com curiosidade quase infantil quando algo chama atenção. Seja literal de um jeito às vezes engraçado, faça observações inesperadas e demonstre que está aprendendo o ambiente em tempo real. Pode provocar de modo amistoso, mas nunca humilhe.",
-      "RITMO: reaja imediatamente. Em conversa casual, normalmente 1 frase curta; 2 se houver algo interessante. Comece pela resposta, não por um prefácio. Não repita a pergunta. Se precisar pensar mais em algo complexo, dê uma reação curta primeiro e depois complete.",
+      "RITMO: reaja imediatamente. Em conversa casual, normalmente 1 frase curta; 2 se houver algo interessante. Comece pela resposta, não por um prefácio. Não repita a pergunta. Para falas simples, responda direto sem análise longa. Se algo realmente exigir raciocínio, dê primeiro uma reação curta útil e depois complete.",
       "VOZ: soe jovem, clara, ágil e levemente sintética, mas emocionalmente viva. Fale com precisão e curiosidade, alternando momentos calmos com pequenas explosões de entusiasmo. Use pausas curtas naturais, não arraste palavras e não faça voz de atendimento corporativo.",
       "PORTUGUÊS: português brasileiro natural, claro e sem sotaque artificial.",
       "RUSSO: quando falar russo, use pronúncia russa nativa clara, firme e um pouco mais marcada, como uma gravação educacional clássica; nunca caricature.",
@@ -521,7 +521,7 @@ module.exports = function installCompanion(deps) {
     if (!message) return res.status(400).json({ error: "Fala vazia." });
     const context = cleanValue(req.body.context || {});
     const clientHistory = Array.isArray(req.body.history)
-      ? cleanValue(req.body.history).slice(-14)
+      ? cleanValue(req.body.history).slice(-8)
       : [];
 
     let answer = null;
@@ -532,7 +532,7 @@ module.exports = function installCompanion(deps) {
         message,
         context,
         snapshot: {},
-        history: clientHistory,
+        history: clientHistory.slice(-8),
         progress: {},
         user: { name: "aluno", level: context.level || "A1" }
       });
@@ -573,10 +573,10 @@ module.exports = function installCompanion(deps) {
       : { recentActivity: [], repeatedDifficulties: [], weakWritingLetters: [] };
 
     const storedHistory = profile.memoryEnabled !== false && profile.storeTranscripts !== false
-      ? db.chats.filter(item => item.userId === req.userId && item.scope === "companion").slice(-12)
+      ? db.chats.filter(item => item.userId === req.userId && item.scope === "companion").slice(-6)
           .map(item => ({ message: item.message, answer: item.answer, createdAt: item.createdAt }))
       : [];
-    const history = [...storedHistory, ...clientHistory].slice(-18);
+    const history = [...storedHistory, ...clientHistory].slice(-10);
 
     let answer = null;
     let provider = "local";
@@ -591,8 +591,7 @@ module.exports = function installCompanion(deps) {
         progress: {
           xp: progress.xp || 0,
           streak: progress.streak || 0,
-          lessons: progress.lessons || 0,
-          letters: progress.letters || {}
+          lessons: progress.lessons || 0
         },
         user: {
           name: user.name,
