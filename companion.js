@@ -498,6 +498,19 @@
     }
   }
 
+  async function realtimeMessageText(data) {
+    if (typeof data === "string") return data;
+    if (data instanceof Blob) return await data.text();
+    if (data instanceof ArrayBuffer) return new TextDecoder("utf-8").decode(new Uint8Array(data));
+    if (ArrayBuffer.isView(data)) return new TextDecoder("utf-8").decode(data);
+    return String(data == null ? "" : data);
+  }
+
+  async function parseRealtimeMessage(data) {
+    const text = await realtimeMessageText(data);
+    return JSON.parse(text);
+  }
+
   function sendGeminiClientContent(text, turnComplete) {
     const value = String(text || "").trim();
     if (!value) return false;
@@ -983,6 +996,7 @@
         : "wss://putirusu-dev.onrender.com/api/ai/live/socket";
 
       const ws = new WebSocket(endpoint);
+      ws.binaryType = "arraybuffer";
       companion.realtimeWs = ws;
       companion.realtimeInputTranscript = "";
       companion.realtimeReply = "";
@@ -998,9 +1012,9 @@
           // O servidor configura o Gemini Live. O navegador nunca recebe a chave permanente.
         };
 
-        ws.onmessage = message => {
+        ws.onmessage = async message => {
           try {
-            const event = JSON.parse(message.data);
+            const event = await parseRealtimeMessage(message.data);
             handleRealtimeEvent(event);
             if (event && event.error) {
               clearTimeout(timeout);
@@ -1012,7 +1026,9 @@
               resolve();
             }
           } catch (error) {
-            reportLiveIssue("message_parse",error);
+            reportLiveIssue("message_parse",error,{
+              dataType:Object.prototype.toString.call(message && message.data)
+            });
           }
         };
 
@@ -1071,7 +1087,7 @@
       companion.realtimeConnecting = false;
       companion.realtimeFailures = 0;
       companion.realtimeAvailable = true;
-      setStatus("listening","ouvindo");
+      setStatus("listening","ao vivo");
       syncRealtimeContext(true);
       return true;
     } catch (error) {
@@ -1420,8 +1436,8 @@
     }
 
     return focus
-      ? "Tô vendo “" + focus + "”. Se você está falando dessa atividade, me diz só onde travou e eu pego daqui."
-      : "A conexão neural oscilou agora. Repete a última ideia e eu continuo daqui.";
+      ? "Tô vendo “" + focus + "”. Posso explicar isso pelo que está na tela."
+      : "Tô aqui. A conexão principal oscilou, mas eu ainda consigo continuar a conversa.";
   }
 
   function cleanCompanionSpeech(text) {
