@@ -57,6 +57,7 @@
     neuralFallbackAudio: null,
     movementTimer: null,
     returnHomeTimer: null,
+    gestureTimer: null,
     roaming: false,
     pointing: false,
     lastPresenceMoveAt: 0,
@@ -244,20 +245,52 @@
     root.innerHTML =
       '<button id="putiCompanionOrb" class="puti-companion-orb" type="button" aria-label="Abrir Pipo">' +
         '<span class="puti-orb-ring"></span>' +
-        '<svg class="puti-avatar-svg" viewBox="0 0 96 82" aria-hidden="true">' +
-          '<path class="puti-helmet-shadow" d="M13 29 25 13 43 7 48 2l5 5 18 6 12 16-4 31-14 15H31L17 60Z"/>' +
-          '<path class="puti-helmet" d="M16 30 27 16 43 11 48 5l5 6 16 5 11 14-4 28-13 13H33L20 58Z"/>' +
-          '<path class="puti-crest" d="M45 11 48 3l5 8 2 43h-12Z"/>' +
-          '<path class="puti-brow left" d="M24 28 42 24l-3 9-14 3Z"/>' +
-          '<path class="puti-brow right" d="m72 28-18-4 3 9 14 3Z"/>' +
-          '<path class="puti-eye left" d="M26 31 41 28l-3 9-11 2Z"/>' +
-          '<path class="puti-eye right" d="m70 31-15-3 3 9 11 2Z"/>' +
-          '<path class="puti-cheek left" d="m19 41 18 2-3 8-13-1Z"/>' +
-          '<path class="puti-cheek right" d="m77 41-18 2 3 8 13-1Z"/>' +
-          '<path class="puti-grill-shell" d="M29 49h38l-3 15-10 6H42l-10-6Z"/>' +
-          '<g class="puti-grill-lines"><path d="M35 52v10M41 51v14M47 51v15M53 51v15M59 51v14M65 52v10"/></g>' +
-          '<circle class="puti-cheek-dot left" cx="23" cy="47" r="2.2"/>' +
-          '<circle class="puti-cheek-dot right" cx="73" cy="47" r="2.2"/>' +
+        '<svg class="puti-avatar-svg" viewBox="0 0 96 142" aria-hidden="true">' +
+          '<g class="pipo-head">' +
+            '<path class="puti-helmet-shadow" d="M13 29 25 13 43 7 48 2l5 5 18 6 12 16-4 31-14 15H31L17 60Z"/>' +
+            '<path class="puti-helmet" d="M16 30 27 16 43 11 48 5l5 6 16 5 11 14-4 28-13 13H33L20 58Z"/>' +
+            '<path class="puti-crest" d="M45 11 48 3l5 8 2 43h-12Z"/>' +
+            '<path class="puti-brow left" d="M24 28 42 24l-3 9-14 3Z"/>' +
+            '<path class="puti-brow right" d="m72 28-18-4 3 9 14 3Z"/>' +
+            '<path class="puti-eye left" d="M26 31 41 28l-3 9-11 2Z"/>' +
+            '<path class="puti-eye right" d="m70 31-15-3 3 9 11 2Z"/>' +
+            '<path class="puti-cheek left" d="m19 41 18 2-3 8-13-1Z"/>' +
+            '<path class="puti-cheek right" d="m77 41-18 2 3 8 13-1Z"/>' +
+            '<path class="puti-grill-shell" d="M29 49h38l-3 15-10 6H42l-10-6Z"/>' +
+            '<g class="puti-grill-lines"><path d="M35 52v10M41 51v14M47 51v15M53 51v15M59 51v14M65 52v10"/></g>' +
+            '<circle class="puti-cheek-dot left" cx="23" cy="47" r="2.2"/>' +
+            '<circle class="puti-cheek-dot right" cx="73" cy="47" r="2.2"/>' +
+          '</g>' +
+          '<g class="pipo-body">' +
+            '<path class="pipo-neck" d="M37 68h22l3 10-7 8H41l-7-8Z"/>' +
+            '<path class="pipo-torso-shadow" d="M29 80 39 74h18l10 6 7 30-12 15H34l-12-15Z"/>' +
+            '<path class="pipo-torso" d="M31 78 40 73h16l9 5 6 29-11 14H36l-11-14Z"/>' +
+            '<path class="pipo-chest" d="M38 83h20l5 9-3 17H36l-3-17Z"/>' +
+            '<path class="pipo-core" d="M43 88h10l4 6-3 8H42l-3-8Z"/>' +
+            '<path class="pipo-waist" d="M36 112h24l-2 9H38Z"/>' +
+            '<g class="pipo-arm left">' +
+              '<circle class="pipo-joint" cx="27" cy="84" r="5"/>' +
+              '<path class="pipo-upper-arm" d="M26 82 16 88l-4 15 7 2 7-12 5-5Z"/>' +
+              '<path class="pipo-forearm" d="M14 101 7 111l5 5 10-9Z"/>' +
+              '<path class="pipo-hand" d="M8 109 3 113l4 7 7-4 1-5Z"/>' +
+            '</g>' +
+            '<g class="pipo-arm right">' +
+              '<circle class="pipo-joint" cx="69" cy="84" r="5"/>' +
+              '<path class="pipo-upper-arm" d="M70 82 80 88l4 15-7 2-7-12-5-5Z"/>' +
+              '<path class="pipo-forearm" d="M82 101 89 111l-5 5-10-9Z"/>' +
+              '<path class="pipo-hand" d="M88 109 93 113l-4 7-7-4-1-5Z"/>' +
+            '</g>' +
+            '<g class="pipo-leg left">' +
+              '<circle class="pipo-hip" cx="41" cy="120" r="4"/>' +
+              '<path class="pipo-shin" d="M37 121h9l-1 13-9 1Z"/>' +
+              '<path class="pipo-foot" d="M35 133h12l2 5H33Z"/>' +
+            '</g>' +
+            '<g class="pipo-leg right">' +
+              '<circle class="pipo-hip" cx="55" cy="120" r="4"/>' +
+              '<path class="pipo-shin" d="M51 121h9l1 14-9-1Z"/>' +
+              '<path class="pipo-foot" d="M49 133h12l2 5H47Z"/>' +
+            '</g>' +
+          '</g>' +
         '</svg>' +
       '</button>' +
       '<span id="putiPointer" class="puti-pointer" aria-hidden="true"></span>' +
@@ -302,6 +335,7 @@
 
     document.getElementById("putiCompanionOrb").addEventListener("click", function () {
       document.getElementById("putiCompanionBubble").classList.toggle("hidden");
+      pipoGesture("wave",1200);
     });
     document.getElementById("putiCompanionClose").addEventListener("click", function () {
       document.getElementById("putiCompanionBubble").classList.add("hidden");
@@ -323,6 +357,21 @@
     document.getElementById("putiOnboardingSkip").addEventListener("click", function () {
       completeOnboarding(false);
     });
+  }
+
+  function pipoGesture(name, duration) {
+    const root = document.getElementById("putirusuCompanion");
+    if (!root) return;
+    const classes = ["is-wave","is-cheer","is-nod","is-curious"];
+    classes.forEach(cls => root.classList.remove(cls));
+    if (companion.gestureTimer) clearTimeout(companion.gestureTimer);
+    if (!name) return;
+    const cls = "is-" + name;
+    root.classList.add(cls);
+    companion.gestureTimer = setTimeout(() => {
+      root.classList.remove(cls);
+      companion.gestureTimer = null;
+    },Math.max(500,Number(duration)||1400));
   }
 
   function visibleElement(selectors) {
@@ -360,6 +409,7 @@
     const root = document.getElementById("putirusuCompanion");
     if (!root) return;
     root.classList.remove("is-pointing");
+    delete root.dataset.pointSide;
     root.style.removeProperty("--pipo-pointer-angle");
     root.style.removeProperty("--pipo-pointer-length");
     companion.pointing = false;
@@ -392,8 +442,8 @@
 
     const opts = options || {};
     const margin = 14;
-    const avatarW = 84;
-    const avatarH = 76;
+    const avatarW = 92;
+    const avatarH = 146;
     const desiredLeft = rect.right + avatarW + 24 < innerWidth
       ? rect.right + 16
       : Math.max(margin, rect.left - avatarW - 18);
@@ -424,7 +474,9 @@
         const angle = Math.atan2(dy,dx) * 180 / Math.PI;
         root.style.setProperty("--pipo-pointer-angle",angle + "deg");
         root.style.setProperty("--pipo-pointer-length",len + "px");
+        root.dataset.pointSide = desiredLeft > rect.right ? "left" : "right";
         root.classList.add("is-pointing");
+        pipoGesture("nod",900);
         companion.pointing = true;
       }
     },720);
@@ -441,12 +493,15 @@
 
     if (type === "lesson_mistake") {
       setMood("focused");
+      pipoGesture("curious",1300);
       movePipoNear(target,{ point:true, stay:6500 });
     } else if (type === "lesson_complete") {
       setMood("pleased");
+      pipoGesture("cheer",1700);
       movePipoNear(target,{ point:false, stay:3600 });
     } else if (type === "lesson_answer" && details && details.correct) {
       setMood("pleased");
+      pipoGesture("cheer",1100);
       if (Math.random() > .45) movePipoNear(target,{ point:false, stay:2600 });
     } else if (type === "writing_score" && Number(details && details.score) < 70) {
       setMood("focused");
@@ -1856,6 +1911,8 @@
     silence:disableAmbientListening,
     context:currentContext,
     point:() => movePipoNear(currentPresenceTarget(),{ point:true, stay:5200 }),
+    wave:() => pipoGesture("wave",1200),
+    cheer:() => pipoGesture("cheer",1400),
     home:() => returnPipoHome(0)
   };
   window.PUTIRUSU_COMPANION = ppApi;
