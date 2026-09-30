@@ -464,8 +464,8 @@
       if (opts.point !== false) {
         target.classList.add("pipo-focus-target");
         const rootRect = root.getBoundingClientRect();
-        const fromX = rootRect.left + rootRect.width * .42;
-        const fromY = rootRect.top + 42;
+        const fromX = rootRect.left + rootRect.width * .5;
+        const fromY = rootRect.top + 84;
         const toX = desiredLeft > rect.right ? rect.right : rect.left;
         const toY = Math.min(rect.bottom - 12, Math.max(rect.top + 12, fromY));
         const dx = toX - fromX;
@@ -1545,6 +1545,7 @@
     const intro = (name ? name + ". " : "") + "Eu sou o Pipo. Eu fico por aqui, observo o que você está fazendo e aprendo o seu jeito de estudar. Pode falar comigo normal.";
 
     companion.lastAnswer = intro;
+    pipoGesture("wave",1400);
     showBubble(intro, true);
 
     if (withVoice) {
