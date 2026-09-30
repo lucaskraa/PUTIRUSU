@@ -321,7 +321,7 @@ module.exports = function installCompanion(deps) {
     return bucket.count <= 30;
   }
 
-  async function proxyRealtimeSession(req, res, user, snapshot, history, safetyId) {
+  async function proxyRealtimeSession(req, res, user, snapshot, safetyId) {
     const apiKey = process.env.OPENAI_API_KEY;
     if (!apiKey) return res.status(503).json({ error: "Voz neural não configurada no servidor." });
 
@@ -347,8 +347,8 @@ module.exports = function installCompanion(deps) {
           }
         },
         output: {
-          voice: process.env.OPENAI_REALTIME_VOICE || "cedar",
-          speed: Number(process.env.OPENAI_REALTIME_SPEED || 1.02)
+          voice: process.env.PIPO_REALTIME_VOICE || "cedar",
+          speed: Number(process.env.PIPO_REALTIME_SPEED || 1.02)
         }
       },
       reasoning: { effort: "minimal" },
@@ -393,18 +393,9 @@ module.exports = function installCompanion(deps) {
     const snapshot = profile.memoryEnabled !== false
       ? learningSnapshot(db, req.userId)
       : { recentActivity: [], repeatedDifficulties: [], weakWritingLetters: [] };
-    const recentHistory = profile.memoryEnabled !== false && profile.storeTranscripts !== false
-      ? db.chats.filter(item => item.userId === req.userId && (item.scope === "companion" || item.scope === "realtime"))
-          .slice(-6)
-          .map(item => ({
-            role:item.role || (item.message ? "user" : "assistant"),
-            message:item.message || item.text || "",
-            answer:item.answer || ""
-          }))
-      : [];
     const safetyId = crypto.createHash("sha256").update(String(req.userId)).digest("hex").slice(0, 48);
     writeDatabase(db);
-    return proxyRealtimeSession(req, res, user, snapshot, recentHistory, safetyId);
+    return proxyRealtimeSession(req, res, user, snapshot, safetyId);
   });
 
   app.post("/api/ai/realtime/guest-session", sdpParser, async (req, res) => {
@@ -417,7 +408,6 @@ module.exports = function installCompanion(deps) {
       res,
       { name: "aluno", level: "A1" },
       { recentActivity: [], repeatedDifficulties: [], weakWritingLetters: [] },
-      [],
       safetyId
     );
   });
@@ -456,7 +446,11 @@ module.exports = function installCompanion(deps) {
       openaiConfigured: Boolean(process.env.OPENAI_API_KEY),
       responseModel: process.env.OPENAI_MODEL || "gpt-5.6-luna",
       realtimeModel: process.env.OPENAI_REALTIME_MODEL || "gpt-realtime-2.1",
-      realtimeVoice: process.env.OPENAI_REALTIME_VOICE || "marin",
+      realtimeVoice: process.env.PIPO_REALTIME_VOICE || "cedar",
+      realtimeSpeed: Number(process.env.PIPO_REALTIME_SPEED || 1.02),
+      realtimeReasoning: "minimal",
+      realtimeVad: "semantic_vad/high",
+      pipoBuild: "2A-polish-1",
       transcriptionModel: process.env.OPENAI_TRANSCRIBE_MODEL || "gpt-4o-transcribe"
     });
   });
