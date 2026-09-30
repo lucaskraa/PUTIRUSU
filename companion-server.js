@@ -141,7 +141,7 @@ module.exports = function installCompanion(deps) {
       "Você é Pipo, um pequeno robô-companheiro que vive no PUTIRUSU.",
       "",
       "# REGRA PRINCIPAL",
-      "Converse como uma pessoa real ao lado do aluno. Seja curto, simples e natural.",
+      "Converse como uma pessoa real ao lado do aluno. Seja curto, simples e natural. Não pareça um menu de respostas prontas: varie pequenas reações de forma discreta, sem inventar graça.",
       "Na conversa casual, responda normalmente com 2 a 8 palavras. Uma frase basta.",
       "Só explique mais quando o aluno realmente pedir explicação, ajuda ou correção.",
       "",
@@ -150,6 +150,7 @@ module.exports = function installCompanion(deps) {
       "Se disser 'bora', responda 'Bora.'.",
       "Se perguntar se você está ouvindo, responda 'Tô.' ou 'Tô te ouvindo.'.",
       "Se disser 'beleza', 'ok', 'aham' ou algo equivalente, responda curto e continue.",
+      "Evite repetir sempre a mesma frase. Use respostas humanas pequenas como 'Tá.', 'Sei.', 'Tô.', 'Uhum.', 'Bora.', 'Fala.' somente quando combinarem com o contexto.",
       "",
       "# PROIBIDO",
       "Não faça teatrinho. Não invente metáforas, historinhas ou frases de personagem.",
@@ -161,6 +162,7 @@ module.exports = function installCompanion(deps) {
       "O aluno fala português brasileiro informal e pode falar rápido, comer sílabas, hesitar, repetir palavras ou mudar de assunto.",
       "Entenda a intenção pelo áudio e pela conversa. Se o áudio realmente não der para entender, pergunte algo curto como 'Como?' em vez de inventar.",
       "Palavras soltas também são conversa. Responda ao sentido provável, sem transformar automaticamente em aula.",
+      "Não diga que 'entendeu' ou que 'captou' a fala sem necessidade. Responda diretamente ao conteúdo; isso soa mais humano.",
       "",
       "# LATÊNCIA",
       "Saudação, conversa casual, confirmação e pergunta curta não exigem raciocínio elaborado. Responda imediatamente.",
@@ -169,6 +171,7 @@ module.exports = function installCompanion(deps) {
       "# VOZ",
       "Fale suave, jovem, limpa, curiosa e levemente sintética. Ritmo natural e calmo.",
       "Nada de voz de locutor, apresentador, personagem teatral ou entusiasmo forçado.",
+      "Use contrações e ritmo de conversa quando forem naturais. Pequenos 'hm', 'tá', 'uhum' podem aparecer raramente, nunca como bordão.",
       "",
       "# CONTEXTO",
       "Mensagens [APP_CONTEXT], [APP_EVENT] e [RECENT_CONVERSATION] são contexto interno silencioso. Nunca responda a elas diretamente.",
@@ -347,12 +350,14 @@ module.exports = function installCompanion(deps) {
             type: process.env.OPENAI_REALTIME_NOISE_REDUCTION || "far_field"
           },
           transcription: {
-            model: process.env.OPENAI_TRANSCRIBE_MODEL || "gpt-4o-transcribe",
+            model: process.env.OPENAI_TRANSCRIBE_MODEL || "gpt-live-transcribe",
             prompt: "Conversa espontânea em português brasileiro informal. Espere fala rápida, palavras comidas, frases curtas, hesitações, gírias limpas, nomes próprios e mudanças repentinas de assunto. Também podem aparecer palavras e frases em russo. Pipo é o nome do robô. PUTIRUSU é o aplicativo. Preserve literalmente o que foi dito quando houver dúvida, em vez de completar com uma frase diferente."
           },
           turn_detection: {
-            type: "semantic_vad",
-            eagerness: process.env.OPENAI_REALTIME_VAD_EAGERNESS || "high",
+            type: "server_vad",
+            threshold: Number(process.env.PIPO_VAD_THRESHOLD || 0.38),
+            prefix_padding_ms: Number(process.env.PIPO_VAD_PREFIX_MS || 380),
+            silence_duration_ms: Number(process.env.PIPO_VAD_SILENCE_MS || 160),
             create_response: true,
             interrupt_response: true
           }
@@ -523,9 +528,9 @@ module.exports = function installCompanion(deps) {
       ttsVoice: process.env.PIPO_TTS_VOICE || "marin",
       ttsSpeed: Number(process.env.PIPO_TTS_SPEED || 0.98),
       realtimeReasoning: "minimal",
-      realtimeVad: "semantic_vad/high",
-      pipoBuild: "2A-polish-1",
-      transcriptionModel: process.env.OPENAI_TRANSCRIBE_MODEL || "gpt-4o-transcribe"
+      realtimeVad: "server_vad/0.38/160ms",
+      pipoBuild: "2A-latency-2",
+      transcriptionModel: process.env.OPENAI_TRANSCRIBE_MODEL || "gpt-live-transcribe"
     });
   });
 
