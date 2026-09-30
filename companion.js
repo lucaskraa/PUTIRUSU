@@ -794,8 +794,10 @@
     scheduleActivityPreAnalysis(context);
 
     if (companion.realtimeConnected) {
+      // Nunca injete contexto no meio de uma fala ou resposta.
+      if (!force && (companion.realtimeSpeechActive || companion.thinking || companion.speaking)) return;
       const now = Date.now();
-      if (!force && now - companion.lastContextSentAt < 800) return;
+      if (!force && now - companion.lastContextSentAt < 1200) return;
       companion.lastContextSentAt = now;
       sendGeminiClientContent("[APP_CONTEXT] " + fingerprint,false,"system");
     }
@@ -806,9 +808,18 @@
     companion.contextSyncTimer = setTimeout(() => syncRealtimeContext(false),260);
   }
 
+  function isPipoNode(node) {
+    const el = node && node.nodeType === 1 ? node : node && node.parentElement;
+    return Boolean(el && el.closest && (el.closest("#putirusuCompanion") || el.closest("#putiOnboarding")));
+  }
+
   function startContextObserver() {
     if (companion.contextObserver || !document.body || !window.MutationObserver) return;
-    companion.contextObserver = new MutationObserver(scheduleContextSync);
+    companion.contextObserver = new MutationObserver(mutations => {
+      if (!mutations || !mutations.length) return;
+      const externalChange = mutations.some(mutation => !isPipoNode(mutation.target));
+      if (externalChange) scheduleContextSync();
+    });
     companion.contextObserver.observe(document.body,{
       subtree:true,
       childList:true,
@@ -816,9 +827,15 @@
       attributes:true,
       attributeFilter:["class","value","disabled","data-mode"]
     });
-    document.addEventListener("input",scheduleContextSync,true);
-    document.addEventListener("change",scheduleContextSync,true);
-    document.addEventListener("click",scheduleContextSync,true);
+    document.addEventListener("input",event => {
+      if (!isPipoNode(event.target)) scheduleContextSync();
+    },true);
+    document.addEventListener("change",event => {
+      if (!isPipoNode(event.target)) scheduleContextSync();
+    },true);
+    document.addEventListener("click",event => {
+      if (!isPipoNode(event.target)) scheduleContextSync();
+    },true);
     syncRealtimeContext(true);
   }
 
@@ -878,6 +895,7 @@
     companion.realtimeCleanRetry = false;
     companion.thinking = false;
     if (!companion.speaking) setStatus("listening","ouvindo");
+    setTimeout(() => syncRealtimeContext(false),180);
   }
 
   function handleRealtimeEvent(event) {
@@ -902,6 +920,12 @@
 
     if (event.type === "conversation.item.input_audio_transcription.delta" && event.delta) {
       companion.realtimeInputTranscript = mergeTranscript(companion.realtimeInputTranscript,event.delta);
+      const heard = companion.realtimeInputTranscript.trim();
+      const heardBox = document.getElementById("putiHeard");
+      if (heardBox && heard) {
+        heardBox.textContent = "ouvindo: " + heard;
+        heardBox.classList.remove("hidden");
+      }
     }
     if (event.type === "conversation.item.input_audio_transcription.completed" && event.transcript) {
       companion.realtimeInputTranscript = String(event.transcript).trim();
