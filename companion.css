@@ -1284,3 +1284,86 @@
     animation: none !important;
   }
 }
+
+
+/* === PIPO V27 — SMALLER / SOFTER / CUTER === */
+.puti-companion-orb {
+  width: 70px;
+  height: 106px;
+}
+
+.puti-avatar-svg {
+  width: 70px;
+  height: 103px;
+  filter: drop-shadow(0 7px 9px rgba(23,35,48,.20));
+}
+
+/* Cabeça continua dominante, corpo visualmente mais compacto. */
+.pipo-body {
+  transform-box: view-box;
+  transform-origin: 48px 76px;
+}
+
+.pipo-torso {
+  stroke-width: 1.8;
+}
+
+.pipo-upper-arm,
+.pipo-forearm,
+.pipo-shin {
+  stroke-width: 1.4;
+}
+
+.pipo-hand,
+.pipo-foot,
+.pipo-joint,
+.pipo-hip {
+  stroke-width: 1.15;
+}
+
+/* Movimento menos duro e mais fofo. */
+@keyframes pipoRobotWalk {
+  from { transform: translateY(0) rotate(-1deg); }
+  to { transform: translateY(-3px) rotate(1deg); }
+}
+
+@keyframes pipoHeadAlive {
+  0%,78%,100% { transform: rotate(0deg) translateY(0); }
+  84% { transform: rotate(-2deg) translateY(-1px); }
+  91% { transform: rotate(1.6deg) translateY(-1px); }
+}
+
+.puti-companion[data-state="speaking"]:not(.is-travelling) .pipo-head {
+  animation-duration: .9s;
+}
+
+.puti-companion[data-state="listening"]:not(.is-travelling) .pipo-head {
+  animation-duration: 1.55s;
+}
+
+/* Olhos um pouco mais delicados. */
+.puti-eye {
+  filter: drop-shadow(0 0 3px rgba(79,215,255,.65));
+}
+
+.puti-companion[data-state="listening"] .puti-eye {
+  filter: drop-shadow(0 0 6px rgba(79,215,255,.85));
+}
+
+/* Linha de apontar acompanha o tamanho novo. */
+.puti-pointer {
+  left: 35px;
+  top: 63px;
+}
+
+@media (max-width: 640px) {
+  .puti-companion-orb {
+    width: 62px;
+    height: 94px;
+  }
+
+  .puti-avatar-svg {
+    width: 62px;
+    height: 91px;
+  }
+}
