@@ -707,6 +707,7 @@
     if (!companion.realtimeConnected || !text) return false;
     const payload =
       "[APP_CONTEXT] " + JSON.stringify(currentContext()) +
+      "\n[INSTRUCAO_DE_TURNO] Responda ao conteúdo real do que o aluno disse, mesmo que seja só uma palavra. Resolva referências como 'essa', 'isso' e 'aqui' pela tela atual." +
       "\n[FALA_USUARIO] " + String(text).slice(0,1200);
     return sendGeminiClientContent(payload, true);
   }
@@ -919,8 +920,16 @@
       companion.realtimeConnected = true;
       companion.realtimeConnecting = false;
       companion.realtimeFailures = 0;
-      setStatus("listening","ouvindo");
+      setStatus("listening","ao vivo");
       setMood("curious");
+
+      const recent = companion.history.slice(-12);
+      if (recent.length) {
+        sendGeminiClientContent(
+          "[RECENT_CONVERSATION] " + JSON.stringify(recent),
+          false
+        );
+      }
       syncRealtimeContext(true);
       return;
     }
