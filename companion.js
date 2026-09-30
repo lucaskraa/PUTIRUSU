@@ -446,8 +446,8 @@
 
     const opts = options || {};
     const margin = 14;
-    const avatarW = 72;
-    const avatarH = 110;
+    const avatarW = 64;
+    const avatarH = 98;
     const desiredLeft = rect.right + avatarW + 24 < innerWidth
       ? rect.right + 16
       : Math.max(margin, rect.left - avatarW - 18);
@@ -469,7 +469,7 @@
         target.classList.add("pipo-focus-target");
         const rootRect = root.getBoundingClientRect();
         const fromX = rootRect.left + rootRect.width * .5;
-        const fromY = rootRect.top + 64;
+        const fromY = rootRect.top + 58;
         const toX = desiredLeft > rect.right ? rect.right : rect.left;
         const toY = Math.min(rect.bottom - 12, Math.max(rect.top + 12, fromY));
         const dx = toX - fromX;
@@ -1341,41 +1341,18 @@
   async function speakCompanion(text) {
     if (!text) return;
     if (companion.profile && companion.profile.voiceEnabled === false) return;
+    if (companion.realtimeConnected) return;
 
-    // Quando o Realtime não está ativo, fale imediatamente com a voz local.
-    // Evita esperar rotas de TTS externas antes de responder.
-    if (!window.speechSynthesis) return;
-    stopRecognition(true);
-    speechSynthesis.cancel();
-    companion.speaking = true;
-    setStatus("speaking", "falando");
-
-    const segments = speechSegments(text);
-    let index = 0;
-
-    function next() {
-      if (index >= segments.length) {
-        companion.speaking = false;
-        setStatus("idle", companion.wantsListening ? "ouvindo" : "observando");
-        if (companion.wantsListening) scheduleRecognitionRestart(120);
-        return;
-      }
-
-      const item = segments[index++];
-      const utter = new SpeechSynthesisUtterance(item.text);
-      utter.lang = item.lang;
-      utter.volume = 1;
-      utter.rate = item.lang === "ru-RU" ? 0.95 : 0.99;
-      utter.pitch = item.lang === "ru-RU" ? 1.01 : 1.07;
-
-      const selected = voiceFor(item.lang);
-      if (selected) utter.voice = selected;
-      utter.onend = next;
-      utter.onerror = next;
-      speechSynthesis.speak(utter);
+    // Fora do Realtime, use somente a voz neural do servidor.
+    // Se ela falhar, o Pipo continua em texto em vez de cair na voz ruim do navegador.
+    if (companion.aiAvailable !== false) {
+      const neural = await speakNeuralFallback(text);
+      if (neural) return;
     }
 
-    next();
+    companion.speaking = false;
+    setStatus("idle", companion.wantsListening ? "ouvindo" : "observando");
+    if (companion.wantsListening) scheduleRecognitionRestart(120);
   }
 
   function waitForSpeechEnd() {
@@ -1401,6 +1378,7 @@
     const context = currentContext();
     const focus = context.focusText || "";
 
+    if (/^(pipo)(\s+pipo){0,5}[!. ]*$/.test(m)) return "Oi.";
     if (/^(oi|olá|ola|eae|e aí|ei|opa|salve|привет)[!. ]*$/.test(m)) {
       const lines = [
         "Oi.",
@@ -1458,14 +1436,39 @@
 
     const words = m.split(" ");
     const greetings = new Set(["oi","olá","ola","eae","ei","opa","salve","alô","alo"]);
-    if (words.length <= 5 && words.every(word => greetings.has(word))) return "Oi.";
-
+    if (words.length <= 6 && words.every(word => greetings.has(word))) return "Oi.";
+    if (/^(pipo)( pipo){0,5}$/.test(m)) return "Oi.";
+    if (/^(ei pipo|oi pipo|olá pipo|ola pipo|eae pipo|alô pipo|alo pipo)$/.test(m)) return "Oi.";
     if (/^(bora|vamos|vamo|vambora|bora estudar|vamos estudar)$/.test(m)) return "Bora.";
     if (/^(sim|aham|uhum|isso|isso mesmo|exato|beleza|blz|ok|okay)$/.test(m)) return "Tô acompanhando.";
     if (/^(tá me ouvindo|ta me ouvindo|me ouve|você me ouve|voce me ouve)$/.test(m)) return "Tô.";
     if (/^(não|nao|nada a ver|errado)$/.test(m)) return "Tá. Peguei errado.";
     if (/^(repete|repita|de novo)$/.test(m) && companion.lastAnswer) return companion.lastAnswer;
     return "";
+  }
+
+  function casualMessage(message) {
+    const m = String(message || "").trim();
+    if (!m) return true;
+    if (/[?]/.test(m) && m.split(/\s+/).length > 5) return false;
+    return m.split(/\s+/).length <= 6;
+  }
+
+  function enforceNaturalReply(message, answer) {
+    let value = String(answer || "").trim();
+    if (!value) return value;
+
+    value = value
+      .replace(/\b(câmbio|central|alto e claro|sinal de radar|código secreto|meus circuitos|milagre tecnológico)\b[^.!?]*[.!?]?/gi,"")
+      .replace(/\s{2,}/g," ")
+      .trim();
+
+    if (casualMessage(message) && value.length > 72) {
+      const first = value.split(/(?<=[.!?])\s+/)[0].trim();
+      if (first && first.length <= 72) value = first;
+      else value = localBrain(message);
+    }
+    return value || localBrain(message);
   }
 
   function brainContext() {
@@ -1497,7 +1500,7 @@
     const body = JSON.stringify({
       message:String(message).slice(0,1600),
       context:brainContext(),
-      history:companion.history.slice(-6)
+      history:companion.history.slice(-4)
     });
 
     if (authenticated) {
@@ -1545,7 +1548,7 @@
     try {
       const instant = instantConversationalReply(message);
       const data = instant ? { answer:instant, provider:"instant" } : await callBrain(message);
-      const answer = cleanCompanionSpeech(String(data && data.answer || "").trim() || localBrain(message));
+      const answer = cleanCompanionSpeech(enforceNaturalReply(message, String(data && data.answer || "").trim() || localBrain(message)));
 
       rememberTurn("user", message);
       rememberTurn("assistant", answer);
