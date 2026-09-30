@@ -1245,7 +1245,11 @@ module.exports = function installCompanion(deps) {
             },
             inputAudioTranscription:{
               languageCodes:[],
-              mode:"SMART"
+              mode:"SMART",
+              customVocabulary:[
+                "PP","PUTIRUSU","russo","cirílico","pronúncia",
+                "привет","спасибо","пожалуйста","до свидания"
+              ]
             },
             outputAudioTranscription:{},
             sessionResumption:{}
