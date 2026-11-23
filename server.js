@@ -20,7 +20,7 @@ app.use(cors({ origin: CORS_ORIGINS.length ? CORS_ORIGINS : true, credentials: t
 app.use(express.json({ limit: "8mb" }));
 app.use(express.urlencoded({ extended: true }));
 // Apenas arquivos explicitamente públicos. Nunca sirva data/db.json, SQL ou código do servidor.
-const PUBLIC_ASSETS = new Set(["index.html", "style.css", "script.js", "course-content.js", "course-content-v2.js", "companion.js", "companion.css"]);
+const PUBLIC_ASSETS = new Set(["index.html", "style.css", "script.js", "course-content.js", "course-content-v2.js", "companion.js", "companion.css", "pipo-pronunciation.js"]);
 app.get("/:asset", (req, res, next) => {
   if (!PUBLIC_ASSETS.has(req.params.asset)) return next();
   res.sendFile(path.join(ROOT, req.params.asset));
