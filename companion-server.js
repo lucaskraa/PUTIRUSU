@@ -485,6 +485,84 @@ module.exports = function installCompanion(deps) {
     }
   });
 
+  // Optional, actual acoustic evaluation. Disabled when Azure Speech credentials are absent.
+  // The audio is analyzed transiently and never stored by this route.
+  const pronunciationRate = new Map();
+  app.post("/api/ai/pronunciation", auth,
+    express.raw({ type: "audio/wav", limit: "1mb" }), async (req, res) => {
+    const key = process.env.AZURE_SPEECH_KEY;
+    const region = process.env.AZURE_SPEECH_REGION;
+    if (!key || !region) return res.status(503).json({ error: "Avaliação acústica não configurada no servidor." });
+    if (!/^[a-z0-9-]{2,40}$/i.test(region)) return res.status(503).json({ error: "Região do serviço de fala inválida." });
+    const target = String(req.query.target || "").trim().slice(0, 180);
+    if (!target || !/[А-Яа-яЁё]/.test(target)) return res.status(400).json({ error: "Informe uma frase russa válida." });
+    const audio = req.body;
+    if (!Buffer.isBuffer(audio) || audio.length < 32044 || audio.length > 1000000 ||
+        audio.toString("ascii", 0, 4) !== "RIFF" || audio.toString("ascii", 8, 12) !== "WAVE") {
+      return res.status(400).json({ error: "Grave pelo menos um segundo de áudio WAV." });
+    }
+    const now = Date.now();
+    const last = pronunciationRate.get(req.userId) || 0;
+    if (now - last < 4500) return res.status(429).json({ error: "Espere um instante antes de avaliar novamente." });
+    pronunciationRate.set(req.userId, now);
+    if (pronunciationRate.size > 5000) {
+      for (const [user, time] of pronunciationRate) if (now - time > 60000) pronunciationRate.delete(user);
+    }
+    const assessment = Buffer.from(JSON.stringify({
+      ReferenceText: target,
+      GradingSystem: "HundredMark",
+      Dimension: "Comprehensive",
+      Granularity: "Phoneme",
+      EnableMiscue: true
+    }), "utf8").toString("base64");
+    const url = "https://" + region + ".stt.speech.microsoft.com/speech/recognition/conversation/cognitiveservices/v1?language=ru-RU&format=detailed";
+    try {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 12000);
+      let result;
+      try {
+        result = await fetch(url, {
+          method: "POST",
+          headers: {
+            "Ocp-Apim-Subscription-Key": key,
+            "Content-Type": "audio/wav; codecs=audio/pcm; samplerate=16000",
+            "Pronunciation-Assessment": assessment,
+            "Accept": "application/json"
+          },
+          body: audio,
+          signal: controller.signal
+        });
+      } finally { clearTimeout(timeout); }
+      if (!result.ok) return res.status(502).json({ error: "Serviço de avaliação de pronúncia indisponível." });
+      const data = await result.json();
+      const best = Array.isArray(data.NBest) ? data.NBest[0] : null;
+      const grade = best && best.PronunciationAssessment;
+      if (!grade) return res.status(422).json({ error: "Não foi possível avaliar esta gravação. Fale mais perto do microfone." });
+      const scores = {
+        accuracy: Number.isFinite(grade.AccuracyScore) ? grade.AccuracyScore : null,
+        fluency: Number.isFinite(grade.FluencyScore) ? grade.FluencyScore : null,
+        completeness: Number.isFinite(grade.CompletenessScore) ? grade.CompletenessScore : null,
+        pronunciation: Number.isFinite(grade.PronScore) ? grade.PronScore : null
+      };
+      const words = (Array.isArray(best.Words) ? best.Words : []).slice(0, 25).map(w => ({
+        word: String(w.Word || "").slice(0, 60),
+        accuracy: w.PronunciationAssessment && Number.isFinite(w.PronunciationAssessment.AccuracyScore)
+          ? w.PronunciationAssessment.AccuracyScore : null,
+        errorType: String(w.PronunciationAssessment && w.PronunciationAssessment.ErrorType || "None").slice(0, 32),
+        phonemes: (Array.isArray(w.Phonemes) ? w.Phonemes : []).slice(0, 12).map(p => ({
+          sound: String(p.Phoneme || "").slice(0, 24),
+          accuracy: p.PronunciationAssessment && Number.isFinite(p.PronunciationAssessment.AccuracyScore)
+            ? p.PronunciationAssessment.AccuracyScore : null
+        }))
+      }));
+      return res.json({ target, recognized: String(data.DisplayText || best.Display || ""), scores, words,
+        note: "Pontuações automáticas acústicas são estimativas; não comprovam sotaque nativo." });
+    } catch (error) {
+      console.error("Falha ao avaliar pronúncia:", error.message);
+      return res.status(502).json({ error: "Não foi possível avaliar agora. Tente novamente." });
+    }
+  });
+
   app.get("/api/ai/health", (req, res) => {
     res.json({
       ok: true,
