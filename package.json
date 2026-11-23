@@ -8,8 +8,8 @@
   "scripts": {
     "start": "node server.js",
     "dev": "nodemon server.js",
-    "check": "node --check server.js && node --check script.js",
-    "test": "npm run check"
+    "check": "node --check server.js && node --check script.js && node --check companion.js && node --check companion-server.js && node --check pipo-pronunciation.js",
+    "test": "npm run check && node --test tests/*.test.js"
   },
   "engines": {
     "node": ">=18"
