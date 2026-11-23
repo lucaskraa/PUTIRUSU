@@ -46,7 +46,7 @@ Esta funcionalidade não funciona sem credenciais Azure configuradas. O modelo d
 - A análise contextual acompanha o estado da aula, não a webcam nem o conteúdo visual externo.
 - O modo TTS separado, quando o Realtime falha, ainda espera pelo arquivo de áudio completo e pode ser mais lento.
 - O backend JSON e as rotas de autenticação preexistentes ainda precisam de revisão antes de colocar muitos alunos em produção.
-- Na hospedagem, frontend e API devem compartilhar a mesma origem ou você deve implementar configuração explícita e segura da origem da API.
+- Na hospedagem Render e no desenvolvimento local, Pipo usa a API na mesma origem. No GitHub Pages, preserva o backend existente `https://putirusu-dev.onrender.com/api`. Se publicar em outro frontend estático, configure a integração com backend antes de testar.
 
 ## Testar
 
