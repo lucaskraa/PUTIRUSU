@@ -48,6 +48,9 @@
     realtimeMetricsReported: false,
     realtimeInputTranscript: "",
     realtimeConnected: false,
+    realtimeLastAudioAt: 0,
+    recognitionLastFinal: "",
+    recognitionLastFinalAt: 0,
     realtimeConnecting: false,
     realtimeReply: "",
     realtimeCleanRetry: false,
@@ -71,7 +74,7 @@
 
   state.companion = companion;
 
-  const PUTIRUSU_REMOTE_API = "https://putirusu-dev.onrender.com/api";
+  const PUTIRUSU_REMOTE_API = (typeof API === "string" ? API : "/api");
 
   function rememberTurn(role, text) {
     const value = String(text || "").trim();
@@ -103,9 +106,8 @@
     const token = state.token && state.token !== "local-demo" ? state.token : "";
     if (token) opts.headers.Authorization = "Bearer " + token;
 
-    const localUrl = (typeof API === "string" ? API : "/api") + path;
-    const onRender = String(location.origin || "").includes("putirusu-dev.onrender.com");
-    const candidates = [onRender ? localUrl : PUTIRUSU_REMOTE_API + path];
+    // Never send a student token or microphone session to a hard-coded alternate host.
+    const candidates = [PUTIRUSU_REMOTE_API + path];
 
     let lastError = null;
     for (const url of candidates) {
@@ -676,7 +678,7 @@
       type:"conversation.item.create",
       item:{
         type:"message",
-        role:role === "system" ? "system" : "user",
+        role:"user",
         content:[{ type:"input_text", text:value }]
       }
     });
@@ -723,13 +725,10 @@
     presenceReact(type,details || {});
     maybeReactAutonomously(type,details || {});
     if (!companion.realtimeConnected) return;
-    sendGeminiClientContent("[APP_EVENT] " + JSON.stringify(companion.lastAppEvent), false, "system");
+    scheduleContextSync();
   }
 
-  function pushRealtimeContext() {
-    if (!companion.realtimeConnected) return;
-    sendGeminiClientContent("[APP_CONTEXT] " + JSON.stringify(currentContext()), false, "system");
-  }
+  function pushRealtimeContext() { syncRealtimeContext(true); }
 
   function activityKey(context) {
     if (!context || !context.activity) return "";
@@ -788,7 +787,19 @@
 
   function syncRealtimeContext(force) {
     const context = currentContext();
-    const fingerprint = JSON.stringify(context);
+    const slim = {
+      screen:context.screen, courseId:context.courseId, level:context.level,
+      lessonTitle:context.lessonTitle, stepIndex:context.stepIndex,
+      activity:context.activity ? {
+        type:context.activity.type, prompt:context.activity.prompt,
+        target:context.activity.target, translation:context.activity.translation,
+        explain:context.activity.explain
+      } : null,
+      focusText:context.focusText,
+      feedback:context.feedback || context.pronunciationFeedback,
+      lastEvent:context.lastEvent
+    };
+    const fingerprint = JSON.stringify(slim);
     if (!force && fingerprint === companion.contextFingerprint) return;
     companion.contextFingerprint = fingerprint;
     scheduleActivityPreAnalysis(context);
@@ -797,7 +808,7 @@
       // Nunca injete contexto no meio de uma fala ou resposta.
       if (!force && (companion.realtimeSpeechActive || companion.thinking || companion.speaking)) return;
       const now = Date.now();
-      if (!force && now - companion.lastContextSentAt < 1200) return;
+      if (!force && now - companion.lastContextSentAt < 2500) return;
       companion.lastContextSentAt = now;
       sendGeminiClientContent("[APP_CONTEXT] " + fingerprint,false,"system");
     }
@@ -805,7 +816,7 @@
 
   function scheduleContextSync() {
     if (companion.contextSyncTimer) clearTimeout(companion.contextSyncTimer);
-    companion.contextSyncTimer = setTimeout(() => syncRealtimeContext(false),260);
+    companion.contextSyncTimer = setTimeout(() => syncRealtimeContext(false),450);
   }
 
   function isPipoNode(node) {
@@ -936,12 +947,16 @@
       }
     }
 
-    if (event.type === "response.output_audio.delta") {
+    if (event.type === "response.output_audio.delta" || event.type === "response.audio.delta") {
+      if (!companion.realtimeLastAudioAt) {
+        companion.realtimeLastAudioAt = performance.now();
+        if (companion.realtimeSpeechStoppedAt) console.debug("[Pipo] first network audio event " + Math.round(companion.realtimeLastAudioAt - companion.realtimeSpeechStoppedAt) + "ms");
+      }
       companion.speaking = true;
       companion.thinking = false;
       setStatus("speaking","falando");
     }
-    if (event.type === "response.output_audio.done") {
+    if (event.type === "response.output_audio.done" || event.type === "response.audio.done") {
       companion.speaking = false;
     }
 
@@ -966,6 +981,7 @@
 
     if (event.type === "response.created") {
       companion.realtimeResponseCreatedAt = performance.now();
+      companion.realtimeLastAudioAt = 0;
       companion.thinking = true;
       setStatus("thinking","já respondo");
     }
@@ -1062,7 +1078,7 @@
 
       await new Promise((resolve,reject) => {
         if (dc.readyState === "open") return resolve();
-        const timer = setTimeout(() => reject(new Error("Pipo Realtime demorou para conectar.")),4500);
+        const timer = setTimeout(() => reject(new Error("Pipo Realtime demorou para conectar.")),10000);
         dc.onopen = () => { clearTimeout(timer); resolve(); };
         dc.onerror = () => { clearTimeout(timer); reject(new Error("Falha no canal Realtime do Pipo.")); };
       });
@@ -1076,8 +1092,7 @@
       setStatus("listening","ao vivo");
       syncRealtimeContext(true);
 
-      const recent = companion.history.slice(-10);
-      if (recent.length) sendGeminiClientContent("[RECENT_CONVERSATION] " + JSON.stringify(recent),false,"system");
+      // Avoid replaying history as new turns when the live session connects.
       return true;
     } catch (error) {
       console.warn("Pipo Realtime indisponível:",error.message);
@@ -1090,8 +1105,7 @@
   }
 
   function recognitionLanguage() {
-    const context = currentContext();
-    if (context.stepType === "speak" || context.screen === "speaking") return "ru-RU";
+    // In-browser fallback uses PT-BR for conversation; lesson microphones use RU-RU.
     return "pt-BR";
   }
 
@@ -1140,6 +1154,7 @@
     const rec = new Recognition();
     companion.recognition = rec;
     rec.lang = recognitionLanguage();
+    // Fallback browser ASR cannot guarantee code-switch recognition; Realtime is preferred.
     rec.continuous = false;
     rec.interimResults = true;
     rec.maxAlternatives = 3;
@@ -1157,7 +1172,7 @@
       lastInterimCandidate = value;
       const lastWord = value.toLowerCase().split(/\s+/).pop();
       const unfinished = new Set(["e","mas","que","porque","tipo","pra","para","com","de","do","da","um","uma","então","entao"]);
-      const delay = unfinished.has(lastWord) ? 720 : 360;
+      const delay = unfinished.has(lastWord) ? 1150 : 780;
       interimCommitTimer = setTimeout(() => {
         if (!lastInterimCandidate || companion.speaking || companion.thinking || companion.recognition !== rec) return;
         const heard = lastInterimCandidate;
@@ -1184,6 +1199,9 @@
         if (event.results[i].isFinal) {
           clearInterimCommit();
           lastInterimCandidate = "";
+          if (text === companion.recognitionLastFinal && Date.now() - companion.recognitionLastFinalAt < 1600) continue;
+          companion.recognitionLastFinal = text;
+          companion.recognitionLastFinalAt = Date.now();
           handleHeard(text);
         } else {
           interim += (interim ? " " : "") + text;
@@ -1221,7 +1239,7 @@
       clearInterimCommit();
       companion.listening = false;
       companion.recognition = null;
-      if (companion.wantsListening) scheduleRecognitionRestart(90);
+      if (companion.wantsListening) scheduleRecognitionRestart(220);
     };
 
     try {
@@ -1489,12 +1507,12 @@
 
     value = value.replace(/\s{2,}/g," ").trim();
 
-    if (casualMessage(message) && value.length > 72) {
+    if (casualMessage(message) && value.length > 220) {
       const instant = instantConversationalReply(message);
       if (instant) return instant;
       const first = value.split(/(?<=[.!?])\s+/)[0].trim();
-      if (first && first.length <= 72) return first;
-      return localBrain(message);
+      if (first && first.length <= 180) return first;
+      return value;
     }
     return value || localBrain(message);
   }
