@@ -9,7 +9,7 @@ module.exports = function installCompanion(deps) {
 
   const ALLOWED_EVENTS = new Set([
     "screen_view","lesson_open","lesson_step","lesson_answer","lesson_mistake",
-    "lesson_complete","writing_score","copy_answer","exam_complete","review_result","voice_query"
+    "lesson_complete","writing_score","copy_answer","exam_complete","review_result","voice_query","pronunciation_assessment"
   ]);
 
   const guestRate = new Map();
@@ -327,7 +327,7 @@ module.exports = function installCompanion(deps) {
             type: process.env.OPENAI_REALTIME_NOISE_REDUCTION === "far_field" ? "far_field" : "near_field"
           },
           transcription: {
-            model: process.env.OPENAI_TRANSCRIBE_MODEL || "gpt-4o-transcribe",
+            model: process.env.OPENAI_TRANSCRIBE_MODEL || "gpt-live-transcribe",
             prompt: "Conversa em português brasileiro informal e russo, às vezes misturados. Preserve letras cirílicas e o que foi realmente dito, sem traduzir. Nomes: Pipo, PUTIRUSU."
           },
           turn_detection: turnDetection
@@ -578,7 +578,7 @@ module.exports = function installCompanion(deps) {
       realtimeReasoning: "model-managed",
       realtimeVad: process.env.PIPO_VAD_MODE === "server" ? "server_vad/550ms" : "semantic_vad/auto",
       pipoBuild: "3A-bilingual-realtime",
-      transcriptionModel: process.env.OPENAI_TRANSCRIBE_MODEL || "gpt-4o-transcribe"
+      transcriptionModel: process.env.OPENAI_TRANSCRIBE_MODEL || "gpt-live-transcribe"
     });
   });
 
