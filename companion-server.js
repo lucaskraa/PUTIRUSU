@@ -333,7 +333,7 @@ module.exports = function installCompanion(deps) {
           turn_detection: turnDetection
         },
         output: {
-          voice: process.env.PIPO_REALTIME_VOICE || "marin",
+          voice: process.env.PIPO_REALTIME_VOICE || "cedar",
           speed: Math.min(1.2, Math.max(0.8, Number(process.env.PIPO_REALTIME_SPEED || 1)))
         }
       },
@@ -447,7 +447,7 @@ module.exports = function installCompanion(deps) {
       },
       body: JSON.stringify({
         model: process.env.OPENAI_TTS_MODEL || "gpt-4o-mini-tts",
-        voice: process.env.PIPO_TTS_VOICE || "marin",
+        voice: process.env.PIPO_TTS_VOICE || "cedar",
         input,
         instructions: pipoTtsInstructions(input),
         response_format: "mp3",
@@ -569,11 +569,11 @@ module.exports = function installCompanion(deps) {
       openaiConfigured: Boolean(process.env.OPENAI_API_KEY),
       responseModel: process.env.OPENAI_MODEL || "gpt-4.1-mini",
       realtimeModel: process.env.OPENAI_REALTIME_MODEL || "gpt-realtime-2.1",
-      realtimeVoice: process.env.PIPO_REALTIME_VOICE || "marin",
+      realtimeVoice: process.env.PIPO_REALTIME_VOICE || "cedar",
       realtimeSpeed: Number(process.env.PIPO_REALTIME_SPEED || 0.98),
       pronunciationConfigured: Boolean(process.env.AZURE_SPEECH_KEY && process.env.AZURE_SPEECH_REGION),
       ttsModel: process.env.OPENAI_TTS_MODEL || "gpt-4o-mini-tts",
-      ttsVoice: process.env.PIPO_TTS_VOICE || "marin",
+      ttsVoice: process.env.PIPO_TTS_VOICE || "cedar",
       ttsSpeed: Number(process.env.PIPO_TTS_SPEED || 0.98),
       realtimeReasoning: "model-managed",
       realtimeVad: process.env.PIPO_VAD_MODE === "server" ? "server_vad/550ms" : "semantic_vad/auto",
