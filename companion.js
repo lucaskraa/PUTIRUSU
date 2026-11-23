@@ -1971,6 +1971,13 @@
     if (companion.initialized) return;
     companion.initialized = true;
     restoreRecentConversation();
+    window.addEventListener("putirusu-pronunciation", event => {
+      const d = event && event.detail || {};
+      const details = { target:d.target || "", recognized:d.recognized || "", scores:d.scores || {}, weakWords:d.weakWords || [] };
+      companion.lastAppEvent = { type:"pronunciation_assessment", details, at:new Date().toISOString() };
+      track("pronunciation_assessment",details);
+      scheduleContextSync();
+    });
     createUi();
     installHooks();
     startContextObserver();
