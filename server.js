@@ -12,12 +12,19 @@ const PORT = Number(process.env.PORT || 3000);
 const ROOT = __dirname;
 const DATA_DIR = path.join(ROOT, "data");
 const DATA_FILE = path.join(DATA_DIR, "db.json");
-const TOKEN_SECRET = process.env.TOKEN_SECRET || "putirusu-local-secret-change-me";
+const TOKEN_SECRET = process.env.TOKEN_SECRET || crypto.randomBytes(32).toString("hex");
+if (!process.env.TOKEN_SECRET) console.warn("Defina TOKEN_SECRET em produção: sessões serão inválidas após reiniciar sem segredo fixo.");
 
-app.use(cors({ origin: true, credentials: true }));
+const CORS_ORIGINS = (process.env.CORS_ORIGINS || "").split(",").map(x => x.trim()).filter(Boolean);
+app.use(cors({ origin: CORS_ORIGINS.length ? CORS_ORIGINS : true, credentials: true }));
 app.use(express.json({ limit: "8mb" }));
 app.use(express.urlencoded({ extended: true }));
-app.use(express.static(ROOT, { extensions: ["html"] }));
+// Apenas arquivos explicitamente públicos. Nunca sirva data/db.json, SQL ou código do servidor.
+const PUBLIC_ASSETS = new Set(["index.html", "style.css", "script.js", "course-content.js", "course-content-v2.js", "companion.js", "companion.css"]);
+app.get("/:asset", (req, res, next) => {
+  if (!PUBLIC_ASSETS.has(req.params.asset)) return next();
+  res.sendFile(path.join(ROOT, req.params.asset));
+});
 
 function defaultDatabase() {
   const passwordHash = bcrypt.hashSync("123456", 10);
