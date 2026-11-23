@@ -74,7 +74,11 @@
 
   state.companion = companion;
 
-  const PUTIRUSU_REMOTE_API = (typeof API === "string" ? API : "/api");
+  // GitHub Pages is static: keep the project's existing Render API there.
+  // Local development and Render deployments use their own same-origin API.
+  const PUTIRUSU_REMOTE_API = /(?:^|\\.)github\\.io$/.test(location.hostname)
+    ? "https://putirusu-dev.onrender.com/api"
+    : (typeof API === "string" ? API : "/api");
 
   function rememberTurn(role, text) {
     const value = String(text || "").trim();
