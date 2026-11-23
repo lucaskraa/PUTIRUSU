@@ -101,6 +101,7 @@ app.get("/api/content/writing",(req,res)=>{const letter=String(req.query.letter|
 app.get("/api/content/random",(req,res)=>res.json(PUTIRUSU_WRITING_CURRICULUM[Math.floor(Math.random()*PUTIRUSU_WRITING_CURRICULUM.length)]));
 app.get("/api/export",auth,(req,res)=>{const db=readDatabase();const user=db.users.find(u=>u.id===req.userId);res.json({user:safeUser(user),progress:findProgress(db,req.userId),writingAttempts:db.writingAttempts.filter(a=>a.userId===req.userId),examResults:db.examResults.filter(a=>a.userId===req.userId),reviewEvents:db.reviewEvents.filter(a=>a.userId===req.userId),exportedAt:new Date().toISOString()});});
 app.use("/api",(req,res)=>res.status(404).json({error:"Rota da API não encontrada."}));
+app.get(/^\/(?:data(?:\/|$)|server\.js$|companion-server\.js$|database\.sql$|package\.json$|README\.md$|LICENSE$|\.env(?:\.|$))/, (req,res) => res.status(404).end());
 app.get("*",(req,res)=>res.sendFile(path.join(ROOT,"index.html")));
 app.use((error,req,res,next)=>{console.error(error);res.status(500).json({error:"Erro interno do servidor."});});
 if(require.main===module){ensureDatabase();app.listen(PORT,()=>console.log(`PUTIRUSU 16 rodando em http://localhost:${PORT}`));}
